@@ -832,6 +832,61 @@ static void emit_tld4s(Ctx *c, uint64_t w) {
     write_tex_result(c, slot, call, d1 == RZ ? 3u : 15u, d0, d1, true, f16);
 }
 
+// TLD4 (gather; per Ryujinx's EmitTld4): Ra = [array index], coordinates; Rb = [offsets: one (.AOFFI) or two
+// (.PTP: four texels, 6-bit signed x / y at bits 0 / 8, 16 / 24)], [depth reference]. The WMask components go to
+// consecutive registers from Rd. GLSL gather offsets must be constant: the coordinates move instead, and .PTP takes
+// one gather per texel (component i of textureGatherOffsets comes from offset i).
+static const char *tld4_next(Ctx *c, int *r, char *buf) {
+    const char *s = reg(c, *r, buf);
+    if (*r != RZ) (*r)++;
+    return s;
+}
+
+static void emit_tld4(Ctx *c, uint64_t w) {
+    int d = (int)bits(w, 0, 8), ra = (int)bits(w, 8, 8), rb = (int)bits(w, 20, 8);
+    uint32_t index = (uint32_t)bits(w, 36, 13), mask = (uint32_t)bits(w, 31, 4);
+    int dim = (int)bits(w, 28, 3), comp = (int)bits(w, 56, 2), toff = (int)bits(w, 54, 2);
+    bool dc = bits(w, 50, 1);
+    static const int types[8] = {-1, -1, TEXTYPE_2D, TEXTYPE_2D_ARRAY, -1, -1, TEXTYPE_CUBE, TEXTYPE_CUBE_ARRAY};
+    if (!c->glsl) { fail(c, "tld4 (msl)"); return; }
+    if (types[dim] < 0 || toff == 3) { fail(c, "tld4 dim %d offset %d", dim, toff); return; }
+    if (d == RZ) return;
+    bool array = dim & 1, cube = dim >= 6;
+    if (cube && toff) { fail(c, "tld4 cube with offsets"); return; }
+    int slot = tex_slot(c, index, types[dim], dc, array);
+    if (c->fail) return;
+    char b[8][16], lay[128] = "", co[3][48], dref[48] = "", off[2][24];
+    if (array) snprintf(lay, sizeof lay, "float(min(%s, uint(tsize%d(0).z) - 1u))", tld4_next(c, &ra, b[0]), slot);
+    for (int i = 0; i < (cube ? 3 : 2); i++) snprintf(co[i], sizeof co[i], "as_type<float>(%s)", tld4_next(c, &ra, b[1 + i]));
+    for (int i = 0; i < (toff == 2 ? 2 : toff == 1 ? 1 : 0); i++) snprintf(off[i], sizeof off[i], "int(%s)", tld4_next(c, &rb, b[4 + i]));
+    if (dc) snprintf(dref, sizeof dref, "as_type<float>(%s)", tld4_next(c, &rb, b[6]));
+    char gather[8][700];
+    int ngather = toff == 2 ? 4 : 1;
+    for (int k = 0; k < ngather; k++) {
+        char xy[400], P[600];
+        if (toff) {  // offset k: register k / 4's byte pair (k & 3) * 8 ... (x at bit 0 / 16, y at 8 / 24 of its register)
+            const char *o = off[toff == 2 ? (k * 2) / 4 : 0];
+            int bx = toff == 2 ? ((k * 2) & 3) * 8 : 0;
+            snprintf(xy, sizeof xy, "(vec2(%s, %s) + vec2(bitfieldExtract(%s, %d, 6), bitfieldExtract(%s, %d, 6)) / vec2(tsize%d(0).xy))",
+                     co[0], co[1], o, bx, o, bx + 8, slot);
+        } else {
+            snprintf(xy, sizeof xy, "vec2(%s, %s)", co[0], co[1]);
+        }
+        if (cube && array) snprintf(P, sizeof P, "vec4(%s, %s, %s, %s)", co[0], co[1], co[2], lay);
+        else if (cube) snprintf(P, sizeof P, "vec3(%s, %s, %s)", co[0], co[1], co[2]);
+        else if (array) snprintf(P, sizeof P, "vec3(%s, %s)", xy, lay);
+        else snprintf(P, sizeof P, "%s", xy);
+        if (dc) snprintf(gather[k], sizeof gather[k], "textureGather(t%d, %s, %s)", slot, P, dref);
+        else snprintf(gather[k], sizeof gather[k], "textureGather(t%d, %s, %d)", slot, P, comp);
+    }
+    char call[4096];
+    if (ngather == 4)
+        snprintf(call, sizeof call, "vec4((%s).x, (%s).y, (%s).z, (%s).w)", gather[0], gather[1], gather[2], gather[3]);
+    else
+        snprintf(call, sizeof call, "%s", gather[0]);
+    write_tex_result(c, slot, call, mask, d, RZ, false, false);
+}
+
 // TMML (LOD query; per Ryujinx's EmitTmml): coordinates from Ra (the array index first), results in 8.8 fixed point,
 // x = the LOD the hardware would use, y = the mip level; z / w read 0.
 static void emit_tmml(Ctx *c, uint64_t w) {
@@ -1098,6 +1153,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         emit_tex(c, w, true);
     } else if (OPM(0xdf00000000000000ull, 0xffc0000000000000ull) || OPM(0xdf80000000000000ull, 0xffc0000000000000ull)) {
         emit_tld4s(c, w);  // TLD4S (.F16: 0xdf8)
+    } else if (OPM(0xc800000000000000ull, 0xfc00000000000000ull)) {  // TLD4 (110010: per Ryujinx's InstTable)
+        emit_tld4(c, w);
     } else if (OPM(0xdf58000000000000ull, 0xfff8000000000000ull)) {  // TMML
         emit_tmml(c, w);
     } else if (OPM(0x3a00000000000000ull, 0xfe00000000000000ull)) {  // VMNMX
