@@ -661,9 +661,19 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, in
     g_kbd = 1;
     // (test) LARECOMP_KBD_AUTO=<text>: answer at once
     if (getenv("LARECOMP_KBD_AUTO")) { snprintf(g_kbd_text, sizeof g_kbd_text, "%s", getenv("LARECOMP_KBD_AUTO")); g_kbd = 2; }
+    // Re-present only while the game itself doesn't: a game with its own render thread (Pokémon Z-A) keeps presenting
+    // (its menu_render draws this dialog), and two threads in the backend at once break it (ImGui, Vulkan)
+    extern uint64_t renderer_present_count(void);
+    uint64_t seen = renderer_present_count(), quiet_since = SDL_GetTicks();
     while (g_kbd.load() == 1 && !g_rt_unwind) {  // ~60 Hz (a reboot cancels)
         uint64_t t0 = SDL_GetTicks();
-        backend_represent();
+        if (renderer_present_count() != seen) {
+            seen = renderer_present_count();
+            quiet_since = t0;
+        } else if (t0 - quiet_since >= 250) {
+            backend_represent();
+            seen = renderer_present_count();
+        }
         uint64_t dt = SDL_GetTicks() - t0;
         if (dt < 16) SDL_Delay((uint32_t)(16 - dt));
     }

@@ -98,6 +98,7 @@ typedef struct {
     uint64_t callback, callback_data;
     bool recording;
     uint64_t guest;  // the guest NVNcommandBuffer*
+    uint64_t owner;  // in a host overflow chunk (cmdbuf.c): the guest chunk whose list jumped there, else 0
 } NvnCmdBuf;
 
 // One recorded command: header, the call's integer and float arguments, then copied data.

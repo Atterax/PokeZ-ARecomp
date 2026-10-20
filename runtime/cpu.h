@@ -1,5 +1,6 @@
 // Guest CPU state and helpers used by recompiled code.
 #pragma once
+#include <setjmp.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -32,6 +33,10 @@ typedef void (*GuestFn)(Cpu *);
 
 // ---- runtime services (runtime/*.c)
 void rt_dispatch(Cpu *c);                 // call function at c->pc
+// Guest setjmp / longjmp (runtime/dispatch.c): at a call of the guest's setjmp the recompiled caller takes a host
+// setjmp too; the guest longjmp's final `br x30` to that return address (with that sp) lands back there.
+typedef struct RtJmp { jmp_buf host; uint64_t buf, ret, sp; } RtJmp;
+RtJmp *rt_setjmp_site(Cpu *c, uint64_t ret);
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc);
 void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) __attribute__((noreturn));
 void rt_udf(Cpu *c, uint64_t pc) __attribute__((noreturn));
@@ -89,8 +94,10 @@ void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0);
     static inline uint64_t lda##N(uint64_t a) {                                            \
         return __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_ACQUIRE);                       \
     }                                                                                      \
+    /* STLR is RCsc: a later LDAR can't pass it (seq_cst: XCHG on x86, where a release */ \
+    /* store and an acquire load may swap - lost wakeups in Pokémon Z-A's job system) */  \
     static inline void stl##N(uint64_t a, uint64_t v) {                                    \
-        __atomic_store_n((T *)(uintptr_t)a, (T)v, __ATOMIC_RELEASE);                       \
+        __atomic_store_n((T *)(uintptr_t)a, (T)v, __ATOMIC_SEQ_CST);                       \
     }
 EXCL(8, uint8_t)
 EXCL(16, uint16_t)

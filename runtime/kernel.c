@@ -395,12 +395,14 @@ static uint32_t svc_arbitrate_unlock(uint64_t addr) {
 static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t tag, int64_t timeout) {
     pthread_mutex_lock(&g_klock);
     KThread *t = t_cur;
+    // The key first, then the mutex (as the kernel does): nn::os Signal / Broadcast skip the svc while the key is 0,
+    // and once the mutex is free another core can take it, change the state and signal before we sleep
+    __atomic_store_n(u32p(key), 1, __ATOMIC_SEQ_CST);
     mutex_release(mutex);
     t->wait_kind = WAIT_CONDVAR;
     t->wait_addr = key;
     t->wait_mutex = mutex;
     t->wait_tag = tag;
-    __atomic_store_n(u32p(key), 1, __ATOMIC_SEQ_CST);
     uint32_t r = block_current(timeout);
     if (r != R_OK && t->wait_addr == mutex) {
         // signaled (moved to the mutex's waiters) before the timeout: the kernel hands it the mutex as usual
@@ -536,6 +538,7 @@ static uint32_t svc_wait_synchronization(uint64_t handles_ptr, int32_t count, in
         if (g_rt_unwind) { r = R_CANCELLED; goto out; }
         if (timeout == 0) { r = R_TIMEOUT; goto out; }
         t->in_sync_wait = true;
+        t->sync_hs = hs, t->sync_n = count;
         t->snext = g_syncwaiters;
         g_syncwaiters = t;
         bool ok = kwait(timeout < 0 ? -1 : timeout, &ts);
@@ -921,8 +924,16 @@ static void *wait_dump_main(void *arg) {
                 (unsigned long long)a, a ? LD32(a) : 0, (unsigned long long)t->wait_mutex,
                 t->wait_mutex ? LD32(t->wait_mutex) : 0, t->wait_tag, (unsigned long long)t->cpu.pc,
                 (unsigned long long)t->cpu.x[30]);
+            if (t->in_sync_wait) {
+                char hl[128] = "";
+                for (int i = 0, n = 0; i < t->sync_n && i < 16; i++)
+                    n += snprintf(hl + n, sizeof hl - n, " %x", t->sync_hs[i]);
+                LOG("[wait]     handles%s\n", hl);
+            }
         }
         pthread_mutex_unlock(&g_klock);
+        extern void audio_wait_dump(void);
+        audio_wait_dump();
     }
     return NULL;
 }

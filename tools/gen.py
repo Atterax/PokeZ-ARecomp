@@ -50,6 +50,27 @@ class Module:
         self.cache = {}
         self.stats = Counter()
         self.mu = None
+        self.setjmp_stubs = self._import_stubs({'setjmp', '_setjmp'})
+
+    def _import_stubs(self, names):
+        """PLT stubs (adrp x16; ldr x17, [x16, #o]; add x16, x16, #o; br x17) whose GOT slot imports one of names."""
+        n = self.nso
+        slot = {self.base + off: n.syms[sym][0] for off, typ, sym, add in n.relocs
+                if typ == 1026 and sym < len(n.syms) and n.syms[sym][0] in names}  # R_AARCH64_JUMP_SLOT
+        stubs = set()
+        if not slot:
+            return stubs
+        w = self.words
+        for i in range(len(w) - 3):
+            if (w[i] & 0x9F00001F) == 0x90000010 and (w[i + 1] & 0xFFC003FF) == 0xF9400211 and w[i + 3] == 0xD61F0220:
+                pc = self.lo + i * 4
+                imm = ((w[i] >> 5) & 0x7FFFF) << 2 | ((w[i] >> 29) & 3)
+                if imm & (1 << 20):
+                    imm -= 1 << 21
+                got = (pc & ~0xFFF) + (imm << 12) + ((w[i + 1] >> 10) & 0xFFF) * 8
+                if got in slot:
+                    stubs.add(pc)
+        return stubs
 
     def in_text(self, a):
         return self.lo <= a < self.hi and a % 4 == 0
@@ -100,7 +121,33 @@ class Module:
         r = self._jump_table_fallthrough(br_pc, entry, end)
         if r is None:
             r = self._jump_table_taken(br_pc, entry, end)
+        if r is None:
+            r = self._jump_table_masked(br_pc, entry, end)
         return r
+
+    def _jump_table_masked(self, br_pc, entry, end):
+        """Form: and wIdx, wX, #(2^k - 1) ; <table lookup> ; add xN, xBase, xOff, lsl #2 ; br xN
+        (no bounds check: the mask bounds the index; FP code may be scheduled in between)"""
+        rn = bits(self.word(br_pc), 5, 5)
+        a = br_pc - 4
+        add = mask = None
+        while a >= entry and br_pc - a <= 4 * 40:
+            w = self.word(a)
+            if self.lift(a).kind not in ('op', 'asm'):
+                return None
+            if add is None and (w & 0x7F200000) == 0x0B000000 and (w & 31) == rn:  # ADD/SUB (shifted reg)
+                add = a
+            elif add is not None and (w & 0x7F800000) == 0x12000000 and bits(w, 29, 2) == 0:  # AND (imm)
+                sf, n, immr, imms = bits(w, 31, 1), bits(w, 22, 1), bits(w, 16, 6), bits(w, 10, 6)
+                # a low mask of k ones: N == sf, immr == 0, imms == k - 1 (k <= 8, at most 256 cases)
+                if n == sf and immr == 0 and imms < 8 and (sf or not imms & 0x20):
+                    mask = a
+                    break
+            a -= 4
+        if add is None or mask is None:
+            return None
+        w = self.word(mask)
+        return self._emulate_table(br_pc, entry, end, mask + 4, w & 31, 1 << (bits(w, 10, 6) + 1), mask + 4)
 
     def _index_regs(self, start, at, idx):
         """The index register plus registers holding the same value in start..at: sources it was
@@ -310,6 +357,9 @@ class Module:
             elif ins.kind == 'bl':
                 if self.in_text(ins.target):
                     ext.add(ins.target)
+                if ins.target in self.setjmp_stubs and a + 4 < end:
+                    labels.add(a + 4)  # a guest longjmp comes back here (rt_setjmp_site)
+                    self.stats['setjmp_sites'] += 1
             elif ins.kind == 'br':
                 jt = self.jump_table(a, entry, end)
                 if jt:
@@ -432,7 +482,11 @@ class Module:
                 out.append(f'    if ({ins.cond}) {{ {jump(ins.target)} }}')
             elif k == 'bl':
                 t = ins.target
-                if self.in_text(t):
+                if t in self.setjmp_stubs and a + 4 < end:
+                    refs.add(t)
+                    out.append(f'    c->x[30] = {hx(a + 4)}; if (setjmp(rt_setjmp_site(c, {hx(a + 4)})->host)) goto L_{a + 4:x}; '
+                               f'{fname(t)}(c);')
+                elif self.in_text(t):
                     refs.add(t)
                     out.append(f'    c->x[30] = {hx(a + 4)}; {fname(t)}(c);')
                 else:

@@ -1,6 +1,7 @@
 // NVN command buffers: commands are recorded into the guest-provided command memory as CmdRec
 // records, so the game's own memory management and out-of-memory callbacks work as designed.
 // A command handle is the guest address of a list's first record.
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -27,9 +28,55 @@ static CmdRec *raw_rec(uint64_t at, uint32_t op, uint32_t size) {
     return r;
 }
 
+// Host overflow chunks. Our records are far bigger than the hardware's commands (and some carry copied data), so a
+// record can outgrow what the game's memory callback hands out: the list then goes on in host memory. A chunk is
+// reached only through a jump from the guest chunk it continues (its owner), and lives until the game gives that
+// guest memory to a command buffer again (the old list is gone then).
+typedef struct Overflow { uint64_t owner; void *mem; struct Overflow *next; } Overflow;
+static Overflow *overflows;
+static pthread_mutex_t overflow_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void overflow_free(uint64_t owner) {
+    pthread_mutex_lock(&overflow_lock);
+    for (Overflow **p = &overflows; *p;) {
+        if ((*p)->owner == owner) {
+            Overflow *o = *p;
+            *p = o->next;
+            free(o->mem);
+            free(o);
+        } else {
+            p = &(*p)->next;
+        }
+    }
+    pthread_mutex_unlock(&overflow_lock);
+}
+
+static void overflow_chunk(NvnCmdBuf *cb, uint32_t need) {
+    uint64_t size = need + JUMP_RESERVE > 0x10000 ? need + JUMP_RESERVE : 0x10000;
+    Overflow *o = malloc(sizeof *o);
+    o->owner = cb->owner ? cb->owner : cb->mem;
+    o->mem = malloc(size);
+    pthread_mutex_lock(&overflow_lock);
+    o->next = overflows;
+    overflows = o;
+    pthread_mutex_unlock(&overflow_lock);
+    static int logged;
+    if (logged++ < 5) LOG("[nvn] command memory overflow: %u bytes, list goes on in host memory\n", need);
+    if (cb->mem) {
+        CmdRec *j = raw_rec(cb->mem + cb->used, CMD_JUMP, sizeof(CmdRec));
+        j->x[0] = (uint64_t)(uintptr_t)o->mem;
+    }
+    cb->owner = o->owner;
+    cb->mem = (uint64_t)(uintptr_t)o->mem;
+    cb->size = size;
+    cb->used = 0;
+}
+
 NVN(nvnCommandBufferAddCommandMemory) {
     NvnCmdBuf *cb = cb_of(A(0));
     uint64_t mem = HOST(NvnPool, A(1))->storage + A(2), size = A(3);
+    overflow_free(mem);  // (records there from an earlier list are dead)
+    cb->owner = 0;
     if (cb->recording && cb->mem) {
         // chain the list being recorded into the new chunk
         CmdRec *j = raw_rec(cb->mem + cb->used, CMD_JUMP, sizeof(CmdRec));
@@ -60,7 +107,11 @@ NVN(nvnCommandBufferSetCommandMemoryCallbackEnabled) { (void)c; }
 static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
     uint32_t size = (uint32_t)((sizeof(CmdRec) + extra + 7) & ~7u);
     for (int tries = 0; !cb->mem || cb->used + size + JUMP_RESERVE > cb->size; tries++) {
-        if (!cb->callback || tries == 2) FATAL("nvn: out of command memory (need %u)\n", size);
+        if (!cb->callback || tries == 2) {
+            if (!cb->mem) FATAL("nvn: out of command memory (need %u)\n", size);
+            overflow_chunk(cb, size);
+            break;
+        }
         uint64_t saved[8];
         memcpy(saved, c->x, sizeof saved);
         c->x[0] = cb->guest;
@@ -116,7 +167,7 @@ static CmdRec *record_copy(Cpu *c, uint32_t op, int arg, uint32_t len) {
 NVN(nvnCommandBufferBindProgram) {
     Snap s = snap(c);
     CmdRec *r = record(c, CMD_BIND_PROGRAM, 0, &s);
-    r->x[0] = (uint64_t)(uintptr_t)HOST(NvnProgram, s.x[1]);  // host program
+    r->x[0] = s.x[1] ? (uint64_t)(uintptr_t)HOST(NvnProgram, s.x[1]) : 0;  // host program (NULL unbinds: draws skip)
 }
 NVN(nvnCommandBufferBindBlendState) { record_copy(c, CMD_BIND_BLEND, 1, 8); }
 NVN(nvnCommandBufferBindChannelMaskState) { record_copy(c, CMD_BIND_CHANNEL_MASK, 1, 4); }

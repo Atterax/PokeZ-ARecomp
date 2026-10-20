@@ -1,0 +1,131 @@
+// nn::os fibers (Pokémon Z-A's job system runs its jobs on them). The SDK switches fibers in
+// nn::os::detail::DispatchFiberContext: push the callee-saved registers on the current stack, store that sp in the
+// current fiber's context, load the other fiber's sp, pop its registers and `ret` to its x30. Recompiled, that `ret`
+// is a C return into the *current* host stack, which belongs to the fiber being left - so each guest fiber gets a
+// host context of its own (its own host stack, ucontext), and the switch is a host context switch.
+//
+// Each fiber also gets its own Cpu: the host frames of a suspended fiber hold their `Cpu *c`, and a job system may
+// resume the fiber on another thread. A switch copies the running thread's identity (thread object, TLS) into the
+// Cpu of the fiber it starts or resumes. The guest-visible state stays as the SDK leaves it: the 0xf0-byte register
+// frame on the fiber's stack, its sp in FiberType+0x50.
+#include <pthread.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <ucontext.h>
+
+#include "../hle.h"
+
+#define CTX_FRAME 0xf0
+#define CO_STACK (64ull << 20)  // reserved, not committed: recompiled code runs on the host stack
+
+typedef struct Co {
+    uint64_t key;  // guest address of the fiber's context (FiberType + 0x50, or the thread's own on its stack)
+    ucontext_t uc;
+    void *stack;
+    Cpu *cpu;
+    int started;
+} Co;
+
+static Co *fibers[1024];
+static int ncos;
+static pthread_mutex_t co_lock = PTHREAD_MUTEX_INITIALIZER;
+static __thread Co *co_starting;
+
+static Co *co_get(uint64_t key) {
+    for (int i = 0; i < ncos; i++) if (fibers[i]->key == key) return fibers[i];
+    if (ncos == (int)(sizeof fibers / sizeof *fibers)) FATAL("[fiber] too many fibers\n");
+    Co *co = calloc(1, sizeof *co);
+    co->key = key;
+    fibers[ncos++] = co;
+    return co;
+}
+
+RT_ON_RESET(fiber_reset) {
+    for (int i = 0; i < ncos; i++) {
+        if (fibers[i]->stack) munmap(fibers[i]->stack, CO_STACK);
+        free(fibers[i]->cpu);
+        free(fibers[i]);
+    }
+    ncos = 0;
+}
+
+static void frame_save(Cpu *c, uint64_t sp) {
+    ST64(sp, 0);
+    for (int r = 19; r <= 30; r++) ST64(sp + 8 + (r - 19) * 8, c->x[r]);
+    ST64(sp + 0x68, 0);
+    for (int r = 8; r <= 15; r++) memcpy((void *)(uintptr_t)(sp + 0x70 + (r - 8) * 16), &c->v[r], 16);
+}
+
+static void frame_load(Cpu *c, uint64_t sp) {
+    c->x[0] = LD64(sp);
+    for (int r = 19; r <= 30; r++) c->x[r] = LD64(sp + 8 + (r - 19) * 8);
+    for (int r = 8; r <= 15; r++) memcpy(&c->v[r], (const void *)(uintptr_t)(sp + 0x70 + (r - 8) * 16), 16);
+    c->sp = sp + CTX_FRAME;
+}
+
+static void identity(Cpu *to, const Cpu *from) {
+    to->thread = from->thread;
+    to->tpidr = from->tpidr;
+    to->tpidrro = from->tpidrro;
+    to->fpcr = from->fpcr;
+    to->fpsr = from->fpsr;
+}
+
+// A fiber's first run, on its own host stack: the SDK's InitializeImpl frame holds x0 = the FiberType and
+// x30 = the entry trampoline (it calls the fiber function, then switches to the fiber it returns - never returns).
+static void co_main(void) {
+    Co *co = co_starting;
+    Cpu *c = co->cpu;
+    frame_load(c, LD64(co->key));
+    c->pc = c->x[30];
+    rt_dispatch(c);
+    FATAL("[fiber] fiber at %llx returned\n", (unsigned long long)co->key);
+}
+
+// nn::os::detail::FiberImplByHorizon::InitializeImpl(FiberType *fiber, void *entry): as the SDK, and a reused
+// FiberType starts afresh
+HLE_FUNC("_ZN2nn2os6detail18FiberImplByHorizon14InitializeImplEPNS0_9FiberTypeEPv", fiber_initialize) {
+    uint64_t f = c->x[0];
+    uint64_t sp = LD64(f + 0x40) + LD64(f + 0x48) - CTX_FRAME;
+    ST64(sp, f);
+    ST64(sp + 0x60, c->x[1]);
+    ST64(f + 0x50, sp);
+    pthread_mutex_lock(&co_lock);
+    co_get(f + 0x50)->started = 0;
+    pthread_mutex_unlock(&co_lock);
+}
+
+// nn::os::detail::DispatchFiberContext(FiberContextForHorizon **from, FiberContextForHorizon **to)
+HLE_FUNC("_ZN2nn2os6detail20DispatchFiberContextEPPNS1_22FiberContextForHorizonES4_", fiber_dispatch) {
+    uint64_t from = c->x[0], to = c->x[1];
+    uint64_t sp = c->sp - CTX_FRAME;
+    frame_save(c, sp);
+    ST64(from, sp);
+    pthread_mutex_lock(&co_lock);
+    Co *me = co_get(from), *dst = co_get(to);
+    me->cpu = c;  // (whatever runs now: a fiber's own Cpu, or the thread's on its first switch)
+    me->started = 1;
+    if (!dst->cpu) {
+        dst->cpu = aligned_alloc(16, sizeof(Cpu));
+        memset(dst->cpu, 0, sizeof(Cpu));
+    }
+    identity(dst->cpu, c);
+    bool fresh = !dst->started;
+    if (fresh) {
+        if (!dst->stack) {
+            dst->stack = mmap(NULL, CO_STACK, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            if (dst->stack == MAP_FAILED) FATAL("[fiber] no host stack\n");
+        }
+        getcontext(&dst->uc);
+        dst->uc.uc_stack.ss_sp = dst->stack;
+        dst->uc.uc_stack.ss_size = CO_STACK;
+        dst->uc.uc_link = NULL;
+        makecontext(&dst->uc, co_main, 0);
+        dst->started = 1;
+    }
+    pthread_mutex_unlock(&co_lock);
+    if (fresh) co_starting = dst;
+    swapcontext(&me->uc, &dst->uc);
+    // resumed (perhaps on another thread: whoever switched back copied its identity into c)
+    frame_load(c, LD64(from));
+}

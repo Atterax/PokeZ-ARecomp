@@ -1036,7 +1036,7 @@ typedef struct AudioOut {
     uint64_t released[64];
     uint32_t ev_r, ev_w;
     KEvent *event;
-    uint64_t played;
+    uint64_t played, loops;
     pthread_mutex_t lock;
     pthread_t thread;
     volatile bool quit;  // reboot (audio_reset)
@@ -1112,6 +1112,7 @@ static void *audout_thread(void *arg) {
         target = 2 * dev_frames * 2 * (int)ch;  // bytes of s16 at the source rate (close enough at 48 kHz)
     }
     while (!a->quit) {
+        a->loops++;
         pthread_mutex_lock(&a->lock);
         uint64_t size = 0, tag = 0, data = 0;
         if (a->state == 0 && a->queued) { size = a->sizes[0]; tag = a->tags[0]; data = a->datas[0]; }
@@ -1121,7 +1122,19 @@ static void *audout_thread(void *arg) {
         if (a->stream) {
             apply_gain(a->stream);
             if (data) SDL_PutAudioStreamData(a->stream, (const void *)(uintptr_t)data, (int)size);
-            while (SDL_GetAudioStreamQueued(a->stream) > target && !a->quit) { struct timespec ts = {0, 1000000}; nanosleep(&ts, NULL); }
+            // a device that stops pulling (seen with PulseAudio) must not hold the buffer forever: the game's audio
+            // thread waits for the release and everything else waits for it. Past a few buffers' time, let go.
+            uint64_t limit = SDL_GetTicksNS() + 4 * frames * 1000000000ull / (a->rate ? a->rate : 48000) + 100000000ull;
+            while (SDL_GetAudioStreamQueued(a->stream) > target && !a->quit) {
+                if (SDL_GetTicksNS() > limit) {
+                    static int warned;
+                    if (warned++ < 5) LOG("[audout] device stalled (%d bytes queued): released anyway\n", SDL_GetAudioStreamQueued(a->stream));
+                    SDL_ClearAudioStream(a->stream);
+                    break;
+                }
+                struct timespec ts = {0, 1000000};
+                nanosleep(&ts, NULL);
+            }
         } else {
             uint64_t ns = frames * 1000000000ull / (a->rate ? a->rate : 48000);
             struct timespec ts = {(time_t)(ns / 1000000000ull), (long)(ns % 1000000000ull)};
@@ -1143,6 +1156,17 @@ static void *audout_thread(void *arg) {
         pthread_mutex_unlock(&g_klock);
     }
     return NULL;
+}
+
+// (LARECOMP_WAIT_DUMP, runtime/kernel.c) each audio out's queue
+void audio_wait_dump(void) {
+    for (int i = 0; i < 8; i++) {
+        AudioOut *a = g_outs[i];
+        if (!a) continue;
+        LOG("[wait] audout %d: state %u queued %d released %d played %llu loops %llu stream %d event %d\n", i, a->state,
+            a->queued, a->released_n, (unsigned long long)a->played, (unsigned long long)a->loops,
+            a->stream ? SDL_GetAudioStreamQueued(a->stream) : -1, a->event ? a->event->signaled : -1);
+    }
 }
 
 static void audio_out(Service *s, IpcReq *req, IpcResp *resp) {
@@ -1194,10 +1218,33 @@ static void audio_out(Service *s, IpcReq *req, IpcResp *resp) {
         resp_size(resp, 4);
         break;
     }
-    case 6: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;
+    case 6: {  // ContainsAudioOutBuffer(tag) -> bool (still queued)
+        uint64_t tag = IN(uint64_t, 0);
+        bool in = false;
+        pthread_mutex_lock(&a->lock);
+        for (int i = 0; i < a->queued; i++) in |= a->tags[i] == tag;
+        pthread_mutex_unlock(&a->lock);
+        OUT(uint8_t, 0) = in;
+        resp_size(resp, 1);
+        break;
+    }
     case 9: OUT(uint32_t, 0) = (uint32_t)a->queued; resp_size(resp, 4); break;
     case 10: OUT(uint64_t, 0) = a->played; resp_size(resp, 8); break;
-    case 11: OUT(uint8_t, 0) = 1; resp_size(resp, 1); break;
+    case 11: {  // FlushAudioOutBuffers -> bool: every queued buffer is released now (the game waits for the event)
+        pthread_mutex_lock(&a->lock);
+        int n = a->queued;
+        for (int i = 0; i < n; i++) if (a->released_n < 64) a->released[a->released_n++] = a->tags[i];
+        a->queued = 0;
+        pthread_mutex_unlock(&a->lock);
+        if (n) {
+            pthread_mutex_lock(&g_klock);
+            kernel_signal(a->event);
+            pthread_mutex_unlock(&g_klock);
+        }
+        OUT(uint8_t, 0) = n > 0;
+        resp_size(resp, 1);
+        break;
+    }
     case 12: break;
     case 13: OUT(float, 0) = 1.0f; resp_size(resp, 4); break;
     default: LOG("[audout] IAudioOut cmd %u (ok)\n", req->cmd);
