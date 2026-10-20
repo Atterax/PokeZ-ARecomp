@@ -64,3 +64,4 @@ void kernel_signal(KObject *o);  // caller holds g_klock
 KEvent *kernel_create_event_pair(uint32_t *writable, uint32_t *readable);
 KThread *kernel_current_thread(void);
 uint64_t kernel_heap_size(void);  // bytes from HEAP_BASE set by SetHeapSize
+uint64_t kernel_phys_largest(uint64_t *addr);  // largest svcMapPhysicalMemory region: size (0 if none), *addr

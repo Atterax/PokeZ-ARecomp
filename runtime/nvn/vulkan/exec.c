@@ -1237,16 +1237,63 @@ static void compile_program(void *arg) {
     atomic_store(&p->state, p->vs && p->fs ? 1 : 2);
 }
 
+// The guest memory window that shader global memory, the vertex cache and the texture upload checks cover: the heap
+// (SetHeapSize), or for a game on the SDK's virtual address memory, which has no heap (Pokémon Legends Z-A), its
+// largest physical memory region (svcMapPhysicalMemory, at most HEAP_MAX). Picked once, at first use: shaders bake
+// the base in.
+typedef struct { uint64_t base, max; bool phys; } GWin;
+static GWin gwin_ = {HEAP_BASE, HEAP_MAX, false};
+static atomic_bool gwin_done;
+static void gwin_pick(void) {
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&lock);
+    if (!atomic_load(&gwin_done)) {
+        uint64_t a = 0, sz = kernel_phys_largest(&a);
+        if (kernel_heap_size()) atomic_store(&gwin_done, true);
+        else if (sz >= (64ull << 20)) {
+            gwin_ = (GWin){a, sz < HEAP_MAX ? sz : HEAP_MAX, true};
+            LOG("[vk] guest memory window: physical memory %llx +%llx (no heap)\n", (unsigned long long)a,
+                (unsigned long long)gwin_.max);
+            atomic_store(&gwin_done, true);
+        }
+    }
+    pthread_mutex_unlock(&lock);
+}
+static inline const GWin *gwin(void) {
+    if (__builtin_expect(!atomic_load_explicit(&gwin_done, memory_order_acquire), 0)) gwin_pick();
+    return &gwin_;
+}
+#define gwin_base (gwin()->base)
+#define gwin_max (gwin()->max)
+// bytes of the window the game has set up: the heap size, or the whole physical region
+static uint64_t gwin_want(void) { return gwin()->phys ? gwin_.max : kernel_heap_size(); }
+
 static void translate_program(void *arg) {
     Prog *p = arg;
-    maxwell_gmem_base = HEAP_BASE;
-    maxwell_gmem_size = HEAP_MAX;
+    maxwell_gmem_base = gwin_base;
+    maxwell_gmem_size = gwin_max;
     pthread_mutex_lock(&translate_lock);
     p->vi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], STAGE_VERTEX, &p->vkey);
     if (p->vi->msl) {
         p->fkey.vs_out_mask = p->vi->out_mask;
         p->fi = p->code[1] ? maxwell_translate((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], STAGE_FRAGMENT, &p->fkey)
                            : maxwell_empty_fragment();
+    }
+    if (getenv("LARECOMP_DUMP_GLSL")) {  // (debug) build/glsl/<code address>.{vert,frag}[.asm]: source and disassembly
+        mkdir("build/glsl", 0755);
+        for (int sg = 0; sg < 2; sg++) {
+            ShaderInfo *si = sg ? p->fi : p->vi;
+            if (!p->code[sg]) continue;
+            char path[96];
+            snprintf(path, sizeof path, "build/glsl/%llx.%s", (unsigned long long)p->code[sg], sg ? "frag" : "vert");
+            FILE *f = fopen(path, "wb");
+            if (f) { if (si && si->msl) fputs(si->msl, f); fclose(f); }
+            strcat(path, ".asm");
+            if ((f = fopen(path, "wb"))) {
+                maxwell_disassemble((const uint8_t *)(uintptr_t)p->code[sg], p->cmax[sg], sg ? STAGE_FRAGMENT : STAGE_VERTEX, f);
+                fclose(f);
+            }
+        }
     }
     pthread_mutex_unlock(&translate_lock);
     if (!p->vi->msl) {
@@ -1937,7 +1984,7 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     return ubo_span(guest_copy(r.addr, size), size);
 }
 
-// Global memory (shader LDG/STG, maxwell_gmem_base = HEAP_BASE): the guest heap imported as a GPU buffer
+// Global memory (shader LDG/STG, maxwell_gmem_base = gwin_base): the guest memory window imported as a GPU buffer
 // (VK_EXT_external_memory_host), zero-copy like metal.m's g_guest_buffer, so compute results land in guest
 // memory. The import pins its pages, so it covers only the heap the game set up (SetHeapSize), made on first use.
 // LARECOMP_VK_NO_GMEM=1: no import, reads return zero.
@@ -1949,12 +1996,12 @@ static bool gmem_import(uint64_t size) {
     PFN_vkGetMemoryHostPointerPropertiesEXT props =
         (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(g_vk.dev, "vkGetMemoryHostPointerPropertiesEXT");
     VkMemoryHostPointerPropertiesEXT mp = {.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
-    if (!props || props(g_vk.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, (void *)(uintptr_t)HEAP_BASE, &mp) != VK_SUCCESS ||
+    if (!props || props(g_vk.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, (void *)(uintptr_t)gwin_base, &mp) != VK_SUCCESS ||
         !mp.memoryTypeBits)
         return false;
     VkImportMemoryHostPointerInfoEXT imp = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
                                             .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
-                                            .pHostPointer = (void *)(uintptr_t)HEAP_BASE};
+                                            .pHostPointer = (void *)(uintptr_t)gwin_base};
     VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &imp, .allocationSize = size,
                                .memoryTypeIndex = (uint32_t)__builtin_ctz(mp.memoryTypeBits)};
     VkDeviceMemory mem;
@@ -1984,8 +2031,10 @@ static uint64_t gmem_tried;  // heap size the import was last attempted for (gme
 static VkDescriptorBufferInfo gmem_info(void) {
     static int off = -1;
     if (off < 0) off = getenv("LARECOMP_VK_NO_GMEM") != NULL || !g_vk.host_import;
-    uint64_t want = (kernel_heap_size() + 0xFFFF) & ~0xFFFFull;
-    if (want > HEAP_MAX) want = HEAP_MAX;
+    uint64_t want = (gwin_want() + 0xFFFF) & ~0xFFFFull;
+    if (want > gwin_max) want = gwin_max;
+    static int nlog;
+    if (!nlog++) LOG("[vk] gmem: window %llu MB, import %s\n", (unsigned long long)(want >> 20), off ? "off" : "on");
     if (!off && want > gmem_size && !gmem_import(want)) {
         LOG("[vk] guest heap import failed (%llu MB): shader global memory reads return zero\n", (unsigned long long)(want >> 20));
         off = 1;
@@ -2034,8 +2083,8 @@ static void gfast_prepare(VkCommandBuffer cb) {
     int n = 0;
     for (int i = 0; i < 16; i++) {  // heap offsets of the bound storage buffers, 256-aligned
         uint64_t a = st.sbuf[5][i].addr, sz = st.sbuf[5][i].size;
-        if (!a || !sz || a < HEAP_BASE || a - HEAP_BASE + sz > gmem_size) continue;
-        uint64_t lo = (a - HEAP_BASE) & ~255ull, hi = (a - HEAP_BASE + sz + 255) & ~255ull;
+        if (!a || !sz || a < gwin_base || a - gwin_base + sz > gmem_size) continue;
+        uint64_t lo = (a - gwin_base) & ~255ull, hi = (a - gwin_base + sz + 255) & ~255ull;
         if (hi > gmem_size) hi = gmem_size;
         int k = n++;
         while (k > 0 && r[k - 1].lo > lo) { r[k] = r[k - 1]; k--; }  // (insertion sort by start)
@@ -2062,7 +2111,7 @@ static void gfast_prepare(VkCommandBuffer cb) {
         static int nlog;
         if (st.program->stages[5].code_addr == strtoull(getenv("LARECOMP_LOG_GFAST"), NULL, 16) && nlog++ < 40) {
             LOG("[gfast] cs %llx: %d ranges, %llu KB:", (unsigned long long)st.program->stages[5].code_addr, m, (unsigned long long)(off >> 10));
-            for (int i = 0; i < m; i++) LOG(" %llx+%llx", (unsigned long long)(r[i].lo + HEAP_BASE), (unsigned long long)(r[i].hi - r[i].lo));
+            for (int i = 0; i < m; i++) LOG(" %llx+%llx", (unsigned long long)(r[i].lo + gwin_base), (unsigned long long)(r[i].hi - r[i].lo));
             LOG("\n");
         }
     }
@@ -2138,7 +2187,7 @@ static int pt_state = -1;  // 1: tracking, 0: none
 static bool pt_init(void) {
     if (pt_state >= 0) return pt_state;
     uint64_t pg = VC_PAGE, one;
-    int n = plat_written_pages(HEAP_BASE, VC_PAGE, &one, 1, &pg);  // (is there write tracking?)
+    int n = plat_written_pages(gwin_base, VC_PAGE, &one, 1, &pg);  // (is there write tracking?)
     pt_state = n >= 0 && pg == VC_PAGE;
     if (!pt_state) { LOG("[vk] no page write tracking (%d, page %llu)\n", n, (unsigned long long)pg); return false; }
     vc_page_gen = calloc(HEAP_MAX / VC_PAGE, sizeof *vc_page_gen);
@@ -2151,15 +2200,15 @@ static bool pt_init(void) {
 // 0: no CPU write since, 1: written, -1: unknown (no tracking, outside the heap, or pages the GPU writes).
 // *now: the generation to pass next time.
 int vk_pages_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) {
-    if (!size || addr < HEAP_BASE || addr - HEAP_BASE + size > HEAP_MAX || !pt_init()) return -1;
-    uint64_t lo = (addr - HEAP_BASE) & ~(VC_PAGE - 1), hi = (addr - HEAP_BASE + size + VC_PAGE - 1) & ~(VC_PAGE - 1);
+    if (!size || addr < gwin_base || addr - gwin_base + size > gwin_max || !pt_init()) return -1;
+    uint64_t lo = (addr - gwin_base) & ~(VC_PAGE - 1), hi = (addr - gwin_base + size + VC_PAGE - 1) & ~(VC_PAGE - 1);
     static uint64_t pages[4096];
     uint64_t pg = VC_PAGE;
-    int n = plat_written_pages(HEAP_BASE + lo, hi - lo, pages, 4096, &pg);
+    int n = plat_written_pages(gwin_base + lo, hi - lo, pages, 4096, &pg);
     if (n < 0) return -1;
     uint32_t g = ++vc_gen;
     if (n >= 4096) for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) vc_page_gen[p] = g;
-    else for (int k = 0; k < n; k++) vc_page_gen[(pages[k] - HEAP_BASE) / VC_PAGE] = g;
+    else for (int k = 0; k < n; k++) vc_page_gen[(pages[k] - gwin_base) / VC_PAGE] = g;
     *now = g;
     int changed = 0;
     for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) {
@@ -2172,7 +2221,7 @@ int vk_pages_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now
 // Heap pages [lo, hi) (offsets) written by the GPU: never cached from now on.
 static void vc_mark_gpu(uint64_t lo, uint64_t hi) {
     if (!pt_init()) return;
-    for (uint64_t p = lo / VC_PAGE; p < (hi + VC_PAGE - 1) / VC_PAGE && p < HEAP_MAX / VC_PAGE; p++) vc_page_gpu[p] = 1;
+    for (uint64_t p = lo / VC_PAGE; p < (hi + VC_PAGE - 1) / VC_PAGE && p < gwin_max / VC_PAGE; p++) vc_page_gpu[p] = 1;
     vc_epoch++;
 }
 
@@ -2180,7 +2229,7 @@ static void vc_mark_gpu(uint64_t lo, uint64_t hi) {
 static void vc_mark_sbufs(int stage) {
     for (int i = 0; i < 16; i++) {
         uint64_t a = st.sbuf[stage][i].addr, sz = st.sbuf[stage][i].size;
-        if (a >= HEAP_BASE && sz && a - HEAP_BASE < HEAP_MAX) vc_mark_gpu(a - HEAP_BASE, a - HEAP_BASE + sz);
+        if (a >= gwin_base && sz && a - gwin_base < gwin_max) vc_mark_gpu(a - gwin_base, a - gwin_base + sz);
     }
 }
 
@@ -2194,7 +2243,7 @@ static bool vcache_lookup(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceS
         }
     }
     if (!vc_on || !gmem_buf || size > VC_MAX_RANGE) return false;
-    uint64_t lo = (addr - HEAP_BASE) & ~(VC_PAGE - 1), hi = (addr - HEAP_BASE + size + VC_PAGE - 1) & ~(VC_PAGE - 1);
+    uint64_t lo = (addr - gwin_base) & ~(VC_PAGE - 1), hi = (addr - gwin_base + size + VC_PAGE - 1) & ~(VC_PAGE - 1);
     if (hi > gmem_size) return false;
     uint64_t pend = vk_pending_seq();
     uint64_t h = (lo * 0x9E3779B97F4A7C15ull) ^ (hi * 0xC2B2AE3D27D4EB4Full);
@@ -2239,7 +2288,7 @@ static bool vcache_lookup(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceS
     }
     prof_vc_hits++;
     *buf = e->buf;
-    *off = addr - HEAP_BASE - lo;
+    *off = addr - gwin_base - lo;
     return true;
 }
 
@@ -2263,10 +2312,10 @@ void vc_flush(void) {
         for (; j < vc_npend && vc_tab[vc_pend[j]].lo <= hi + 64 * VC_PAGE; j++)
             if (vc_tab[vc_pend[j]].hi > hi) hi = vc_tab[vc_pend[j]].hi;
         uint64_t pg = VC_PAGE;
-        int n = plat_written_pages(HEAP_BASE + lo, hi - lo, pages, 4096, &pg);
+        int n = plat_written_pages(gwin_base + lo, hi - lo, pages, 4096, &pg);
         prof_vc_queries++;
         if (n < 0 || n >= 4096) for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) vc_page_gen[p] = g;  // (all)
-        else for (int k = 0; k < n; k++) vc_page_gen[(pages[k] - HEAP_BASE) / VC_PAGE] = g;
+        else for (int k = 0; k < n; k++) vc_page_gen[(pages[k] - gwin_base) / VC_PAGE] = g;
         if (n > 0) prof_vc_scan_pages += (uint64_t)n;
         i = j;
     }
@@ -2299,12 +2348,12 @@ void vc_flush(void) {
 static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
     static int copy = -1;
     if (copy < 0) copy = getenv("LARECOMP_VK_COPY_VERTICES") != NULL;
-    if (copy || addr < HEAP_BASE) return false;
-    if (addr + size > HEAP_BASE + gmem_size && kernel_heap_size() != gmem_tried) { gmem_tried = kernel_heap_size(); gmem_info(); }
-    if (!gmem_buf || addr + size > HEAP_BASE + gmem_size) return false;
+    if (copy || addr < gwin_base) return false;
+    if (addr + size > gwin_base + gmem_size && gwin_want() != gmem_tried) { gmem_tried = gwin_want(); gmem_info(); }
+    if (!gmem_buf || addr + size > gwin_base + gmem_size) return false;
     if (vcache_lookup(addr, size, buf, off)) return true;
     *buf = gmem_buf;
-    *off = addr - HEAP_BASE;
+    *off = addr - gwin_base;
     return true;
 }
 
@@ -2331,7 +2380,7 @@ void vk_exec_reset(void) {
     vc_npend = 0;
     vc_free_dead(true);
     vc_bytes = 0;
-    if (vc_page_gpu) memset(vc_page_gpu, 0, HEAP_MAX / VC_PAGE);
+    if (vc_page_gpu) memset(vc_page_gpu, 0, gwin_max / VC_PAGE);
     vc_epoch++;
     st_defaults();
 }
@@ -2481,8 +2530,8 @@ static CsProg *compute_program(NvnProgram *np) {
     for (int i = 0; i < n; i++) if (tab[i].addr == ss->code_addr) return tab[i].cp;
     CsProg *cp = calloc(1, sizeof *cp);
     if (n < 256) { tab[n].addr = ss->code_addr; tab[n].cp = cp; g_cs_n = n + 1; }
-    maxwell_gmem_base = HEAP_BASE;
-    maxwell_gmem_size = HEAP_MAX;
+    maxwell_gmem_base = gwin_base;
+    maxwell_gmem_size = gwin_max;
     ShaderKey k = {0};
     k.glsl = 1;
     pthread_mutex_lock(&translate_lock);
@@ -3084,6 +3133,17 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
         if (!t) { LOG("[draw]   tex%d: none\n", i); continue; }
         LOG("[draw]   tex%d: %p %ux%u f%#x lv %u -> %ux%u scale %.4f %.4f%s\n", i, (void *)t, t->width, t->height, t->format,
             b ? b->levels : 0, b ? b->width : 0, b ? b->height : 0, b ? b->sx : 0, b ? b->sy : 0, b && b->scalable ? " scalable" : "");
+        if (t->format == 0x1 && t->width >= 256 && t->addr) {  // (R8 atlases, e.g. a glyph cache: guest bytes vs the GPU copy)
+            const uint8_t *g = (const uint8_t *)(uintptr_t)t->addr;
+            uint64_t n = (uint64_t)t->width * t->height, nz = 0;
+            for (uint64_t k = 0; k < n; k++) nz += g[k] != 0;
+            static int ndump;
+            char path[64];
+            snprintf(path, sizeof path, "build/tex_r8_%02d.png", ndump++);
+            LOG("[draw]   tex%d guest %llx: %llu of %llu bytes nonzero -> %s\n", i, (unsigned long long)t->addr,
+                (unsigned long long)nz, (unsigned long long)n, path);
+            if (b) renderer_save_texture_tex((TexBackend *)b, path);
+        }
     }
 }
 
@@ -3148,7 +3208,7 @@ static void copy_buffer_to_texture(uint64_t src, const TexRefRec *dst) {
 
 static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     NvnTexture *t = (NvnTexture *)(uintptr_t)src->tex;
-    if (!t || !dst || dst < HEAP_BASE) return;
+    if (!t || !dst || dst < GUEST_LO) return;
     t = alias_read(t);
     vk_end_pass();
     const FormatInfo *fi;

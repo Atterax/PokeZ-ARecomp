@@ -113,6 +113,14 @@ static int nregions;
 static uint64_t heap_size;
 static uint64_t tls_next = TLS_BASE;
 uint64_t kernel_heap_size(void) { return heap_size; }  // bytes from HEAP_BASE set by SetHeapSize
+// The largest physical memory region (svcMapPhysicalMemory): where a game on the SDK's virtual address memory keeps
+// what others keep in their heap. Its size (0: none), *addr its start.
+uint64_t kernel_phys_largest(uint64_t *addr) {
+    uint64_t best = 0;
+    for (int i = 0; i < nregions; i++)
+        if (regions[i].type == 7 && regions[i].size > best) { best = regions[i].size; *addr = regions[i].addr; }
+    return best;
+}
 // Writable guest data regions (heap, mapped/physical memory, module .data): for debug/runtime memory scans.
 int kernel_data_regions(uint64_t *addr, uint64_t *size, int max) {
     int n = 0;
