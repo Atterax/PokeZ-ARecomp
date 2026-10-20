@@ -479,6 +479,8 @@ static int tex_slot(Ctx *c, uint32_t index, int type, bool shadow, bool array) {
     t->type = (uint8_t)type;
     t->shadow = shadow;
     t->is_array = array;
+    int hs = ((int)index * 4 - 0x20) / 8;  // (the handle slot the renderer binds, exec.c shader_texture_object)
+    t->stencil = c->glsl && c->key && hs >= 0 && hs < 32 && ((c->key->stencil_slots >> hs) & 1);
     return s;
 }
 
@@ -496,8 +498,8 @@ static const char *tex_type_name(int t) {
 
 // Write texture results: component mask selects which of r,g,b,a go to consecutive registers.
 static void write_tex_result(Ctx *c, int slot, const char *call, uint32_t mask, int d0, int d1, bool texs, bool f16) {
-    sp(&c->body, "    { float4 t = %s;\n", call);
-    (void)slot;
+    if (c->info->tex[slot].stencil) sp(&c->body, "    { float4 t = stc(%s);\n", call);  // (stencil: uint in .x)
+    else sp(&c->body, "    { float4 t = %s;\n", call);
     if (f16) {
         // TEXS/TLDS .F16: components (in mask order) packed as half pairs into d0 (lo, hi) and d1 (lo, hi)
         int comps[4], n = 0;
@@ -1954,6 +1956,7 @@ static const char glsl_prelude[] =
     "#extension GL_ARB_shader_viewport_layer_array : enable\n"
     "#define cbr(cb, off) cb[min((off) >> 4, uint(cb.length() - 1))][((off) >> 2) & 3u]\n"
     "uint as_u(float x) { return floatBitsToUint(x); }\n"
+    "vec4 stc(uvec4 v) { return uintBitsToFloat(v); }\n"
     "uint as_u(uint x) { return x; }\n"
     "uint as_u(int x) { return uint(x); }\n"
     "float as_f(uint x) { return uintBitsToFloat(x); }\n"
@@ -1996,7 +1999,10 @@ static const char *glsl_sampler_type(const ShaderTexture *t) {
         {"sampler1D", "sampler1DShadow"}, {"sampler2D", "sampler2DShadow"}, {"sampler3D", "sampler3D"},
         {"samplerCube", "samplerCubeShadow"}, {"sampler2DArray", "sampler2DArrayShadow"},
         {"samplerCubeArray", "samplerCubeArrayShadow"}, {"sampler1DArray", "sampler1DArrayShadow"}};
+    static const char *const unames[] = {"usampler1D", "usampler2D", "usampler3D", "usamplerCube", "usampler2DArray",
+                                         "usamplerCubeArray", "usampler1DArray"};
     int ty = t->type <= TEXTYPE_1D_ARRAY ? t->type : TEXTYPE_2D;
+    if (t->stencil) return unames[ty];
     return names[ty][t->shadow ? 1 : 0];
 }
 

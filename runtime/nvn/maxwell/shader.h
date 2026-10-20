@@ -46,12 +46,15 @@ typedef struct {
                             // after flip_y: keys without it hash as before - shader caches stay valid.)
     uint32_t vs_out_mask;   // fragment: varyings the vertex shader provides
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
+    uint32_t stencil_slots; // (GLSL) texture handle slots ((handle_offset - 0x20) / 8) bound in stencil mode
+                            // (NVN depth/stencil mode STENCIL): a usampler, results read as uint bits
 } ShaderKey;
 
 typedef struct {
     uint32_t handle_offset;  // byte offset of the texture handle in the bound texture cbuf
     uint8_t type;            // TEXTYPE_*
     bool shadow, is_array, is_image, bindless;
+    bool stencil;            // (GLSL) a stencil view: usampler (ShaderKey.stencil_slots)
     uint32_t bindless_cbuf, bindless_offset;
 } ShaderTexture;
 

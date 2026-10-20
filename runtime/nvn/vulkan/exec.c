@@ -880,6 +880,12 @@ static void vk_end_pass_at(int line) {
         if (multi) snprintf(path, sizeof path, "build/pass_%llu_%03d.png", (unsigned long long)debug_pass_frame, debug_pass_no++);
         else snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no++);
         renderer_save_texture_tex(st.rt.color[0]->backend, path);
+        for (int ci = 1; ci < st.rt.ncolor; ci++) {  // (multiple render targets: the others as _c<i>)
+            if (!st.rt.color[ci] || !st.rt.color[ci]->backend) continue;
+            char cpath[300];
+            snprintf(cpath, sizeof cpath, "%.*s_c%d.png", (int)strlen(path) - 4, path, ci);
+            renderer_save_texture_tex(st.rt.color[ci]->backend, cpath);
+        }
         TexBackend *tb = st.rt.color[0]->backend;
         if (tb->width == 1 && tb->height == 1 && tb->format == VK_FORMAT_R32G32B32A32_SFLOAT) {  // (exposure: the raw value)
             VkSpan out = vk_readback(16);
@@ -1322,6 +1328,7 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     const uint8_t *vb = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= vb[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+    for (int k = 0; k < 4; k++) { h ^= (fkey->stencil_slots >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; }
     if (!h) h = 1;
     uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
     while (prog_tab[slot].key && prog_tab[slot].key != h) slot = (slot + 1) & (PROG_TAB - 1);
@@ -1407,7 +1414,11 @@ static VkFormat vertex_format(uint32_t f) {
     case 0x3F: return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
     case 0x40: return VK_FORMAT_E5B9G9R9_UFLOAT_PACK32;
     case 0x51: return VK_FORMAT_R8_UINT;
-    default: return VK_FORMAT_R32G32B32A32_SFLOAT;
+    default: {
+        static uint8_t told[256];
+        if (!told[f & 0xFF]++) LOG("[vk] vertex format %#x unknown: read as RGBA32F\n", f);
+        return VK_FORMAT_R32G32B32A32_SFLOAT;
+    }
     }
 }
 
@@ -2642,6 +2653,21 @@ static bool topology(uint32_t mode, VkPrimitiveTopology *t, uint8_t *cls) {
     }
 }
 
+// Texture handle slots of a stage bound in NVN depth/stencil mode STENCIL (ShaderKey.stencil_slots)
+static uint32_t stencil_slots(int stage) {
+    uint32_t m = 0;
+    if (!st.tpool) return 0;
+    for (int s = 0; s < 32; s++) {
+        uint64_t h = st.tex[stage][s];
+        uint32_t tic = h & 0xFFFFF;
+        if (!h || tic >= (uint32_t)st.tpool->count) continue;
+        NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
+        if (!e->tex || !renderer_format_has_stencil(e->tex->format)) continue;
+        if ((e->has_view && (e->view.setmask & 16) ? e->view.ds_mode : e->tex->ds_mode) == 1) m |= 1u << s;
+    }
+    return m;
+}
+
 static void draw_(CmdRec *r, bool indexed);
 static void draw(CmdRec *r, bool indexed) {
     PROF_T0();
@@ -2658,6 +2684,8 @@ static void draw_(CmdRec *r, bool indexed) {
     vkey.depth_minus_one = nvn_depth_mode() == 0;
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
+    vkey.stencil_slots = stencil_slots(0);
+    fkey.stencil_slots = stencil_slots(1);
     Prog *pr = get_program(st.program, &vkey, &fkey);
     if (!pr || atomic_load(&pr->state) != 1) { stat_skipped_here(); return; }
     g_mirror_w = 0;
@@ -3108,9 +3136,10 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
         pr->vi->cbuf_mask, pr->fi->cbuf_mask, st.rt.ncolor);
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) LOG(" %ux%u/f%#x", st.rt.color[i]->width, st.rt.color[i]->height, st.rt.color[i]->format);
     if (st.rt.depth) LOG(" d%#x %p", st.rt.depth->format, (void *)st.rt.depth);
-    LOG(" | vp %.0f %.0f %.0f %.0f | attrs %#x blend %#x ds %02x%02x%02x poly %02x%02x chmask %08x\n", st.viewport[0][0], st.viewport[0][1],
-        st.viewport[0][2], st.viewport[0][3], pr->vi->attr_mask, st.color_state[0], st.ds[0], st.ds[1], st.ds[2], st.poly[0], st.poly[1],
-        st.channel_mask);
+    LOG(" | vp %.0f %.0f %.0f %.0f | attrs %#x blend %#x ds %02x%02x%02x poly %02x%02x chmask %08x offset %x %g %g %g\n",
+        st.viewport[0][0], st.viewport[0][1], st.viewport[0][2], st.viewport[0][3], pr->vi->attr_mask, st.color_state[0], st.ds[0],
+        st.ds[1], st.ds[2], st.poly[0], st.poly[1], st.channel_mask, st.poly[3], st.poly_offset[0], st.poly_offset[1],
+        st.poly_offset[2]);
     if (getenv("LARECOMP_DEBUG_DATA")) {  // vertex streams 0-1 and fragment cbufs: the first floats
         for (int s = 0; s < 2; s++) {
             if (!st.vbuf[s].addr) continue;
@@ -3143,6 +3172,25 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
             LOG("[draw]   tex%d guest %llx: %llu of %llu bytes nonzero -> %s\n", i, (unsigned long long)t->addr,
                 (unsigned long long)nz, (unsigned long long)n, path);
             if (b) renderer_save_texture_tex((TexBackend *)b, path);
+        }
+        // (LARECOMP_DEBUG_TEX: the first 64 sampled textures of 256+ pixels and the first 32 sampled render targets, once each)
+        static NvnTexture *saved[96];
+        static int nsaved, nsaved_rt, dump = -1;
+        if (dump < 0) dump = getenv("LARECOMP_DEBUG_TEX") != NULL;
+        bool rt = b && b->scalable;
+        if (dump && b && t->width >= 256 && t->height >= 64 && (rt ? nsaved_rt < 32 : nsaved < 64) &&
+            !(b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) {
+            bool seen = false;
+            for (int k = 0; k < nsaved + nsaved_rt; k++) seen |= saved[k] == t;
+            if (!seen) {
+                char path[96];
+                snprintf(path, sizeof path, "build/%s_%02d_f%x_%ux%u.png", rt ? "rt" : "tex", rt ? nsaved_rt : nsaved, t->format,
+                         t->width, t->height);
+                saved[nsaved + nsaved_rt] = t;
+                if (rt) nsaved_rt++; else nsaved++;
+                LOG("[draw]   tex%d -> %s (guest %llx, target %u)\n", i, path, (unsigned long long)t->addr, t->target);
+                renderer_save_texture_tex((TexBackend *)b, path);
+            }
         }
     }
 }
