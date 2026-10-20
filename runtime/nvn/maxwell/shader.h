@@ -98,6 +98,8 @@ extern const uint8_t *maxwell_dbg_vs;
 
 // code: shader binary (with the 0x50-byte SPH header for graphics stages)
 ShaderInfo *maxwell_translate(const uint8_t *code, size_t max_size, int stage, const ShaderKey *key);
+// A fragment stage that writes nothing: programs with only a vertex shader (depth-only passes: shadow maps, prepass)
+ShaderInfo *maxwell_empty_fragment(void);
 void maxwell_free(ShaderInfo *s);
 // Disassemble for debugging (writes text to f).
 void maxwell_disassemble(const uint8_t *code, size_t max_size, int stage, void *file);

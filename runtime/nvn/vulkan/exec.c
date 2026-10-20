@@ -665,7 +665,8 @@ typedef struct { uint64_t addr, size; } Range;
 static struct {
     RtState rt;
     bool rt_dirty;
-    NvnProgram *program;
+    NvnProgram *program;  // &comp, or NULL with no stage bound
+    NvnProgram comp;      // the bound stages: BindProgram(program, stages) replaces just those
     uint8_t blend[8][8];
     uint32_t channel_mask;
     uint8_t color_state[4], ds[8], ms[0x18], poly[4];
@@ -1216,7 +1217,8 @@ static void translate_program(void *arg) {
     p->vi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], STAGE_VERTEX, &p->vkey);
     if (p->vi->msl) {
         p->fkey.vs_out_mask = p->vi->out_mask;
-        p->fi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], STAGE_FRAGMENT, &p->fkey);
+        p->fi = p->code[1] ? maxwell_translate((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], STAGE_FRAGMENT, &p->fkey)
+                           : maxwell_empty_fragment();
     }
     pthread_mutex_unlock(&translate_lock);
     if (!p->vi->msl) {
@@ -1239,7 +1241,7 @@ static void translate_program(void *arg) {
 static struct { uint64_t key; Prog *prog; } prog_tab[PROG_TAB];
 
 static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
-    if (!(np->stage_mask & 1) || !(np->stage_mask & 2)) return NULL;
+    if (!(np->stage_mask & 1)) return NULL;  // (no fragment stage: depth only - maxwell_empty_fragment)
     uint64_t h = 0xcbf29ce484222325ull;
     for (int i = 0; i < 2; i++) { uint64_t a = np->stages[i].code_addr; for (int k = 0; k < 8; k++) { h ^= (a >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; } }
     const uint8_t *vb = (const uint8_t *)vkey;
@@ -2461,6 +2463,15 @@ static CsProg *compute_program(NvnProgram *np) {
     cp->p.vi = cp->si;
     if (!cp->si->msl) {
         LOG("[compute] translate failed: %s (code %llx)\n", cp->si->error, (unsigned long long)ss->code_addr);
+        if (getenv("LARECOMP_DUMP_CS_HEAD")) {
+            const uint32_t *w = (const uint32_t *)(uintptr_t)ss->code_addr;
+            int nz = 1;
+            while (nz < 1024 && !w[nz]) nz++;
+            LOG("[compute]   first nonzero word after the magic at +%#x\n", nz * 4);
+            for (int i = nz & ~7; i < (nz & ~7) + 16; i += 8)
+                LOG("[compute]   +%03x: %08x %08x %08x %08x %08x %08x %08x %08x\n", i * 4, w[i], w[i + 1], w[i + 2], w[i + 3],
+                    w[i + 4], w[i + 5], w[i + 6], w[i + 7]);
+        }
         atomic_store(&cp->p.state, 2);
         return cp;
     }
@@ -3573,7 +3584,27 @@ static void exec_list(uint64_t handle, int depth) {
             for (uint64_t i = 0; i < r->x[0] && depth < 8; i++) exec_list(h[i], depth + 1);
             break;
         }
-        case CMD_BIND_PROGRAM: st.program = (NvnProgram *)(uintptr_t)r->x[0]; break;
+        case CMD_BIND_PROGRAM: {  // (program, NVNshaderStageBits): a game may bind its stages from several programs
+            NvnProgram *p = (NvnProgram *)(uintptr_t)r->x[0];
+            uint32_t m = (uint32_t)r->x[1] & 0x3F;
+            if (!m) m = 0x3F;
+            if (getenv("LARECOMP_LOG_BINDPROG")) {
+                static int n;
+                if (n++ < 40) LOG("[bindprog] %p stages %#x (program has %#x)\n", (void *)p, m, p ? p->stage_mask : 0);
+            }
+            for (int i = 0; i < 6; i++) {
+                if (!(m >> i & 1)) continue;
+                if (p && (p->stage_mask >> i & 1)) {
+                    st.comp.stages[i] = p->stages[i];
+                    st.comp.stage_mask |= 1u << i;
+                } else {
+                    memset(&st.comp.stages[i], 0, sizeof st.comp.stages[i]);
+                    st.comp.stage_mask &= ~(1u << i);
+                }
+            }
+            st.program = st.comp.stage_mask ? &st.comp : NULL;
+            break;
+        }
         case CMD_BIND_BLEND: { uint8_t *b = x; memcpy(st.blend[b[0] & 7], b, 8); break; }
         case CMD_BIND_CHANNEL_MASK: memcpy(&st.channel_mask, x, 4); break;
         case CMD_BIND_COLOR: memcpy(st.color_state, x, 4); break;

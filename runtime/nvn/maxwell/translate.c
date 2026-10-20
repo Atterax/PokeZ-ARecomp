@@ -65,6 +65,7 @@ typedef struct {
     uint32_t vs_in_comp[32];
     bool uses_branches, uses_cc, uses_local, uses_vid, uses_iid, uses_frag_coord, uses_front_facing, uses_lane;
     bool uses_rscale;  // resolution-scale table (fragment/compute only)
+    bool warned_surface;  // a dropped bindless surface op was noted
     uint32_t flat_mask;           // fragment inputs using constant (flat) interpolation
     uint32_t noperspective_mask;  // fragment inputs using pass (linear) interpolation
     uint32_t omap_target, omap_depth;
@@ -749,6 +750,178 @@ static void emit_texs(Ctx *c, uint64_t w, bool fetch) {
     write_tex_result(c, slot, call, mask, d0, d1, true, !bits(w, 59, 1));  // 0xd0/0xd2: .F16 results
 }
 
+// ATOM (global memory atomic, 32-bit; per Ryujinx's InstAtom): address Ra (+ Ra+1 with .E) + a signed 20-bit offset,
+// operand Rb, the old value to Rd. Same addressing as LDG / STG (compute: the dispatch's device-local copy first).
+// RED is ATOM without the result: value in Rb at bits 0-7, size at 20, op at 23.
+static void emit_atom(Ctx *c, uint64_t w, bool red) {
+    int d = red ? RZ : (int)bits(w, 0, 8), a = (int)bits(w, 8, 8), b = (int)(red ? bits(w, 0, 8) : bits(w, 20, 8));
+    int64_t off = sbits(w, 28, 20);
+    bool wide = bits(w, 48, 1);
+    int size = (int)(red ? bits(w, 20, 3) : bits(w, 49, 3)), op = (int)(red ? bits(w, 23, 3) : bits(w, 52, 4));
+    if (!c->glsl) { fail(c, "atom (msl)"); return; }
+    if (size > 1) { fail(c, "atom size %d", size); return; }
+    if (op > 8) { fail(c, "atom op %d", op); return; }
+    c->info->uses_gmem = true;
+    c->uses_gmem_store = true;
+    c->info->uses_gmem_store = true;
+    char addr[256], v[16];
+    if (a == RZ) sprintf(addr, "ulong(%lld)", (long long)off);
+    else if (wide) sprintf(addr, "((ulong(%s) << 32 | ulong(%s)) + ulong(%lld))", R(a + 1), R(a), (long long)off);
+    else sprintf(addr, "(ulong(%s) + ulong(%lld))", R(a), (long long)off);
+    strcpy(v, R(b));
+    sp(&c->body, "    { ulong ga = %s - 0x%llxul; bool ok = ga < 0x%llxul; uint old = 0u;\n", addr,
+       (unsigned long long)maxwell_gmem_base, (unsigned long long)maxwell_gmem_size);
+    bool fast = c->stage == STAGE_COMPUTE;
+    if (fast) {
+        c->info->uses_gmem_map = true;
+        sp(&c->body, "      uint fw = ok ? gfind(uint(ga)) : 0xFFFFFFFFu;\n");
+    }
+    static const char *const direct[] = {"atomicAdd", "atomicMin", "atomicMax", NULL, NULL, "atomicAnd", "atomicOr",
+                                         "atomicXor", "atomicExchange"};
+    bool sgn = size == 1;
+    for (int k = 0; k < (fast ? 2 : 1); k++) {
+        const char *m = fast && k == 0 ? "gfast_.w[fw]" : "gmem_.w[uint(ga >> 2)]";
+        const char *guard = fast && k == 0 ? "if (fw != 0xFFFFFFFFu)" : fast ? "else if (ok)" : "if (ok)";
+        if (direct[op] && !(sgn && (op == 1 || op == 2))) {
+            sp(&c->body, "      %s old = %s(%s, %s);\n", guard, direct[op], m, v);
+        } else {
+            char nv[300];
+            if (op == 1) sprintf(nv, "uint(min(int(o_), int(%s)))", v);
+            else if (op == 2) sprintf(nv, "uint(max(int(o_), int(%s)))", v);
+            else if (op == 3) sprintf(nv, "(o_ >= %s ? 0u : o_ + 1u)", v);
+            else sprintf(nv, "(o_ == 0u || o_ > %s ? %s : o_ - 1u)", v, v);
+            sp(&c->body, "      %s { uint o_ = %s; for (;;) { uint r_ = atomicCompSwap(%s, o_, %s); if (r_ == o_) break; o_ = r_; } "
+               "old = o_; }\n", guard, m, m, nv);
+        }
+    }
+    if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = old;\n", d); }
+    sp(&c->body, "    }\n");
+}
+
+// TLD4S (2D gather, one component or a depth compare; per Ryujinx's EmitTexs Tld4s): x in Ra, y in Rb - or y in Ra+1
+// when Rb holds the offset (.AOFFI: 6-bit signed x, y at bits 0 / 8) and / or the depth reference (.DC, after the
+// offset). Results as TEXS: two components (Rd, Rd+1), four with Rd2 (Rd2, Rd2+1); .F16 (0xdf8) packs them.
+static void emit_tld4s(Ctx *c, uint64_t w) {
+    int d0 = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8), d1 = (int)bits(w, 28, 8);
+    uint32_t index = (uint32_t)bits(w, 36, 13);
+    int comp = (int)bits(w, 52, 2);
+    bool aoffi = bits(w, 51, 1), dc = bits(w, 50, 1), f16 = bits(w, 55, 1);
+    if (!c->glsl) { fail(c, "tld4s (msl)"); return; }
+    if (d0 == RZ) return;
+    char ra[16], ra1[16], rb[16], rb1[16];
+    const char *A = reg(c, a, ra), *A1 = reg(c, a == RZ ? RZ : a + 1, ra1), *Bv = reg(c, b, rb),
+               *B1 = reg(c, b == RZ ? RZ : b + 1, rb1);
+    const char *y = dc || aoffi ? A1 : Bv;
+    const char *dref = dc ? (aoffi ? B1 : Bv) : NULL;
+    int slot = tex_slot(c, index, TEXTYPE_2D, dc, false);
+    if (c->fail) return;
+    char P[512], call[1200];
+    if (aoffi)  // (GLSL gather offsets must be constant: move the coordinates instead, as glsl_sample does)
+        snprintf(P, sizeof P, "(vec2(as_type<float>(%s), as_type<float>(%s)) + vec2(bitfieldExtract(int(%s), 0, 6), "
+                 "bitfieldExtract(int(%s), 8, 6)) / vec2(tsize%d(0).xy))", A, y, Bv, Bv, slot);
+    else
+        snprintf(P, sizeof P, "vec2(as_type<float>(%s), as_type<float>(%s))", A, y);
+    if (dc) snprintf(call, sizeof call, "textureGather(t%d, %s, as_type<float>(%s))", slot, P, dref);
+    else snprintf(call, sizeof call, "textureGather(t%d, %s, %d)", slot, P, comp);
+    write_tex_result(c, slot, call, d1 == RZ ? 3u : 15u, d0, d1, true, f16);
+}
+
+// TMML (LOD query; per Ryujinx's EmitTmml): coordinates from Ra (the array index first), results in 8.8 fixed point,
+// x = the LOD the hardware would use, y = the mip level; z / w read 0.
+static void emit_tmml(Ctx *c, uint64_t w) {
+    int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8);
+    uint32_t index = (uint32_t)bits(w, 36, 13), mask = (uint32_t)bits(w, 31, 4);
+    int dim = (int)bits(w, 28, 3);
+    static const int types[8] = {TEXTYPE_1D, TEXTYPE_1D_ARRAY, TEXTYPE_2D, TEXTYPE_2D_ARRAY, TEXTYPE_3D, -1,
+                                 TEXTYPE_CUBE, TEXTYPE_CUBE_ARRAY};
+    static const int ncoord[8] = {1, 1, 2, 2, 3, 3, 3, 3};
+    if (!c->glsl) { fail(c, "tmml (msl)"); return; }
+    if (types[dim] < 0) { fail(c, "tmml 3d array"); return; }
+    if (d == RZ) return;
+    bool array = dim == 1 || dim == 3 || dim == 7;
+    int slot = tex_slot(c, index, types[dim], false, array);
+    if (c->fail) return;
+    int r = a == RZ ? RZ : a + (array ? 1 : 0);
+    char co[3][64];
+    for (int i = 0; i < 3; i++) {
+        char rr[16];
+        snprintf(co[i], sizeof co[i], "as_type<float>(%s)", reg(c, r == RZ ? RZ : r + i, rr));
+    }
+    char q[300];
+    if (c->stage != STAGE_FRAGMENT) strcpy(q, "vec2(0.0f)");  // (no implicit derivatives outside fragment shaders)
+    else if (ncoord[dim] == 1) snprintf(q, sizeof q, "textureQueryLod(t%d, %s)", slot, co[0]);
+    else if (ncoord[dim] == 2) snprintf(q, sizeof q, "textureQueryLod(t%d, vec2(%s, %s))", slot, co[0], co[1]);
+    else snprintf(q, sizeof q, "textureQueryLod(t%d, vec3(%s, %s, %s))", slot, co[0], co[1], co[2]);
+    sp(&c->body, "    { vec2 lq = %s;\n", q);
+    int out = d;
+    for (int comp = 0; comp < 4 && out < RZ; comp++) {
+        if (!(mask >> comp & 1)) continue;
+        c->reg_used[out] = 1;
+        // (the instruction's component order is the reverse of GLSL's)
+        if (comp < 2) sp(&c->body, "      r%d = uint(int(lq[%d] * 256.0f));\n", out, comp ^ 1);
+        else sp(&c->body, "      r%d = 0u;\n", out);
+        out++;
+    }
+    sp(&c->body, "    }\n");
+}
+
+// VMNMX (video min / max of byte / half / word selections, then an accumulate / min / max / merge with Rc; per
+// Ryujinx's Vmnmx). Selection: 0-3 u8 bytes, 4-5 u16 halves, 6 u32, | 8 signed.
+static const char *vsel(char *o, const char *r, int sel) {
+    static const int sh[16] = {0, 8, 16, 24, 0, 16, 0, 0, 0, 8, 16, 24, 0, 16, 0, 0};
+    int width = (sel & 7) < 4 ? 8 : (sel & 7) < 6 ? 16 : 32;
+    if (width == 32) sprintf(o, "%s", r);
+    else if (sel & 8) sprintf(o, "uint(bitfieldExtract(int(%s), %d, %d))", r, sh[sel], width);
+    else sprintf(o, "bitfieldExtract(%s, %d, %d)", r, sh[sel], width);
+    return o;
+}
+static void emit_vmnmx(Ctx *c, uint64_t w) {
+    int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8), cr = (int)bits(w, 39, 8);
+    int asel = (int)(bits(w, 48, 1) << 3 | bits(w, 36, 3)), bsel = (int)(bits(w, 49, 1) << 3 | bits(w, 28, 3));
+    bool bvideo = bits(w, 50, 1), mn = bits(w, 56, 1), sat = bits(w, 55, 1), dfmt = bits(w, 54, 1);
+    int vop = (int)bits(w, 51, 3);
+    if (bits(w, 47, 1)) { fail(c, "vmnmx .cc"); return; }
+    char sa[300], sb[300], ib[32];
+    vsel(sa, R(a), asel);
+    if (bvideo) vsel(sb, R(b), bsel);
+    else {
+        int imm = (int)bits(w, 20, 16);
+        if (bsel & 8) imm = (int)(int16_t)imm;
+        sprintf(ib, "%uu", (uint32_t)imm);
+        strcpy(sb, ib);
+    }
+    bool as = asel & 8, bs = bsel & 8;
+    char res[1200];
+    bool rs;
+    if (as != bs) {  // signedness differs: max fits a u32, min an s32; the unsigned one past INT_MAX wins
+        rs = !mn;
+        const char *u = as ? sb : sa;
+        if (mn) sprintf(res, "(int(%s) < 0 ? %s : max(%s, %s))", u, u, sa, sb);
+        else sprintf(res, "(int(%s) < 0 ? %s : uint(min(int(%s), int(%s))))", u, u, sa, sb);
+    } else {
+        rs = as;
+        if (rs) sprintf(res, "uint(%s(int(%s), int(%s)))", mn ? "max" : "min", sa, sb);
+        else sprintf(res, "%s(%s, %s)", mn ? "max" : "min", sa, sb);
+    }
+    char t2[1400];
+    if (sat && dfmt && !rs) { sprintf(t2, "min(%s, 2147483647u)", res); strcpy(res, t2); }
+    else if (sat && !dfmt && rs) { sprintf(t2, "uint(max(int(%s), 0))", res); strcpy(res, t2); }
+    const char *C = R(cr);
+    char t[1600];
+    switch (vop) {
+    case 4: sprintf(t, "(%s + %s)", res, C); break;
+    case 5: sprintf(t, dfmt ? "uint(min(int(%s), int(%s)))" : "min(%s, %s)", res, C); break;
+    case 6: sprintf(t, dfmt ? "uint(max(int(%s), int(%s)))" : "max(%s, %s)", res, C); break;
+    case 0: sprintf(t, "bitfieldInsert(%s, %s, 16, 16)", C, res); break;
+    case 1: sprintf(t, "bitfieldInsert(%s, %s, 0, 16)", C, res); break;
+    case 2: sprintf(t, "bitfieldInsert(%s, %s, 0, 8)", C, res); break;
+    case 3: sprintf(t, "bitfieldInsert(%s, %s, 16, 8)", C, res); break;
+    default: strcpy(t, res); break;
+    }
+    if (!c->glsl) { fail(c, "vmnmx (msl)"); return; }
+    set_reg(c, d, t);
+}
+
 // TEX (full form): coordinates from consecutive registers at gpr8, extra parameters at gpr20.
 static void emit_tex(Ctx *c, uint64_t w, bool bindless) {
     int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8);
@@ -917,6 +1090,49 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         emit_tex(c, w, false);
     } else if (OPM(0xdeb8000000000000ull, 0xfff8000000000000ull)) {  // TEX.B (bindless)
         emit_tex(c, w, true);
+    } else if (OPM(0xdf00000000000000ull, 0xffc0000000000000ull) || OPM(0xdf80000000000000ull, 0xffc0000000000000ull)) {
+        emit_tld4s(c, w);  // TLD4S (.F16: 0xdf8)
+    } else if (OPM(0xdf58000000000000ull, 0xfff8000000000000ull)) {  // TMML
+        emit_tmml(c, w);
+    } else if (OPM(0x3a00000000000000ull, 0xfe00000000000000ull)) {  // VMNMX
+        emit_vmnmx(c, w);
+    } else if (OPM(0xeb20000000000000ull, 0xfff8000000000000ull) || OPM(0xeb50000000000000ull, 0xfff8000000000000ull)) {
+        // SUST.B / SURED.B: bindless surface store / reduction - no image-by-handle support yet: dropped, so the rest
+        // of the shader still runs
+        if (!c->warned_surface) { c->warned_surface = true; sp(&c->body, "    /* bindless surface store dropped */\n"); }
+    } else if (OPM(0x5bd0000000000000ull, 0xfff8000000000000ull) || OPM(0x4bd0000000000000ull, 0xfff8000000000000ull) ||
+               OPM(0x36d0000000000000ull, 0xfef8000000000000ull)) {  // LEA: (±Ra << sh) + B (per Ryujinx's EmitLea)
+        if (bits(w, 46, 1) || bits(w, 47, 1)) { fail(c, "lea .x / .cc"); return; }
+        int sh = (int)bits(w, 39, 5);
+        if (bits(w, 45, 1)) sprintf(t, "((0u - (%s << %du)) + %s)", R(a), sh, B(false));
+        else sprintf(t, "((%s << %du) + %s)", R(a), sh, B(false));
+        set_reg(c, d, t);
+    } else if (OPM(0x5bd8000000000000ull, 0xfff8000000000000ull) || OPM(0x1800000000000000ull, 0xfc00000000000000ull)) {
+        // LEA.HI: the high word of (±(Rc:Ra) << sh), + B (per Ryujinx's EmitLeaHi)
+        bool cb = (w >> 58) == 0x6;
+        int sh = (int)(cb ? bits(w, 51, 5) : bits(w, 28, 5)), rc = (int)bits(w, 39, 8);
+        bool neg = cb ? bits(w, 56, 1) : bits(w, 37, 1), x = cb ? bits(w, 57, 1) : bits(w, 38, 1);
+        if (x) { fail(c, "lea.hi .x"); return; }
+        char bb[128];
+        const char *bv = cb ? cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, bb) : R((int)bits(w, 20, 8));
+        char hi[400];
+        if (sh) sprintf(hi, "((%s >> %du) | (%s << %du))", R(a), 32 - sh, R(rc), sh);
+        else strcpy(hi, R(rc));
+        if (neg) sprintf(t, "((~%s + ((~(%s << %du)) == 0xFFFFFFFFu ? 1u : 0u)) + %s)", hi, R(a), sh, bv);
+        else sprintf(t, "(%s + %s)", hi, bv);
+        set_reg(c, d, t);
+    } else if (OPM(0xed00000000000000ull, 0xff00000000000000ull)) {  // ATOM (global)
+        emit_atom(c, w, false);
+    } else if (OPM(0xebf8000000000000ull, 0xfff8000000000000ull)) {  // RED (global)
+        emit_atom(c, w, true);
+    } else if (OPM(0x50d8000000000000ull, 0xfff8000000000000ull)) {  // VOTE (per Ryujinx's Vote; warps of 32 = NVIDIA subgroups)
+        int vp = (int)bits(w, 45, 3), mode = (int)bits(w, 48, 2);
+        const char *src = P((int)bits(w, 39, 3), bits(w, 42, 1));
+        if (!c->glsl) { fail(c, "vote (msl)"); return; }
+        static const char *const fn[] = {"subgroupAll", "subgroupAny", "subgroupAllEqual"};
+        if (mode > 2) { fail(c, "vote mode %d", mode); return; }
+        if (vp != PT) { c->pred_used[vp] = 1; sp(&c->body, "    p%d = %s(%s);\n", vp, fn[mode], src); }
+        if (d != RZ) { sprintf(t, "subgroupBallot(%s).x", src); set_reg(c, d, t); }
     } else if (OPM(0xdf48000000000000ull, 0xfff8000000000000ull)) {  // TXQ
         uint32_t index = (uint32_t)bits(w, 36, 13);
         int qt = (int)bits(w, 22, 6);
@@ -1727,6 +1943,8 @@ static const char glsl_prelude[] =
     "#extension GL_KHR_shader_subgroup_basic : require\n"
     "#extension GL_KHR_shader_subgroup_shuffle : require\n"
     "#extension GL_KHR_shader_subgroup_shuffle_relative : require\n"
+    "#extension GL_KHR_shader_subgroup_vote : require\n"
+    "#extension GL_KHR_shader_subgroup_ballot : require\n"
     "#extension GL_EXT_texture_shadow_lod : require\n"
     "#define cbr(cb, off) cb[min((off) >> 4, uint(cb.length() - 1))][((off) >> 2) & 3u]\n"
     "uint as_u(float x) { return floatBitsToUint(x); }\n"
@@ -1935,8 +2153,9 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     c->glsl = key && key->glsl;
     const uint8_t *sph = blob + 0x30;
     const uint8_t *code = blob + 0x80;
-    // compute programs have neither the 0x30-byte NVN header nor an SPH: code starts at the blob
-    if (stage == STAGE_COMPUTE) code = blob;
+    // compute programs have no SPH: code starts at the blob, or (newer SDKs, e.g. Pokémon Z-A's 19) after a 0x100-byte
+    // header whose first word is 0x12345679
+    if (stage == STAGE_COMPUTE) code = *(const uint32_t *)blob == 0x12345679 ? blob + 0x100 : blob;
     if (stage == STAGE_FRAGMENT) {
         c->omap_target = *(const uint32_t *)(sph + 0x48);
         c->omap_depth = (*(const uint32_t *)(sph + 0x4C) >> 1) & 1;
@@ -2162,4 +2381,11 @@ void maxwell_free(ShaderInfo *s) {
 
 void maxwell_disassemble(const uint8_t *code, size_t max_size, int stage, void *file) {
     (void)code; (void)max_size; (void)stage; (void)file;
+}
+
+ShaderInfo *maxwell_empty_fragment(void) {
+    ShaderInfo *info = calloc(1, sizeof *info);
+    info->stage = STAGE_FRAGMENT;
+    info->msl = strdup("#version 460\nvoid main() {}\n");
+    return info;
 }
