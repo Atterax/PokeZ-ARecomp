@@ -2,7 +2,8 @@
 // nn::os::detail::DispatchFiberContext: push the callee-saved registers on the current stack, store that sp in the
 // current fiber's context, load the other fiber's sp, pop its registers and `ret` to its x30. Recompiled, that `ret`
 // is a C return into the *current* host stack, which belongs to the fiber being left - so each guest fiber gets a
-// host context of its own (its own host stack, ucontext), and the switch is a host context switch.
+// host context of its own (its own host stack: a ucontext, or a Win32 fiber on Windows), and the switch is a host
+// context switch.
 //
 // Each fiber also gets its own Cpu: the host frames of a suspended fiber hold their `Cpu *c`, and a job system may
 // resume the fiber on another thread. A switch copies the running thread's identity (thread object, TLS) into the
@@ -10,8 +11,12 @@
 // frame on the fiber's stack, its sp in FiberType+0x50.
 #include <pthread.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <sys/mman.h>
 #include <ucontext.h>
+#endif
 
 #include "../hle.h"
 
@@ -20,8 +25,13 @@
 
 typedef struct Co {
     uint64_t key;  // guest address of the fiber's context (FiberType + 0x50, or the thread's own on its stack)
+#ifdef _WIN32
+    void *fiber;   // the Win32 fiber: ours (CreateFiberEx) when own, else a thread's (ConvertThreadToFiber)
+    bool own;
+#else
     ucontext_t uc;
     void *stack;
+#endif
     Cpu *cpu;
     int started;
 } Co;
@@ -42,7 +52,11 @@ static Co *co_get(uint64_t key) {
 
 RT_ON_RESET(fiber_reset) {
     for (int i = 0; i < ncos; i++) {
+#ifdef _WIN32
+        if (fibers[i]->own) DeleteFiber(fibers[i]->fiber);
+#else
         if (fibers[i]->stack) munmap(fibers[i]->stack, CO_STACK);
+#endif
         free(fibers[i]->cpu);
         free(fibers[i]);
     }
@@ -81,6 +95,9 @@ static void co_main(void) {
     rt_dispatch(c);
     FATAL("[fiber] fiber at %llx returned\n", (unsigned long long)co->key);
 }
+#ifdef _WIN32
+static void WINAPI co_fiber_main(void *p) { (void)p; co_main(); }
+#endif
 
 // nn::os::detail::FiberImplByHorizon::InitializeImpl(FiberType *fiber, void *entry): as the SDK, and a reused
 // FiberType starts afresh
@@ -106,11 +123,22 @@ HLE_FUNC("_ZN2nn2os6detail20DispatchFiberContextEPPNS1_22FiberContextForHorizonE
     me->cpu = c;  // (whatever runs now: a fiber's own Cpu, or the thread's on its first switch)
     me->started = 1;
     if (!dst->cpu) {
-        dst->cpu = aligned_alloc(16, sizeof(Cpu));
-        memset(dst->cpu, 0, sizeof(Cpu));
+        dst->cpu = calloc(1, sizeof(Cpu));  // (16-byte aligned on the 64-bit hosts)
     }
     identity(dst->cpu, c);
     bool fresh = !dst->started;
+#ifdef _WIN32
+    // whatever runs now is a Win32 fiber from here on (a thread's first switch converts it)
+    me->fiber = IsThreadAFiber() ? GetCurrentFiber() : ConvertThreadToFiber(NULL);
+    if (!me->fiber) FATAL("[fiber] ConvertThreadToFiber failed (%lu)\n", GetLastError());
+    if (fresh) {
+        if (dst->own) DeleteFiber(dst->fiber);  // (a reused FiberType: not running, its old fiber starts afresh)
+        dst->fiber = CreateFiberEx(0, CO_STACK, FIBER_FLAG_FLOAT_SWITCH, co_fiber_main, NULL);
+        if (!dst->fiber) FATAL("[fiber] no host fiber (%lu)\n", GetLastError());
+        dst->own = true;
+        dst->started = 1;
+    }
+#else
     if (fresh) {
         if (!dst->stack) {
             dst->stack = mmap(NULL, CO_STACK, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
@@ -123,9 +151,14 @@ HLE_FUNC("_ZN2nn2os6detail20DispatchFiberContextEPPNS1_22FiberContextForHorizonE
         makecontext(&dst->uc, co_main, 0);
         dst->started = 1;
     }
+#endif
     pthread_mutex_unlock(&co_lock);
     if (fresh) co_starting = dst;
+#ifdef _WIN32
+    SwitchToFiber(dst->fiber);
+#else
     swapcontext(&me->uc, &dst->uc);
+#endif
     // resumed (perhaps on another thread: whoever switched back copied its identity into c)
     frame_load(c, LD64(from));
 }

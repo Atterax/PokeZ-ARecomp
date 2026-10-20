@@ -166,7 +166,8 @@ $(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ)
 
 # its id file (<library>.id) says what it was built from without loading it (runtime/gamelib.c)
 $(GAMELIB): $(GEN_OBJ) | $(EXE)
-	$(CC) $(GAMELIB_LDFLAGS) -o $@.tmp $^
+	$(file >$@.rsp,$^)
+	$(CC) $(GAMELIB_LDFLAGS) -o $@.tmp @$@.rsp  # (response file: Windows' command line limit, ~1400 objects)
 	mv -f $@.tmp $@
 	echo $(GAMELIB_ID) > $@.id
 
