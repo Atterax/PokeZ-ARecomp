@@ -822,6 +822,13 @@ static uint32_t tex_wh[2][64][2];
 static VkFormat pass_color[8], pass_depth, pass_stencil;
 static uint32_t pass_ncolor, pass_samples = 1, pass_w, pass_h, pass_layers = 1;
 static int debug_pass_no;
+// (draw_indirect) the draw being made reads its parameters on the GPU: offset in the guest memory window's buffer
+static bool g_ind_gpu;
+static VkDeviceSize g_ind_off;
+static uint32_t g_ind_stride;
+// Transform feedback state (Begin/EndTransformFeedback, the bound buffers) and rasterizer discard
+static bool xfb_on, raster_discard;
+static uint64_t xfb_addr[4], xfb_size[4];
 static uint32_t raw_layer;  // (debug frame: the layer of a layered pass that renderer_save_texture_tex saves)
 
 // Redundant-state filter: what draw() last set in the current command buffer, so unchanged pipeline binds, dynamic
@@ -2032,7 +2039,8 @@ static bool gmem_import(uint64_t size) {
                                            .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = size,
                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT};
+                                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                                      VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT};
     VkBuffer buf;
     if (vkCreateBuffer(g_vk.dev, &bi, NULL, &buf) != VK_SUCCESS) { vkFreeMemory(g_vk.dev, mem, NULL); return false; }
     vkBindBufferMemory(g_vk.dev, buf, mem, 0);
@@ -2465,9 +2473,16 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
     VkDescriptorImageInfo ii[MAX_BIND];
     int n = 0;
     int sg = stage == 1 ? 1 : 0;
-    float rs[66][4] = {{1, 1, 0, 0}};  // ([65]: mirror mode, renderer.m)
+    float rs[70][4] = {{1, 1, 0, 0}};  // ([65]: mirror mode, renderer.m; [66..69]: vertex transform feedback buffers)
     if (rscale_row0) memcpy(rs[0], rscale_row0, 16);
     rs[65][0] = g_mirror_w;
+    if (stage == 0 && xfb_on)
+        for (int b = 0; b < 4; b++) {
+            uint64_t a = xfb_addr[b];
+            if (!a || a < gwin_base || a - gwin_base + xfb_size[b] > gwin_max || (a & 3)) continue;
+            uint32_t u[4] = {(uint32_t)((a - gwin_base) >> 2), 0, 1, 0};
+            memcpy(rs[66 + b], u, 16);
+        }
     for (int i = 0; i < p->nbinds; i++) {
         VkBindingInfo *b = &p->binds[i];
         if (b->set != set) continue;
@@ -2558,6 +2573,13 @@ static CsProg *compute_program(NvnProgram *np) {
     k.glsl = 1;
     pthread_mutex_lock(&translate_lock);
     cp->si = maxwell_translate((const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, STAGE_COMPUTE, &k);
+    if (getenv("LARECOMP_DUMP_GLSL")) {  // (debug) build/glsl/<code address>.comp
+        mkdir("build/glsl", 0755);
+        char path[96];
+        snprintf(path, sizeof path, "build/glsl/%llx.comp", (unsigned long long)ss->code_addr);
+        FILE *f = fopen(path, "wb");
+        if (f) { fputs(cp->si->msl ? cp->si->msl : cp->si->error, f); fclose(f); }
+    }
     pthread_mutex_unlock(&translate_lock);
     cp->p.vi = cp->si;
     if (!cp->si->msl) {
@@ -2679,9 +2701,37 @@ static uint32_t stencil_slots(int stage) {
     return m;
 }
 
+
+// (investigation) the programs drawn with transform feedback on: their control sections to build/xfb_<vs code>.bin
+static void xfb_note(void) {
+    static uint64_t seen[64];
+    static int nseen;
+    if (!st.program || nseen >= 64) return;
+    uint64_t vs = st.program->stages[0].code_addr;
+    for (int i = 0; i < nseen; i++) if (seen[i] == vs) return;
+    seen[nseen++] = vs;
+    LOG("[xfb] program vs %llx fs %llx discard %d buffers %llx+%llx %llx+%llx %llx+%llx %llx+%llx\n", (unsigned long long)vs,
+        (unsigned long long)st.program->stages[1].code_addr, raster_discard, (unsigned long long)xfb_addr[0],
+        (unsigned long long)xfb_size[0], (unsigned long long)xfb_addr[1], (unsigned long long)xfb_size[1],
+        (unsigned long long)xfb_addr[2], (unsigned long long)xfb_size[2], (unsigned long long)xfb_addr[3],
+        (unsigned long long)xfb_size[3]);
+    if (getenv("LARECOMP_DUMP_XFB") && st.program->stages[0].control) {
+        char path[96];
+        snprintf(path, sizeof path, "build/xfb_%llx.bin", (unsigned long long)vs);
+        FILE *f = fopen(path, "wb");
+        if (f) { fwrite(st.program->stages[0].control, 1, 0x800, f); fclose(f); }
+    }
+}
+
 static void draw_(CmdRec *r, bool indexed);
 static void draw(CmdRec *r, bool indexed) {
     PROF_T0();
+    if (xfb_on) {
+        xfb_note();
+        static int nlog;
+        if (nlog++ < 12) LOG("[xfb] draw indexed %d mode %llu x1 %llx count %llu x3 %llx x4 %llx\n", indexed, (unsigned long long)r->x[0],
+                             (unsigned long long)r->x[1], (unsigned long long)r->x[2], (unsigned long long)r->x[3], (unsigned long long)r->x[4]);
+    }
     draw_(r, indexed);
     PROF_ADD(prof_draw);
 }
@@ -2697,6 +2747,13 @@ static void draw_(CmdRec *r, bool indexed) {
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
     vkey.stencil_slots = stencil_slots(0);
     fkey.stencil_slots = stencil_slots(1);
+    if (xfb_on && st.program->stages[0].control) {  // the program's transform feedback layout (its control section)
+        const uint8_t *ctl = st.program->stages[0].control;
+        for (int b = 0; b < 4; b++) {
+            vkey.xfb_count[b] = (uint8_t)*(const uint32_t *)(ctl + 0x4DC + 0x80 * b);
+            vkey.xfb_stride[b] = *(const uint16_t *)(ctl + 0x6DC + 2 * b);
+        }
+    }
     Prog *pr = get_program(st.program, &vkey, &fkey);
     if (!pr || atomic_load(&pr->state) != 1) { stat_skipped_here(); return; }
     g_mirror_w = 0;
@@ -3003,6 +3060,7 @@ static void draw_(CmdRec *r, bool indexed) {
     VkIndexType itype_vk = VK_INDEX_TYPE_UINT32;
     uint32_t icount = 0;
     bool use_index = indexed || !native;
+    bool ind_ok = !indexed && native;  // (g_ind_gpu: the parameters can be the GPU's - first index etc. as in Vulkan)
     const void *scan_src = NULL;  // deferred index scan (direct index buffer)
     uint32_t scan_isz = 0, scan_restart = 0;
     if (!indexed) {
@@ -3025,6 +3083,7 @@ static void draw_(CmdRec *r, bool indexed) {
             uint32_t isz = itype == 1 ? 2 : 4;
             itype_vk = itype == 1 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
             icount = count;
+            ind_ok = true;
             if (iaddr % isz == 0 && guest_direct(iaddr, (uint64_t)count * isz, &ib.buf, &ib.off)) {
                 scan_src = src; scan_isz = isz; scan_restart = restart;  // max_index only if a stream gets copied
             } else {
@@ -3126,7 +3185,15 @@ static void draw_(CmdRec *r, bool indexed) {
             VkDescriptorSet rset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, rtint, 0, 0, 0, fii);
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 1, 1, &rset, 0, NULL);
         }
-        if (!use_index) vkCmdDraw(cb, count, run_n[ri], first, base_inst + run_at[ri]);
+        if (raster_discard) {  // (rasterizer discard: the vertex stage runs - transform feedback - and nothing is drawn)
+            VkRect2D none = {{0, 0}, {0, 0}};
+            vkCmdSetScissor(cb, 0, 1, &none);
+            ss.known &= ~SS_SC;
+        }
+        if (g_ind_gpu && ind_ok && nruns == 1) {  // (indirect: instance count etc. written by the GPU - culling)
+            if (indexed) vkCmdDrawIndexedIndirect(cb, gmem_buf, g_ind_off, 1, g_ind_stride);
+            else vkCmdDrawIndirect(cb, gmem_buf, g_ind_off, 1, g_ind_stride);
+        } else if (!use_index) vkCmdDraw(cb, count, run_n[ri], first, base_inst + run_at[ri]);
         else vkCmdDrawIndexed(cb, icount, run_n[ri], 0, base_vertex, base_inst + run_at[ri]);
     }
     stat_draws++;
@@ -3235,6 +3302,31 @@ static void draw_indirect(CmdRec *r) {
     d.op = elements ? CMD_DRAW_ELEMENTS : CMD_DRAW_ARRAYS;
     for (uint32_t i = 0; i < n; i++) {
         const uint32_t *p = (const uint32_t *)(uintptr_t)(ind + (uint64_t)i * stride);
+        static int nargs;
+        if (nargs < 40 && getenv("LARECOMP_LOG_INDIRECT")) {
+            nargs++;
+            LOG("[vk] indirect %llx: %u %u %u %u %u\n", (unsigned long long)(ind + (uint64_t)i * stride), p[0], p[1], p[2], p[3],
+                elements ? p[4] : 0);
+        }
+        uint64_t pa = ind + (uint64_t)i * stride;
+        gmem_info();  // (the import, made on first use)
+        bool gpu = gmem_buf && pa >= gwin_base && pa - gwin_base + 20 <= gmem_size && !(pa & 3);
+        if (gpu) {
+            // The GPU fills in parts of the parameters (the instance count: Pokémon Z-A's culling compute), so the
+            // draw reads them there; the CPU side covers the index range from the buffer's start (the first index
+            // applies on the GPU) with one instance
+            g_ind_gpu = true; g_ind_off = pa - gwin_base; g_ind_stride = stride;
+            d.x[0] = r->x[0];
+            if (elements) {
+                d.x[1] = r->x[1]; d.x[2] = p[0] + p[2]; d.x[3] = r->x[2];
+                d.x[4] = (uint64_t)(int64_t)(int32_t)p[3]; d.x[5] = p[4]; d.x[6] = 1;
+            } else {
+                d.x[1] = 0; d.x[2] = p[0] + p[2]; d.x[3] = p[3]; d.x[4] = 1;
+            }
+            if (d.x[2]) draw(&d, elements);
+            g_ind_gpu = false;
+            continue;
+        }
         if (!p[0] || !p[1]) continue;  // (no vertices or no instances)
         d.x[0] = r->x[0];  // mode
         if (elements) {  // x: mode, index type, count, index buffer, base vertex, base instance, instances
@@ -3941,6 +4033,25 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_DISPATCH: dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]); break;
         case CMD_DRAW_ARRAYS: draw(r, false); break;
         case CMD_DRAW_ELEMENTS: draw(r, true); break;
+        case CMD_BEGIN_XFB: xfb_on = true; break;
+        case CMD_END_XFB: xfb_on = false; break;
+        case CMD_BIND_XFB_BUFFER:
+            if (r->x[0] < 4) { xfb_addr[r->x[0]] = r->x[1]; xfb_size[r->x[0]] = r->x[2]; }
+            break;
+        case CMD_BIND_XFB_BUFFERS: {
+            const uint64_t *b = x;
+            for (uint64_t i = 0; i < r->x[1] && i < 4 && r->x[0] + i < 4; i++) {
+                xfb_addr[r->x[0] + i] = b[2 * i];
+                xfb_size[r->x[0] + i] = b[2 * i + 1];
+            }
+            break;
+        }
+        case CMD_SET_RASTERIZER_DISCARD: raster_discard = r->x[0] & 1; break;
+        case CMD_DRAW_XFB: {
+            static int nlog;
+            if (nlog++ < 4) LOG("[xfb] DrawTransformFeedback mode %llu control %llx\n", (unsigned long long)r->x[0], (unsigned long long)r->x[1]);
+            break;
+        }
         case CMD_DRAW_ARRAYS_INDIRECT: case CMD_DRAW_ELEMENTS_INDIRECT:
         case CMD_MULTI_DRAW_ARRAYS_INDIRECT_COUNT: case CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT:
             draw_indirect(r);

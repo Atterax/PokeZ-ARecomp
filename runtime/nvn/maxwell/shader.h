@@ -48,6 +48,11 @@ typedef struct {
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
     uint32_t stencil_slots; // (GLSL) texture handle slots ((handle_offset - 0x20) / 8) bound in stencil mode
                             // (NVN depth/stencil mode STENCIL): a usampler, results read as uint bits
+    // (GLSL vertex) transform feedback: buffer b takes xfb_count[b] 32-bit output components, xfb_stride[b] bytes per
+    // vertex. The written varying components go to the buffers in order (location, then x..w). Where (and whether)
+    // per draw: rscale[66 + b] = (word offset of buffer b in global memory, -, on, -) as uint bits (binding 18).
+    uint8_t xfb_count[4];
+    uint16_t xfb_stride[4];
 } ShaderKey;
 
 typedef struct {

@@ -18,7 +18,7 @@ NVN(nvnCommandBufferInitialize) {
     RET(1);
 }
 NVN(nvnCommandBufferFinalize) { free(cb_of(A(0))); SET_HOST(A(0), 0); }
-NVN(nvnCommandBufferSetDebugLabel) { (void)c; }
+NVN(nvnCommandBufferSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetDebugLabel\n"); }
 
 static CmdRec *raw_rec(uint64_t at, uint32_t op, uint32_t size) {
     CmdRec *r = (CmdRec *)(uintptr_t)at;
@@ -86,7 +86,7 @@ NVN(nvnCommandBufferAddCommandMemory) {
     cb->size = size;
     cb->used = 0;
 }
-NVN(nvnCommandBufferAddControlMemory) { (void)c; }
+NVN(nvnCommandBufferAddControlMemory) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferAddControlMemory\n"); }
 NVN(nvnCommandBufferGetCommandMemorySize) { RET(cb_of(A(0))->size); }
 NVN(nvnCommandBufferGetCommandMemoryUsed) { RET(cb_of(A(0))->used); }
 NVN(nvnCommandBufferGetCommandMemoryFree) {
@@ -100,7 +100,7 @@ NVN(nvnCommandBufferSetMemoryCallback) { cb_of(A(0))->callback = A(1); }
 NVN(nvnCommandBufferGetMemoryCallback) { RET(cb_of(A(0))->callback); }
 NVN(nvnCommandBufferSetMemoryCallbackData) { cb_of(A(0))->callback_data = A(1); }
 NVN(nvnCommandBufferGetMemoryCallbackData) { RET(cb_of(A(0))->callback_data); }
-NVN(nvnCommandBufferSetCommandMemoryCallbackEnabled) { (void)c; }
+NVN(nvnCommandBufferSetCommandMemoryCallbackEnabled) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetCommandMemoryCallbackEnabled\n"); }
 
 // Reserve a record. May call back into the guest for more memory, so callers snapshot their
 // arguments first.
@@ -223,11 +223,17 @@ NVN(nvnCommandBufferBindSeparateTexture) {
     r->x[0] = s.x[1]; r->x[1] = s.x[2]; r->x[2] = 1;
     memcpy(r->extra, &s.x[3], 8);
 }
-NVN(nvnCommandBufferBindSeparateSamplers) { (void)c; }
-NVN(nvnCommandBufferBindSeparateSampler) { (void)c; }
-NVN(nvnCommandBufferBindTransformFeedbackBuffers) { (void)c; }
-NVN(nvnCommandBufferBindTransformFeedbackBuffer) { (void)c; }
-NVN(nvnCommandBufferBindCoverageModulationTable) { (void)c; }
+NVN(nvnCommandBufferBindSeparateSamplers) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferBindSeparateSamplers\n"); }
+NVN(nvnCommandBufferBindSeparateSampler) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferBindSeparateSampler\n"); }
+// (buffers: first, count, NVNbufferRange* {address, size}) copied with the command
+NVN(nvnCommandBufferBindTransformFeedbackBuffers) {
+    Snap s = snap(c);
+    uint32_t n = (uint32_t)s.x[2] < 4 ? (uint32_t)s.x[2] : 4;
+    CmdRec *r = record(c, CMD_BIND_XFB_BUFFERS, n * 16, &s);
+    if (n && s.x[3]) memcpy(r->extra, (const void *)(uintptr_t)s.x[3], n * 16);
+}
+PLAIN(nvnCommandBufferBindTransformFeedbackBuffer, CMD_BIND_XFB_BUFFER)  // (index, address, size)
+NVN(nvnCommandBufferBindCoverageModulationTable) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferBindCoverageModulationTable\n"); }
 
 NVN(nvnCommandBufferSetTexturePool) {
     Snap s = snap(c);
@@ -303,25 +309,25 @@ PLAIN(nvnCommandBufferSetLineWidth, CMD_SET_LINE_WIDTH)
 PLAIN(nvnCommandBufferSetPointSize, CMD_SET_POINT_SIZE)
 PLAIN(nvnCommandBufferSetSampleMask, CMD_SET_SAMPLE_MASK)
 PLAIN(nvnCommandBufferSetRenderEnable, CMD_SET_RENDER_ENABLE)
-NVN(nvnCommandBufferSetRenderEnableConditional) { (void)c; }
-NVN(nvnCommandBufferSetDepthClamp) { (void)c; }
-NVN(nvnCommandBufferSetRasterizerDiscard) { (void)c; }
-NVN(nvnCommandBufferSetConservativeRasterEnable) { (void)c; }
-NVN(nvnCommandBufferSetConservativeRasterDilate) { (void)c; }
-NVN(nvnCommandBufferSetSubpixelPrecisionBias) { (void)c; }
-NVN(nvnCommandBufferSetViewportSwizzles) { (void)c; }
-NVN(nvnCommandBufferSetStencilCullCriteria) { (void)c; }
-NVN(nvnCommandBufferSetColorReductionEnable) { (void)c; }
-NVN(nvnCommandBufferSetColorReductionThresholds) { (void)c; }
-NVN(nvnCommandBufferSetTiledCacheAction) { (void)c; }
-NVN(nvnCommandBufferSetTiledCacheTileSize) { (void)c; }
-NVN(nvnCommandBufferSetShaderScratchMemory) { (void)c; }
-NVN(nvnCommandBufferSetPatchSize) { (void)c; }
-NVN(nvnCommandBufferSetInnerTessellationLevels) { (void)c; }
-NVN(nvnCommandBufferSetOuterTessellationLevels) { (void)c; }
-NVN(nvnCommandBufferSetProgramSubroutines) { (void)c; }
-NVN(nvnCommandBufferSaveZCullData) { (void)c; }
-NVN(nvnCommandBufferRestoreZCullData) { (void)c; }
+NVN(nvnCommandBufferSetRenderEnableConditional) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetRenderEnableConditional\n"); }
+NVN(nvnCommandBufferSetDepthClamp) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetDepthClamp\n"); }
+PLAIN(nvnCommandBufferSetRasterizerDiscard, CMD_SET_RASTERIZER_DISCARD)
+NVN(nvnCommandBufferSetConservativeRasterEnable) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetConservativeRasterEnable\n"); }
+NVN(nvnCommandBufferSetConservativeRasterDilate) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetConservativeRasterDilate\n"); }
+NVN(nvnCommandBufferSetSubpixelPrecisionBias) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetSubpixelPrecisionBias\n"); }
+NVN(nvnCommandBufferSetViewportSwizzles) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetViewportSwizzles\n"); }
+NVN(nvnCommandBufferSetStencilCullCriteria) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetStencilCullCriteria\n"); }
+NVN(nvnCommandBufferSetColorReductionEnable) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetColorReductionEnable\n"); }
+NVN(nvnCommandBufferSetColorReductionThresholds) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetColorReductionThresholds\n"); }
+NVN(nvnCommandBufferSetTiledCacheAction) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetTiledCacheAction\n"); }
+NVN(nvnCommandBufferSetTiledCacheTileSize) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetTiledCacheTileSize\n"); }
+NVN(nvnCommandBufferSetShaderScratchMemory) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetShaderScratchMemory\n"); }
+NVN(nvnCommandBufferSetPatchSize) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetPatchSize\n"); }
+NVN(nvnCommandBufferSetInnerTessellationLevels) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetInnerTessellationLevels\n"); }
+NVN(nvnCommandBufferSetOuterTessellationLevels) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetOuterTessellationLevels\n"); }
+NVN(nvnCommandBufferSetProgramSubroutines) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSetProgramSubroutines\n"); }
+NVN(nvnCommandBufferSaveZCullData) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferSaveZCullData\n"); }
+NVN(nvnCommandBufferRestoreZCullData) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferRestoreZCullData\n"); }
 
 static uint64_t copy_row_stride, copy_image_stride;
 RT_ON_RESET(cmdbuf_reset) { copy_row_stride = copy_image_stride = 0; }
@@ -376,7 +382,7 @@ NVN(nvnCommandBufferDiscardColor) {
     r->x[2] = 0xF;  // all channels
     r->x[5] = 0;    // float clear
 }
-NVN(nvnCommandBufferDiscardDepthStencil) { (void)c; }
+NVN(nvnCommandBufferDiscardDepthStencil) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferDiscardDepthStencil\n"); }
 
 // ---- draws (all integer arguments fit in x1..x7)
 NVN(nvnCommandBufferDrawArrays) { Snap s = snap(c); CmdRec *r = record(c, CMD_DRAW_ARRAYS, 0, &s); r->x[3] = 0; r->x[4] = 1; }
@@ -416,14 +422,14 @@ PLAIN(nvnCommandBufferDrawArraysIndirect, CMD_DRAW_ARRAYS_INDIRECT)
 PLAIN(nvnCommandBufferDrawElementsIndirect, CMD_DRAW_ELEMENTS_INDIRECT)
 PLAIN(nvnCommandBufferMultiDrawArraysIndirectCount, CMD_MULTI_DRAW_ARRAYS_INDIRECT_COUNT)
 PLAIN(nvnCommandBufferMultiDrawElementsIndirectCount, CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT)
-NVN(nvnCommandBufferDrawTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferDrawTexture) { (void)c; }
+PLAIN(nvnCommandBufferDrawTransformFeedback, CMD_DRAW_XFB)  // (mode, control buffer)
+NVN(nvnCommandBufferDrawTexture) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferDrawTexture\n"); }
 PLAIN(nvnCommandBufferDispatchCompute, CMD_DISPATCH)
 PLAIN(nvnCommandBufferDispatchComputeIndirect, CMD_DISPATCH_INDIRECT)
-NVN(nvnCommandBufferBeginTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferEndTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferPauseTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferResumeTransformFeedback) { (void)c; }
+PLAIN(nvnCommandBufferBeginTransformFeedback, CMD_BEGIN_XFB)  // (control buffer)
+PLAIN(nvnCommandBufferEndTransformFeedback, CMD_END_XFB)
+NVN(nvnCommandBufferPauseTransformFeedback) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferPauseTransformFeedback\n"); }
+NVN(nvnCommandBufferResumeTransformFeedback) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferResumeTransformFeedback\n"); }
 
 // ---- copies
 typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; } TexRef;
@@ -471,9 +477,9 @@ NVN(nvnCommandBufferDownsampleTextureView) {
     CmdRec *r = record(c, CMD_DOWNSAMPLE, sizeof t, &s);
     memcpy(r->extra, t, sizeof t);
 }
-NVN(nvnCommandBufferTiledDownsample) { (void)c; }
-NVN(nvnCommandBufferTiledDownsampleTextureView) { (void)c; }
-NVN(nvnCommandBufferResolveDepthBuffer) { (void)c; }
+NVN(nvnCommandBufferTiledDownsample) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferTiledDownsample\n"); }
+NVN(nvnCommandBufferTiledDownsampleTextureView) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferTiledDownsampleTextureView\n"); }
+NVN(nvnCommandBufferResolveDepthBuffer) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferResolveDepthBuffer\n"); }
 // UpdateUniformBuffer(cmd, buffer, size, offset, dataSize, data)
 NVN(nvnCommandBufferUpdateUniformBuffer) { record_copy(c, CMD_UPDATE_UNIFORM_BUFFER, 5, (uint32_t)A(4)); }
 
@@ -488,15 +494,15 @@ PLAIN(nvnCommandBufferBarrier, CMD_BARRIER)
 PLAIN(nvnCommandBufferSignalEvent, CMD_SIGNAL_EVENT)
 PLAIN(nvnCommandBufferWaitEvent, CMD_WAIT_EVENT)
 PLAIN(nvnCommandBufferReportCounter, CMD_REPORT_COUNTER)
-NVN(nvnCommandBufferReportValue) { (void)c; }
-NVN(nvnCommandBufferResetCounter) { (void)c; }
+NVN(nvnCommandBufferReportValue) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferReportValue\n"); }
+NVN(nvnCommandBufferResetCounter) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferResetCounter\n"); }
 NVN(nvnCommandBufferCallCommands) { record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
 NVN(nvnCommandBufferCopyCommands) { record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
-NVN(nvnCommandBufferInsertDebugMarker) { (void)c; }
-NVN(nvnCommandBufferInsertDebugMarkerDynamic) { (void)c; }
-NVN(nvnCommandBufferInsertDebugMarkerStatic) { (void)c; }
-NVN(nvnCommandBufferPushDebugGroup) { (void)c; }
-NVN(nvnCommandBufferPushDebugGroupDynamic) { (void)c; }
-NVN(nvnCommandBufferPushDebugGroupStatic) { (void)c; }
-NVN(nvnCommandBufferPopDebugGroup) { (void)c; }
-NVN(nvnCommandBufferPopDebugGroupId) { (void)c; }
+NVN(nvnCommandBufferInsertDebugMarker) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferInsertDebugMarker\n"); }
+NVN(nvnCommandBufferInsertDebugMarkerDynamic) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferInsertDebugMarkerDynamic\n"); }
+NVN(nvnCommandBufferInsertDebugMarkerStatic) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferInsertDebugMarkerStatic\n"); }
+NVN(nvnCommandBufferPushDebugGroup) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferPushDebugGroup\n"); }
+NVN(nvnCommandBufferPushDebugGroupDynamic) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferPushDebugGroupDynamic\n"); }
+NVN(nvnCommandBufferPushDebugGroupStatic) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferPushDebugGroupStatic\n"); }
+NVN(nvnCommandBufferPopDebugGroup) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferPopDebugGroup\n"); }
+NVN(nvnCommandBufferPopDebugGroupId) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnCommandBufferPopDebugGroupId\n"); }

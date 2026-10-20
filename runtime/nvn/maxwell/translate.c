@@ -64,6 +64,7 @@ typedef struct {
     uint32_t in_attr_mask, out_attr_mask;
     uint32_t vs_in_comp[32];
     bool uses_branches, uses_cc, uses_local, uses_vid, uses_iid, uses_frag_coord, uses_front_facing, uses_lane, uses_layer;
+    uint8_t out_comp[32];  // vertex: output components written per varying (transform feedback order)
     bool uses_rscale;  // resolution-scale table (fragment/compute only)
     bool warned_surface;  // a dropped bindless surface op was noted
     uint32_t flat_mask;           // fragment inputs using constant (flat) interpolation
@@ -290,6 +291,7 @@ static void attr_store(Ctx *c, int src, uint32_t addr) {
     } else if (addr >= 0x80 && addr < 0x280) {
         int a = (addr - 0x80) >> 4;
         c->out_attr_mask |= 1u << a;
+        c->out_comp[a] |= (uint8_t)(1u << ((addr >> 2) & 3));
         sp(&c->body, "    out.v%d[%d] = as_type<float>(%s);\n", a, (addr >> 2) & 3, v);
     } else if (addr == 0x6C) {
         c->info->writes_point_size = true;
@@ -2068,6 +2070,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     ShaderInfo *info = c->info;
     const ShaderKey *key = c->key;
     int stage = c->stage;
+    bool xfb = stage == STAGE_VERTEX && key && (key->xfb_count[0] | key->xfb_count[1] | key->xfb_count[2] | key->xfb_count[3]);
+    if (xfb) { info->uses_gmem = true; c->uses_gmem_store = true; info->uses_gmem_store = true; }
     Str body = {0};
     glsl_rewrite(c, &body, c->body.buf ? c->body.buf : "");
     if (info->uses_gmem && (info->cbuf_mask & (1u << GMEM_BUFFER_INDEX))) fail(c, "cbuf %d clashes with gmem", GMEM_BUFFER_INDEX);
@@ -2096,6 +2100,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         sp(&s, "uint gfind(uint g) { uint n = gmap[%d].x; for (uint i = 0u; i < n; i++) { uint o = g - gmap[i].x; "
                "if (g >= gmap[i].x && o < gmap[i].y) return gmap[i].z + (o >> 2); } return 0xFFFFFFFFu; }\n", GMAP_MAX);
     }
+    if (xfb) sp(&s, "layout(std140, set = 0, binding = 18) uniform RScale { vec4 rscale[70]; };\n");
     if (c->uses_rscale && stage != STAGE_VERTEX) {
         sp(&s, "layout(std140, set = %d, binding = 18) uniform RScale { vec4 rscale[%d]; };\n", set,
            key && key->flip_x ? 66 : 65);  // ([65]: mirror mode's render target width)
@@ -2170,6 +2175,18 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         sp(&s, "  do {\n%s  } while (false);\n", body.buf ? body.buf : "");
     }
     free(body.buf);
+    if (xfb) {  // transform feedback: the written varying components, in order, to the buffers (ShaderKey.xfb_count)
+        int b = 0, k = 0;
+        for (int i = 0; i < 32 && b < 4; i++)
+            for (int comp = 0; comp < 4 && b < 4; comp++) {
+                if (!(c->out_comp[i] & (1u << comp))) continue;
+                while (b < 4 && k >= key->xfb_count[b]) { b++; k = 0; }
+                if (b >= 4) break;
+                sp(&s, "  if (floatBitsToUint(rscale[%d].z) != 0u) gmem_.w[floatBitsToUint(rscale[%d].x) + uint(gl_VertexIndex) * %uu + %du] = "
+                       "floatBitsToUint(v%d[%d]);\n", 66 + b, 66 + b, (unsigned)(key->xfb_stride[b] / 4), k, i, comp);
+                k++;
+            }
+    }
     if (stage == STAGE_VERTEX) {
         if (key && key->flip_y) sp(&s, "  gl_Position.y = -gl_Position.y;\n");
         if (key && key->flip_x) sp(&s, "  gl_Position.x = -gl_Position.x;\n");
