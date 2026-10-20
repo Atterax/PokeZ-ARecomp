@@ -63,7 +63,7 @@ typedef struct {
     uint8_t pred_used[8];
     uint32_t in_attr_mask, out_attr_mask;
     uint32_t vs_in_comp[32];
-    bool uses_branches, uses_cc, uses_local, uses_vid, uses_iid, uses_frag_coord, uses_front_facing, uses_lane;
+    bool uses_branches, uses_cc, uses_local, uses_vid, uses_iid, uses_frag_coord, uses_front_facing, uses_lane, uses_layer;
     bool uses_rscale;  // resolution-scale table (fragment/compute only)
     bool warned_surface;  // a dropped bindless surface op was noted
     uint32_t flat_mask;           // fragment inputs using constant (flat) interpolation
@@ -268,6 +268,7 @@ static void attr_load(Ctx *c, int dst, uint32_t addr, const char *idx) {
             }
         } else if (addr == 0x3FC) { c->uses_front_facing = true; strcpy(e, "(front_facing ? 0xFFFFFFFFu : 0u)"); }
         else if (addr == 0x2E0 || addr == 0x2E4) { sprintf(e, "as_type<uint>(point_coord[%d])", (addr >> 2) & 1); }
+        else if (addr == 0x64) { c->uses_layer = true; strcpy(e, "rt_layer"); }  // the render target layer drawn to
         else { sprintf(e, "0u /* attr %#x */", addr); }
     } else {
         sprintf(e, "0u /* attr %#x */", addr);
@@ -293,6 +294,9 @@ static void attr_store(Ctx *c, int src, uint32_t addr) {
     } else if (addr == 0x6C) {
         c->info->writes_point_size = true;
         sp(&c->body, "    out.psize = as_type<float>(%s);\n", v);
+    } else if (addr == 0x64) {  // render target layer: layered rendering into array / 3D targets
+        c->info->writes_layer = true;
+        sp(&c->body, "    out.layer = int(%s);\n", v);
     } else {
         sp(&c->body, "    /* store attr %#x */\n", addr);
     }
@@ -1859,7 +1863,7 @@ static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
         {"int4", "ivec4"}, {"uint2", "uvec2"}, {"uint3", "uvec3"}, {"uint4", "uvec4"}, {"bool2", "bvec2"},
         {"ulong", "uint64_t"}, {"rsqrt", "inversesqrt"}, {"rint", "roundEven"}, {"front_facing", "gl_FrontFacing"},
         {"point_coord", "gl_PointCoord"}, {"lane", "gl_SubgroupInvocationID"}, {"vid", "uint(gl_VertexIndex)"},
-        {"iid", "uint(gl_InstanceIndex)"},
+        {"iid", "uint(gl_InstanceIndex)"}, {"rt_layer", "uint(gl_Layer)"},
     };
     const char *p = src;
     while (*p) {
@@ -1916,6 +1920,7 @@ static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
             snprintf(mem, sizeof mem, "%.*s", (int)(me - m), m);
             if (!strcmp(mem, "pos")) sp(o, c->stage == STAGE_FRAGMENT ? "gl_FragCoord" : "gl_Position");
             else if (!strcmp(mem, "psize")) sp(o, "gl_PointSize");
+            else if (!strcmp(mem, "layer")) sp(o, "gl_Layer");
             else sp(o, "%s", mem);  // a<i> (vertex input), v<i> (varying)
             p = me;
             continue;
@@ -1946,6 +1951,7 @@ static const char glsl_prelude[] =
     "#extension GL_KHR_shader_subgroup_vote : require\n"
     "#extension GL_KHR_shader_subgroup_ballot : require\n"
     "#extension GL_EXT_texture_shadow_lod : require\n"
+    "#extension GL_ARB_shader_viewport_layer_array : enable\n"
     "#define cbr(cb, off) cb[min((off) >> 4, uint(cb.length() - 1))][((off) >> 2) & 3u]\n"
     "uint as_u(float x) { return floatBitsToUint(x); }\n"
     "uint as_u(uint x) { return x; }\n"
@@ -2082,6 +2088,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         for (int i = 0; i < 32; i++)
             if (c->out_attr_mask & (1u << i)) sp(&s, "  v%d = vec4(0, 0, 0, 1);\n", i);
         if (info->writes_point_size) sp(&s, "  gl_PointSize = 0.0f;\n");
+        if (info->writes_layer) sp(&s, "  gl_Layer = 0;\n");
     }
     for (int i = 0; i < 256; i++)
         if (c->reg_used[i]) sp(&s, "  uint r%d = 0u;\n", i);
@@ -2249,6 +2256,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         for (int i = 0; i < 32; i++)
             if (c->out_attr_mask & (1u << i)) sp(&s, "  float4 v%d [[user(locn%d)]];\n", i, i);
         if (info->writes_point_size) sp(&s, "  float psize [[point_size]];\n");
+        if (info->writes_layer) sp(&s, "  uint layer [[render_target_array_index]];\n");
         sp(&s, "};\n");
     } else if (stage == STAGE_FRAGMENT) {
         sp(&s, "struct FIn {\n  float4 pos [[position]];\n");
@@ -2305,8 +2313,9 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         for (int i = 0; i < 32; i++)
             if (c->out_attr_mask & (1u << i)) sp(&s, "  out.v%d = float4(0, 0, 0, 1);\n", i);
     } else if (stage == STAGE_FRAGMENT) {
-        sp(&s, "fragment FOut main0(FIn in [[stage_in]], bool front_facing [[front_facing]]%s%s) {\n",
-           c->uses_lane ? ", uint lane [[thread_index_in_simdgroup]]" : "", args.buf ? args.buf : "");
+        sp(&s, "fragment FOut main0(FIn in [[stage_in]], bool front_facing [[front_facing]]%s%s%s) {\n",
+           c->uses_lane ? ", uint lane [[thread_index_in_simdgroup]]" : "",
+           c->uses_layer ? ", uint rt_layer [[render_target_array_index]]" : "", args.buf ? args.buf : "");
     } else {
         sp(&s, "kernel void main0(uint3 tid [[thread_position_in_threadgroup]], uint3 ctaid [[threadgroup_position_in_grid]]%s) {\n",
            args.buf ? args.buf : "");

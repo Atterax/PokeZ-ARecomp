@@ -16,7 +16,8 @@
 //    1DArray/2DArray/CubeArray, or its *Shadow variant when tex[i].shadow.
 //  - vertex inputs `layout(location=i) in vec4|ivec4|uvec4 a<i>;` (key->attr_kind); varyings: location i =
 //    generic attribute i, `vec4 v<i>` (fragment side flat / noperspective as in MSL); `invariant gl_Position`;
-//    gl_PointSize when writes_point_size. Fragment outputs `layout(location=rt) out vec4|ivec4|uvec4 c<rt>;`,
+//    gl_PointSize when writes_point_size, gl_Layer when writes_layer (GL_ARB_shader_viewport_layer_array:
+//    shaderOutputLayer). Fragment outputs `layout(location=rt) out vec4|ivec4|uvec4 c<rt>;`,
 //    gl_FragDepth when writes_depth.
 //  - clip space exactly as the MSL output (key->flip_y / depth_minus_one epilogue unchanged): the renderer uses
 //    a negative-height viewport so Vulkan matches Metal's y-up NDC, clip z in [0, 1].
@@ -65,6 +66,7 @@ typedef struct {
     uint32_t attr_mask;     // vertex: input attributes; fragment: input varyings
     uint32_t out_mask;      // vertex: output varyings; fragment: render targets written
     bool writes_depth, uses_discard, writes_point_size;
+    bool writes_layer;      // vertex: writes the render target layer (attribute 0x64)
     bool uses_gmem;         // global memory access: bind the guest heap at GMEM_BUFFER_INDEX
     bool uses_gmem_map;     // (GLSL compute only) gmem loads look their address up in GMap (uniform, binding
                             // GMAP_BUFFER_INDEX) and read GFast (storage, GFAST_BUFFER_INDEX) - a device-local copy of the

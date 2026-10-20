@@ -316,6 +316,8 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     VkImageCreateFlags flags = 0;
     if (!depthfmt) flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;  // format views (NVN texture views, raw sRGB views)
     if (type == VK_IMAGE_TYPE_2D && layers >= 6 && tw == th && samples == 1) flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    // 3D render targets (Pokémon Z-A's colour grading LUT, one slice per instance): rendered through 2D array views
+    if (type == VK_IMAGE_TYPE_3D && (usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
     VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = flags, .imageType = type, .format = vf,
                             .extent = {tw, th, depth}, .mipLevels = levels, .arrayLayers = layers,
                             .samples = (VkSampleCountFlagBits)samples, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage,
@@ -686,9 +688,35 @@ static VkImageViewType view_type_for(int textype) {
 static const VkComponentMapping IDENTITY = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                                             VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
 
-// render: attachment view (one level, one layer). Otherwise a sampled view of type want_textype (TEXTYPE_*),
+// Attachment view: one level; every layer of the view's range (array targets) or every slice of that level (3D
+// targets, as a 2D array). *layers (if given): the layer count, for VkRenderingInfo.layerCount.
+VkImageView vk_render_view(NvnTexture *t, const NvnTextureView *v, bool has_view, uint32_t *layers) {
+    TexBackend *b = vk_tex(t, true);
+    if (!has_view) v = NULL;
+    if (layers) *layers = 1;
+    VkFormat fmt = b->format;
+    if (v && (v->setmask & 4) && !(b->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))) {
+        VkFormat vf = fmt_of(v->format).vf;
+        if (vk_format(t->format) == b->format) fmt = vf;  // (fallback images keep their own format)
+    }
+    uint32_t lv0 = v && (v->setmask & 1) ? v->base_level : 0;
+    if (lv0 >= b->levels) lv0 = b->levels - 1;
+    bool is3d = b->base_type == VK_IMAGE_VIEW_TYPE_3D;
+    if (is3d && b->aspect != VK_IMAGE_ASPECT_COLOR_BIT) return VK_NULL_HANDLE;  // (2D array views: colour images only)
+    uint32_t total = is3d ? (b->depth >> lv0 ? b->depth >> lv0 : 1) : b->layers;
+    uint32_t ly0 = v && (v->setmask & 2) ? v->min_layer : 0;
+    if (ly0 >= total) ly0 = total - 1;
+    uint32_t nly = v && (v->setmask & 2) && v->num_layers ? v->num_layers : total - ly0;
+    if (ly0 + nly > total) nly = total - ly0;
+    if (layers) *layers = nly;
+    VkImageViewType type = is3d || nly > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+    return vk_image_view(b, type, fmt, lv0, 1, ly0, nly, IDENTITY, b->aspect);
+}
+
+// render: attachment view (vk_render_view). Otherwise a sampled view of type want_textype (TEXTYPE_*),
 // with the NVN component swizzle, converting between compatible types the way renderer.m does.
 VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool render, int want_textype) {
+    if (render) return vk_render_view(t, v, has_view, NULL);
     TexBackend *b = vk_tex(t, render);
     if (!has_view) v = NULL;
     VkFormat fmt = b->format;
@@ -704,11 +732,6 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
     if (lv0 + nlv > b->levels) nlv = b->levels - lv0;
     if (ly0 >= b->layers) ly0 = b->layers - 1;
     if (ly0 + nly > b->layers) nly = b->layers - ly0;
-    if (render) {
-        VkImageViewType type = b->base_type == VK_IMAGE_VIEW_TYPE_3D ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
-        if (b->base_type == VK_IMAGE_VIEW_TYPE_3D) return VK_NULL_HANDLE;  // (3D render targets: not used by the game)
-        return vk_image_view(b, type, fmt, lv0, 1, ly0, 1, IDENTITY, b->aspect);
-    }
     VkImageAspectFlags aspect = b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : b->aspect;
     VkComponentMapping sw = IDENTITY;
     if (!(b->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) && b->samples == 1) {

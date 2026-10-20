@@ -820,8 +820,9 @@ static uint32_t tex_wh[2][64][2];
 
 // ================================================================== render passes
 static VkFormat pass_color[8], pass_depth, pass_stencil;
-static uint32_t pass_ncolor, pass_samples = 1, pass_w, pass_h;
+static uint32_t pass_ncolor, pass_samples = 1, pass_w, pass_h, pass_layers = 1;
 static int debug_pass_no;
+static uint32_t raw_layer;  // (debug frame: the layer of a layered pass that renderer_save_texture_tex saves)
 
 // Redundant-state filter: what draw() last set in the current command buffer, so unchanged pipeline binds, dynamic
 // state and vertex / index buffer binds are not recorded again (a draw used to issue ~20 vkCmd* calls; most repeat the
@@ -879,6 +880,27 @@ static void vk_end_pass_at(int line) {
         if (multi) snprintf(path, sizeof path, "build/pass_%llu_%03d.png", (unsigned long long)debug_pass_frame, debug_pass_no++);
         else snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no++);
         renderer_save_texture_tex(st.rt.color[0]->backend, path);
+        TexBackend *tb = st.rt.color[0]->backend;
+        if (tb->width == 1 && tb->height == 1 && tb->format == VK_FORMAT_R32G32B32A32_SFLOAT) {  // (exposure: the raw value)
+            VkSpan out = vk_readback(16);
+            VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {1, 1, 1}};
+            VkCommandBuffer cb = vk_cmd();
+            vk_full_barrier(cb);
+            vkCmdCopyImageToBuffer(cb, tb->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
+            renderer_flush();
+            const float *f = out.ptr;
+            LOG("[vk] %s 1x1 = %g %g %g %g\n", path, f[0], f[1], f[2], f[3]);
+        }
+        uint32_t lys[3] = {1, pass_layers / 2, pass_layers - 1};  // layered: also layers 1, middle, last
+        for (int k = 0; k < 3 && pass_layers > 1; k++) {
+            uint32_t ly = lys[k];
+            if (k && ly <= lys[k - 1]) continue;
+            char lpath[300];
+            snprintf(lpath, sizeof lpath, "%.*s_l%u.png", (int)strlen(path) - 4, path, ly);
+            raw_layer = ly;
+            renderer_save_texture_tex(st.rt.color[0]->backend, lpath);
+            raw_layer = 0;
+        }
     }
 }
 
@@ -903,6 +925,7 @@ static void begin_pass(void) {
     }
     VkRenderingAttachmentInfo ca[8], da = {0}, sa = {0};
     uint32_t w = 0, minw = UINT32_MAX, minh = UINT32_MAX;  // w: first attachment seen
+    uint32_t layers = UINT32_MAX;  // layered rendering: the fewest layers of any attachment
     pass_ncolor = (uint32_t)st.rt.ncolor;
     pass_samples = 1;
     for (int i = 0; i < st.rt.ncolor; i++) {
@@ -911,9 +934,11 @@ static void begin_pass(void) {
         pass_color[i] = VK_FORMAT_UNDEFINED;
         if (!t) continue;
         renderer_mark_gpu_owned(t);
-        VkImageView v = vk_view(t, &st.rt.cview[i], st.rt.has_cview[i], true, TEXTYPE_2D);
+        uint32_t nly;
+        VkImageView v = vk_render_view(t, &st.rt.cview[i], st.rt.has_cview[i], &nly);
         TexBackend *b = t->backend;
         if (!v) continue;
+        if (nly < layers) layers = nly;
         ca[i].imageView = v;
         ca[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -936,9 +961,11 @@ static void begin_pass(void) {
     bool has_d = false, has_s = false;
     if (st.rt.depth) {
         renderer_mark_gpu_owned(st.rt.depth);
-        VkImageView v = vk_view(st.rt.depth, &st.rt.dview, st.rt.has_dview, true, TEXTYPE_2D);
+        uint32_t nly;
+        VkImageView v = vk_render_view(st.rt.depth, &st.rt.dview, st.rt.has_dview, &nly);
         TexBackend *b = st.rt.depth->backend;
         if (v && renderer_format_is_depth(st.rt.depth->format)) {
+            if (nly < layers) layers = nly;
             VkRenderingAttachmentInfo a = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = v,
                                            .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
                                            .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
@@ -954,7 +981,8 @@ static void begin_pass(void) {
     }
     if (!w) { pass_sx = pass_sy = 1; minw = minh = 16; }
     pass_w = minw; pass_h = minh;
-    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = 1,
+    pass_layers = layers == UINT32_MAX ? 1 : layers;
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = pass_layers,
                           .colorAttachmentCount = pass_ncolor, .pColorAttachments = ca,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
     vkCmdBeginRendering(cb, &ri);
@@ -1129,7 +1157,7 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
         }
         VkImageAspectFlags dsa = (depth && pass_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) | (stencil && pass_stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
         if (dsa) a[n++] = (VkClearAttachment){.aspectMask = dsa, .clearValue.depthStencil = {dval, sval}};
-        VkClearRect cr = {rect, 0, 1};
+        VkClearRect cr = {rect, 0, pass_layers};
         if (n) vkCmdClearAttachments(cb, n, a, 1, &cr);
         return;
     }
@@ -3301,7 +3329,7 @@ static VkImageView raw_view(TexBackend *b) {
     VkFormat f = b->format == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM
                : b->format == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_B8G8R8A8_UNORM : b->format;
     static const VkComponentMapping id = {0};
-    return vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, f, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
+    return vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, f, 0, 1, raw_layer, 1, id, VK_IMAGE_ASPECT_COLOR_BIT);
 }
 
 // ---- post passes (Video tab "Anti-aliasing" / "Upscaler"): SMAA 1x at the game image's size, then AMD FSR 1 (EASU
