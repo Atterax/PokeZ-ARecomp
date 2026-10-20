@@ -141,6 +141,48 @@ static void region_remove(uint64_t addr) {
     }
 }
 
+// Physical memory (svcMapPhysicalMemory, the SDK's virtual address memory): a range may cover pages mapped before,
+// which keep their contents - only the gaps are new (zero: the window's pages are fresh until unmapped). Adjacent
+// ranges merge into one region (the SDK maps many small ones).
+static void phys_map(uint64_t addr, uint64_t size) {
+    uint64_t end = addr + size, cur = addr, gaps[64][2];
+    int ngaps = 0;
+    for (int i = 0; i < nregions && cur < end; i++) {
+        Region *r = &regions[i];
+        if (r->type != 7 || r->addr + r->size <= cur || r->addr >= end) continue;
+        if (r->addr > cur && ngaps < 64) { gaps[ngaps][0] = cur; gaps[ngaps][1] = r->addr - cur; ngaps++; }
+        cur = r->addr + r->size;
+    }
+    if (cur < end && ngaps < 64) { gaps[ngaps][0] = cur; gaps[ngaps][1] = end - cur; ngaps++; }
+    for (int i = 0; i < ngaps; i++) region_add(gaps[i][0], gaps[i][1], 7, 3);
+    for (int i = 0; i + 1 < nregions;) {
+        Region *a = &regions[i], *b = &regions[i + 1];
+        if (a->type == 7 && b->type == 7 && a->addr + a->size == b->addr) {
+            a->size += b->size;
+            memmove(b, b + 1, (nregions - i - 2) * sizeof(Region));
+            nregions--;
+        } else i++;
+    }
+}
+
+// Unmapped pages are released and read as zero when mapped again; regions are trimmed or split.
+static void phys_unmap(uint64_t addr, uint64_t size) {
+    uint64_t end = addr + size;
+    for (int i = 0; i < nregions; i++) {
+        Region r = regions[i];
+        if (r.type != 7 || r.addr + r.size <= addr || r.addr >= end) continue;
+        region_remove(r.addr);
+        if (r.addr < addr) region_add(r.addr, addr - r.addr, 7, 3);
+        if (r.addr + r.size > end) region_add(end, r.addr + r.size - end, 7, 3);
+        i = -1;  // (the array changed: rescan; trimmed pieces no longer overlap)
+    }
+#ifdef __linux__
+    plat_reset_guest(addr, end);
+#else
+    memset((void *)(uintptr_t)addr, 0, size);
+#endif
+}
+
 static void query_memory(uint64_t addr, uint64_t out) {
     uint64_t prev_end = 0;
     uint64_t info[5] = {0};  // addr, size, type|attr<<32, perm|ipc<<32, device|pad<<32
@@ -237,8 +279,8 @@ KThread *kernel_create_main_thread(uint64_t entry, uint64_t stack_size, int prio
     return t;
 }
 
-void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3) {
-    t->cpu.x[0] = x0; t->cpu.x[1] = x1; t->cpu.x[2] = x2; t->cpu.x[3] = x3;
+void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t x4) {
+    t->cpu.x[0] = x0; t->cpu.x[1] = x1; t->cpu.x[2] = x2; t->cpu.x[3] = x3; t->cpu.x[4] = x4;
     thread_start(t);  // the host main thread goes on to run the window event loop
 }
 
@@ -287,6 +329,11 @@ static void mutex_release(uint64_t addr) {
 }
 
 KThread *g_waitlist;
+uint64_t g_program_id = 0x01006BB00C6F0000ull;
+int g_game_is_la = 1;
+uint64_t g_system_resource_size;
+static uint64_t g_user_exception_ctx;  // GetInfo 20 (in the HLE heap: gone with it on a reboot)
+RT_ON_RESET(user_exception_ctx_reset) { g_user_exception_ctx = 0; }
 
 static void waitlist_add(KThread *t) { t->wnext = g_waitlist; g_waitlist = t; }
 static void waitlist_remove(KThread *t) {
@@ -355,14 +402,16 @@ static uint32_t svc_wait_process_wide_key(uint64_t mutex, uint64_t key, uint32_t
     t->wait_tag = tag;
     __atomic_store_n(u32p(key), 1, __ATOMIC_SEQ_CST);
     uint32_t r = block_current(timeout);
-    if (r != R_OK) {
-        // timed out / cancelled: still must reacquire the mutex
-        if (!mutex_acquire_or_mark(mutex, tag)) {
+    if (r != R_OK && t->wait_addr == mutex) {
+        // signaled (moved to the mutex's waiters) before the timeout: the kernel hands it the mutex as usual
+        r = R_OK;
+        if ((LD32(mutex) & ~WAITERS_BIT) != tag && !mutex_acquire_or_mark(mutex, tag)) {
             t->wait_kind = WAIT_MUTEX;
-            t->wait_addr = mutex;
             block_current(-1);
         }
     }
+    // A timeout (or cancel) still waiting on the key returns without the mutex: as on hardware, the SDK takes it
+    // again itself (nn::os TimedWait calls Enter on 0xea01 - reacquiring here deadlocked it on its own mutex)
     pthread_mutex_unlock(&g_klock);
     return r;
 }
@@ -730,6 +779,15 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     }
     case 0x26:  // Break
         if (x[0] & 0x80000000u) { LOG("[kernel] Break notification %llx\n", x[0]); x[0] = R_OK; break; }
+        if (x[2] == 4) {  // an abort: info is the failed Result (module, description)
+            uint32_t rc = LD32(x[1]);
+            LOG("[kernel] abort on result 0x%x (%u-%u)\n", rc, 2000 + (rc & 0x1FF), (rc >> 9) & 0x1FFF);
+        }
+        {   // the guest's call chain (frame records: [fp] = caller's fp, [fp + 8] = return address)
+            uint64_t fp = c->x[29];
+            for (int i = 0; i < 16 && fp >= GUEST_LO && fp < GUEST_HI && !(fp & 7); i++, fp = LD64(fp))
+                LOG("  guest #%d %llx\n", i, (unsigned long long)LD64(fp + 8));
+        }
         FATAL("svcBreak(reason=%llx, info=%llx, size=%llx) at %llx\n", x[0], x[1], x[2], pc);
     case 0x27: debug_string(x[0], x[1]); x[0] = R_OK; break;
     case 0x29: {  // GetInfo(_, id0, handle, id1)
@@ -752,9 +810,17 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         case 13: v = GUEST_HI - GUEST_LO; break;
         case 14: v = STACK_BASE; break;
         case 15: v = STACK_SIZE; break;
-        case 16: case 17: v = 0; break;
-        case 18: v = 0x01006BB00C6F0000ull; break;
-        case 20: v = 0; break;
+        case 16: v = g_system_resource_size; break;
+        case 17: v = 0; break;
+        case 18: v = g_program_id; break;
+        case 20: {  // UserExceptionContextAddress: a page of the process (nn::os::SetDyingMessageRegion writes it)
+            if (!g_user_exception_ctx) g_user_exception_ctx = (uint64_t)(uintptr_t)hle_alloc(0x1000);
+            v = g_user_exception_ctx;
+            break;
+        }
+        case 23: v = 1; break;  // IsApplication
+        case 26: v = 1; break;  // IsSvcPermitted
+        case 27: case 28: v = 0; break;  // IoRegionHint, AliasRegionExtraSize (18.0.0+: SDK 19 games ask)
         default: r = R_INVALID_ENUM; LOG("[kernel] GetInfo unknown id %u/%llu\n", id0, x[3]);
         }
         x[0] = r;
@@ -762,12 +828,13 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         break;
     }
     case 0x2C:  // MapPhysicalMemory(addr, size)
-        memset((void *)x[0], 0, x[1]);
-        region_add(x[0], x[1], 0x7, 3);
+        if (ENV("LARECOMP_LOG_VAMM")) LOG("[kernel] MapPhysicalMemory %llx +%llx\n", x[0], x[1]);
+        phys_map(x[0], x[1]);
         x[0] = R_OK;
         break;
-    case 0x2D:  // UnmapPhysicalMemory
-        region_remove(x[0]);
+    case 0x2D:  // UnmapPhysicalMemory(addr, size)
+        if (ENV("LARECOMP_LOG_VAMM")) LOG("[kernel] UnmapPhysicalMemory %llx +%llx\n", x[0], x[1]);
+        phys_unmap(x[0], x[1]);
         x[0] = R_OK;
         break;
     case 0x34: x[0] = svc_wait_for_address(x[0], (uint32_t)x[1], (int32_t)x[2], (int64_t)x[3]); break;
@@ -838,7 +905,34 @@ void kernel_reset(void) {
     pthread_mutex_unlock(&g_klock);
 }
 
+// LARECOMP_WAIT_DUMP=<seconds>: every so often, what each guest thread waits on (hangs: who holds what)
+static void *wait_dump_main(void *arg) {
+    unsigned iv = (unsigned)(uintptr_t)arg;
+    for (;;) {
+        sleep(iv);
+        pthread_mutex_lock(&g_klock);
+        LOG("[wait] ---- threads\n");
+        static const char *kinds[] = {"run", "mutex", "condvar", "arbiter"};
+        for (KThread *t = g_threads; t; t = t->anext) {
+            if (t->finished) continue;
+            const char *k = t->in_sync_wait ? "sync" : kinds[t->wait_kind];
+            uint64_t a = t->wait_addr;
+            LOG("[wait] %x prio %d %-7s addr %llx (=%x) mutex %llx (=%x) tag %x  pc %llx lr %llx\n", t->handle, t->prio, k,
+                (unsigned long long)a, a ? LD32(a) : 0, (unsigned long long)t->wait_mutex,
+                t->wait_mutex ? LD32(t->wait_mutex) : 0, t->wait_tag, (unsigned long long)t->cpu.pc,
+                (unsigned long long)t->cpu.x[30]);
+        }
+        pthread_mutex_unlock(&g_klock);
+    }
+    return NULL;
+}
+
 void kernel_init(void) {
+    if (ENV("LARECOMP_WAIT_DUMP")) {
+        pthread_t th;
+        pthread_create(&th, NULL, wait_dump_main, (void *)(uintptr_t)atoi(ENV("LARECOMP_WAIT_DUMP")));
+        pthread_detach(th);
+    }
     // Reserve the heap, alias, stack, and TLS regions.
     region_add(TLS_BASE, TLS_SIZE, 0xC, 3);
     for (int i = 0; i < g_nmodules; i++) {

@@ -301,7 +301,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
 
     // 1. the generator, both modules at once; their finished files are compiled while it goes on
     Gen gens[2] = {{.name = "main"}, {.name = "sdk"}};
-    static const char *const base[2] = {"0x7000000000", "0x7004000000"};
+    static const char *const base[2] = {"0x7000000000", "0x7008000000"};
     bool ok = true;
     for (int i = 0; i < 2 && ok; i++) {
         Gen *g = &gens[i];

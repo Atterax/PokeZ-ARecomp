@@ -16,7 +16,8 @@ typedef struct __attribute__((aligned(16))) Cpu {
     void *thread;            // 312: runtime thread object
     uint64_t fpcr;           // 320: guest FPCR/FPSR (portable FP/SIMD lowering only; the asm path uses the host's)
     uint64_t fpsr;           // 328
-    uint8_t _pad[512 - 336];
+    uint64_t excl_val2;      // 336: high half of an LDXP/LDAXP pair
+    uint8_t _pad[512 - 344];
     __uint128_t v[32];       // 512
 } Cpu;
 
@@ -95,6 +96,22 @@ EXCL(8, uint8_t)
 EXCL(16, uint16_t)
 EXCL(32, uint32_t)
 EXCL(64, uint64_t)
+
+// LDXP/STXP of two X registers: one 128-bit compare-and-swap (CMPXCHG16B on x86-64, LDXP/STXP or CASP on AArch64).
+// The pair of W registers is the 64-bit ldx64/stx64 above, split by the lifter.
+static inline void ldxp64(Cpu *c, uint64_t a, uint64_t *lo, uint64_t *hi) {
+    __uint128_t v = __sync_val_compare_and_swap((__uint128_t *)(uintptr_t)a, (__uint128_t)0, (__uint128_t)0);
+    c->excl_addr = a;
+    c->excl_val = *lo = (uint64_t)v;
+    c->excl_val2 = *hi = (uint64_t)(v >> 64);
+}
+static inline uint32_t stxp64(Cpu *c, uint64_t a, uint64_t lo, uint64_t hi) {
+    if (c->excl_addr != a) return 1;
+    c->excl_addr = ~0ull;
+    __uint128_t expected = (__uint128_t)c->excl_val | ((__uint128_t)c->excl_val2 << 64);
+    __uint128_t v = (__uint128_t)lo | ((__uint128_t)hi << 64);
+    return !__sync_bool_compare_and_swap((__uint128_t *)(uintptr_t)a, expected, v);
+}
 
 // ---- flags (packed NZCV in bits 31..28)
 #define FLAG_N(c) (((c)->nzcv >> 31) & 1)

@@ -83,6 +83,31 @@ static uint64_t buf_addr(const uint32_t *w) {
     return w[1] | ((uint64_t)(w[2] >> 28) << 32) | ((uint64_t)((w[2] >> 2) & 7) << 36);
 }
 
+// TIPC (sm: from 12.0.0, used by newer SDKs): the command is the message type - 16, the raw data follows the
+// header with no SFCI header or padding, and the response's raw data is the result then the output.
+static int tipc_request(KSession *sess, uint32_t *msg, IpcReq *req, const uint32_t *raw, uint32_t raw_words) {
+    IpcResp resp = {0};
+    req->cmd = req->type - 16;
+    req->data = (const uint8_t *)raw;
+    req->data_size = raw_words * 4;
+    sess->svc->handler(sess->svc, req, &resp);
+    for (int i = 0; i < resp.nobjects; i++) resp.move_handles[resp.nmove++] = session_new(resp.objects[i]);
+    uint32_t type = req->type;
+    memset(msg, 0, 0x100);
+    int has_handles = resp.ncopy || resp.nmove;
+    msg[0] = type;
+    msg[1] = (1 + (resp.data_size + 3) / 4) | (has_handles ? 0x80000000u : 0);
+    uint32_t *q = msg + 2;
+    if (has_handles) {
+        *q++ = (resp.ncopy << 1) | (resp.nmove << 5);
+        for (int i = 0; i < resp.ncopy; i++) *q++ = resp.copy_handles[i];
+        for (int i = 0; i < resp.nmove; i++) *q++ = resp.move_handles[i];
+    }
+    q[0] = resp.result;
+    memcpy(q + 1, resp.data, resp.data_size);
+    return 0;
+}
+
 int ipc_handle_request(Cpu *c, uint32_t handle) {
     KObject *o = handle_get(handle);
     if (!o || o->type != KOBJ_SESSION) {
@@ -134,11 +159,12 @@ int ipc_handle_request(Cpu *c, uint32_t handle) {
         req.nc = ncd;
     }
 
-    if (req.type == 2) {  // close
+    if (req.type == 2 || req.type == 15) {  // close (CMIF / TIPC)
         LOG("[ipc] close session %s (handle %x)\n", sess->svc->name, handle);
         if (!sess->domain) service_release(sess->svc);  // (a domain's objects stay: closed one by one)
         return 0;
     }
+    if (req.type >= 16) return tipc_request(sess, msg, &req, raw, raw_words);
     uint8_t *payload = (uint8_t *)aligned;
     bool dom = false;  // response is domain-wrapped
     if (req.type == 4 || req.type == 6) {

@@ -389,7 +389,9 @@ class Lifter:
         nbits = 8 << size
         addr = XS(rn)
         if o1:
-            raise Unsupported('exclusive pair / CAS')
+            if not (size & 2) or o2:
+                raise Unsupported('CAS / CASP')
+            return self.ldst_excl_pair(size & 1, L, rs, bits(w, 10, 5), rn, rt)
         if o2 == 0:
             if L:
                 return Insn('op', set_reg(1, rt, f'ldx{nbits}(c, {addr})'))
@@ -397,6 +399,20 @@ class Lifter:
         if L:
             return Insn('op', set_reg(1, rt, f'lda{nbits}({addr})'))
         return Insn('op', f'stl{nbits}({addr}, {X(rt)});')
+
+    def ldst_excl_pair(self, sz, L, rs, rt2, rn, rt):
+        # LDXP/LDAXP/STXP/STLXP (acquire / release: the CAS is sequentially consistent either way)
+        addr = XS(rn)
+        if sz:
+            if L:
+                return Insn('op', f'{{ uint64_t a, b; ldxp64(c, {addr}, &a, &b); '
+                                  f'{set_reg(1, rt, "a")} {set_reg(1, rt2, "b")} }}')
+            return Insn('op', f'{{ uint32_t st = stxp64(c, {addr}, {X(rt)}, {X(rt2)}); {set_reg(0, rs, "st")} }}')
+        if L:
+            return Insn('op', f'{{ uint64_t v = ldx64(c, {addr}); '
+                              f'{set_reg(0, rt, "(uint32_t)v")} {set_reg(0, rt2, "v >> 32")} }}')
+        return Insn('op', f'{{ uint32_t st = stx64(c, {addr}, (uint64_t){W(rt)} | ((uint64_t){W(rt2)} << 32)); '
+                          f'{set_reg(0, rs, "st")} }}')
 
     def ldst_pair(self, w):
         opc, mode, L = bits(w, 30, 2), bits(w, 23, 2), bits(w, 22, 1)

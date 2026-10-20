@@ -468,6 +468,8 @@ class Module:
 
 from patches import PATCHES
 
+LA_MAIN_BUILD_ID = 'ae16f71e002af8cb'  # Link's Awakening v1.0.0 (runtime/ui/launcher.mm BUILD_ID)
+
 import json as _json
 import os as _os
 _rv = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'rando', 'patch_variants.json')
@@ -506,6 +508,13 @@ def main():
 
     t0 = time.time()
     m = Module(args.name, args.nso, args.base, args.simd)
+    # The patch sites (patches.py, the randomizer's variants) are Link's Awakening's: another game (its exefs/main
+    # has another build ID) is lifted as it is
+    main_nso = os.path.join(os.path.dirname(args.nso), 'main')
+    if Nso(main_nso).build_id[:16] != LA_MAIN_BUILD_ID:
+        PATCHES.clear()
+        RANDO_CODE.clear()
+        print(f'{args.name}: not Link\'s Awakening (main build {Nso(main_nso).build_id[:16]}): no game patches')
     starts = m.boundaries()
     hle = {}
     if args.hle and os.path.exists(args.hle):
@@ -531,7 +540,13 @@ def main():
             imm = ((w >> 5) & 0x7FFFF) << 2 | ((w >> 29) & 3)
             if imm & (1 << 20):
                 imm -= 1 << 21
-            if m.in_text(pc + imm):
+            # (not a jump table's base: `adr xN; ...; add xN, xN, xIdx, lsl #2; ...; br xN` jumps inside the function)
+            rd = w & 31
+            near = range(i + 1, min(i + 8, len(m.words)))
+            table_base = any(m.words[j] == 0xD61F0000 | rd << 5 or
+                             (m.words[j] & 0xFFE0FC00) == 0x8B000800 and m.words[j] & 31 == rd and
+                             (m.words[j] >> 5) & 31 == rd for j in near)
+            if m.in_text(pc + imm) and not table_base:
                 start_set.add(pc + imm)
         elif (w & 0x9F000000) == 0x90000000:  # ADRP
             imm = ((w >> 5) & 0x7FFFF) << 2 | ((w >> 29) & 3)

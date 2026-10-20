@@ -5,6 +5,7 @@ import lz4.block
 
 DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ = 0, 1, 2, 4, 5, 6, 7, 8
 DT_STRSZ, DT_JMPREL, DT_RELACOUNT = 10, 23, 0x6FFFFFF9
+DT_RELRSZ, DT_RELR = 35, 36
 R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE = 257, 1025, 1026, 1027
 
 
@@ -69,6 +70,19 @@ class Nso:
                 value, size = struct.unpack_from('<QQ', self.image, o + 8)
                 self.syms.append((self.cstr(strtab + name), info, shndx, value, size))
         self.relocs = []
+        # RELR (newer SDKs): packed relative relocations, listed as RELATIVE with the word's own value as addend
+        relr, relr_n, where = dyn.get(DT_RELR, 0), dyn.get(DT_RELRSZ, 0) // 8, 0
+        for i in range(relr_n):
+            e = self.u64(relr + i * 8)
+            if not e & 1:
+                self.relocs.append((e, R_AARCH64_RELATIVE, 0, self.u64(e)))
+                where = e + 8
+                continue
+            for b in range(1, 64):
+                if (e >> b) & 1:
+                    a = where + (b - 1) * 8
+                    self.relocs.append((a, R_AARCH64_RELATIVE, 0, self.u64(a)))
+            where += 63 * 8
         for base_tag, size_tag in ((DT_RELA, DT_RELASZ), (DT_JMPREL, DT_PLTRELSZ)):
             if base_tag in dyn:
                 b, n = dyn[base_tag], dyn[size_tag] // 24

@@ -33,6 +33,7 @@ static void module_init(Cpu *c, Module *m) {
 
 static void rtld_init_sdk(Cpu *c) { module_init(c, &g_modules[1]); }
 static void rtld_init_main(Cpu *c) { module_init(c, &g_modules[0]); }
+static void rtld_fini(Cpu *c) { (void)c; LOG("nnMain returned\n"); }
 
 // Claim the guest address range before anything else can map there. The host allocator places
 // regions at random addresses in the same window; on a collision, re-exec for a fresh layout.
@@ -146,17 +147,28 @@ static void boot(const char *root) {
         if (fread(meta, 1, sizeof meta, f) == sizeof meta && !memcmp(meta, "META", 4)) {
             prio = meta[0xE];
             stack_size = *(uint32_t *)(meta + 0x1C);
+            g_system_resource_size = *(uint32_t *)(meta + 0x14);
+            uint8_t aci0[0x18];  // the program ID: ACI0 (offset at META+0x70) +0x10
+            if (!fseek(f, *(uint32_t *)(meta + 0x70), SEEK_SET) && fread(aci0, 1, sizeof aci0, f) == sizeof aci0 &&
+                !memcmp(aci0, "ACI0", 4))
+                g_program_id = *(uint64_t *)(aci0 + 0x10);
         }
         fclose(f);
     }
-    LOG("main thread: prio %d, stack 0x%x\n", prio, stack_size);
+    g_game_is_la = g_program_id == 0x01006BB00C6F0000ull;
+    if (!g_game_is_la) LOG("not Link's Awakening: its game hooks are off\n");
+    LOG("main thread: prio %d, stack 0x%x, program 0x%016llx\n", prio, stack_size, (unsigned long long)g_program_id);
 
+    // nn::init::Start(thread_handle, args_region, init_sdk, init_main); newer SDKs (19: Pokémon Legends Z-A) add a
+    // third callback, run after nnMain returns (the modules' finalizers: nothing to do here)
     uint64_t start = loader_find_symbol("_ZN2nn4init5StartEmmPFvvES2_");
+    if (!start) start = loader_find_symbol("_ZN2nn4init5StartEmmPFvvES2_S2_");
     if (!start) FATAL("nn::init::Start not found\n");
     uint64_t init_fn = hle_register("<rtld_init_sdk>", rtld_init_sdk);
     uint64_t fini_fn = hle_register("<rtld_init_main>", rtld_init_main);
+    uint64_t exit_fn = hle_register("<rtld_fini>", rtld_fini);
     KThread *t = kernel_create_main_thread(start, stack_size, prio);
-    kernel_run_main(t, t->handle, 0, init_fn, fini_fn);  // nn::init::Start(thread_handle, args_region, init, fini)
+    kernel_run_main(t, t->handle, 0, init_fn, fini_fn, exit_fn);
 }
 
 int main(int argc, char **argv) {

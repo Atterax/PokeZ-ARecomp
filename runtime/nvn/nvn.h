@@ -34,19 +34,23 @@ typedef struct NvnTexture {
     char label[64];
 } NvnTexture;
 
+// Also kept inside the guest's NVNsamplerBuilder (at +8, runtime/nvn/objects.c), which is 64 bytes: Pokémon Legends
+// Z-A builds one on the stack right below its frame record. The enums fit a byte.
 typedef struct {
-    uint32_t min_filter, mag_filter, wrap[3], compare_mode, compare_func, reduction;
+    uint8_t min_filter, mag_filter, wrap[3], compare_mode, compare_func, reduction;
     float lod_min, lod_max, lod_bias, max_aniso;
     float border[4];
     void *backend;
 } NvnSamplerDesc;
+_Static_assert(8 + sizeof(NvnSamplerDesc) <= 64, "NvnSamplerDesc must fit an NVNsamplerBuilder");
 
 typedef struct {
     uint32_t setmask;  // which fields are overridden
     uint16_t base_level, num_levels, min_layer, num_layers;
     uint32_t format, target, ds_mode;
     uint8_t swizzle[4];
-} NvnTextureView;  // our layout of the guest NVNtextureView (0x28 bytes)
+} NvnTextureView;  // our layout inside the guest NVNtextureView
+_Static_assert(sizeof(NvnTextureView) <= 32, "NvnTextureView must fit the guest's");
 
 typedef struct {
     NvnTexture *tex;
