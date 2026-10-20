@@ -1255,7 +1255,15 @@ static void gwin_pick(void) {
     pthread_mutex_lock(&lock);
     if (!atomic_load(&gwin_done)) {
         uint64_t a = 0, sz = kernel_phys_largest(&a);
-        if (kernel_heap_size()) atomic_store(&gwin_done, true);
+        const char *force = getenv("LARECOMP_GWIN");  // (debug) <base hex>:<size hex>
+        if (force) {
+            unsigned long long fb = 0, fs = 0;
+            sscanf(force, "%llx:%llx", &fb, &fs);
+            gwin_ = (GWin){fb, fs, true};
+            plat_commit(fb, fs);  // (the host import needs every page committed)
+            LOG("[vk] guest memory window forced: %llx +%llx\n", fb, fs);
+            atomic_store(&gwin_done, true);
+        } else if (kernel_heap_size()) atomic_store(&gwin_done, true);
         else if (sz >= (64ull << 20)) {
             gwin_ = (GWin){a, sz < HEAP_MAX ? sz : HEAP_MAX, true};
             LOG("[vk] guest memory window: physical memory %llx +%llx (no heap)\n", (unsigned long long)a,
@@ -2008,15 +2016,18 @@ static bool gmem_import(uint64_t size) {
         (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(g_vk.dev, "vkGetMemoryHostPointerPropertiesEXT");
     VkMemoryHostPointerPropertiesEXT mp = {.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
     if (!props || props(g_vk.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, (void *)(uintptr_t)gwin_base, &mp) != VK_SUCCESS ||
-        !mp.memoryTypeBits)
+        !mp.memoryTypeBits) {
+        LOG("[vk] gmem import: host pointer properties failed (types %#x)\n", mp.memoryTypeBits);
         return false;
+    }
     VkImportMemoryHostPointerInfoEXT imp = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
                                             .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
                                             .pHostPointer = (void *)(uintptr_t)gwin_base};
     VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &imp, .allocationSize = size,
                                .memoryTypeIndex = (uint32_t)__builtin_ctz(mp.memoryTypeBits)};
     VkDeviceMemory mem;
-    if (vkAllocateMemory(g_vk.dev, &ai, NULL, &mem) != VK_SUCCESS) return false;
+    VkResult ar = vkAllocateMemory(g_vk.dev, &ai, NULL, &mem);
+    if (ar != VK_SUCCESS) { LOG("[vk] gmem import: vkAllocateMemory %d (%llu MB)\n", ar, (unsigned long long)(size >> 20)); return false; }
     VkExternalMemoryBufferCreateInfo eb = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
                                            .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = size,
@@ -3195,6 +3206,48 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
     }
 }
 
+// Indirect draws: the parameters (GL / Vulkan layout: arrays {count, instances, first, base instance}, elements
+// {count, instances, first index, base vertex, base instance}) read from guest memory when the list runs, each made a
+// direct draw. Arguments: DrawArraysIndirect (mode, indirect), DrawElementsIndirect (mode, index type, index buffer,
+// indirect), MultiDrawArraysIndirectCount (mode, indirect, count buffer, max draws, stride), MultiDrawElementsIndirect-
+// Count (mode, index type, index buffer, indirect, count buffer, max draws, stride). (Parameters a compute pass of the
+// same submission writes are not ready yet here: they come from the previous one.)
+static void draw_indirect(CmdRec *r) {
+    bool elements = r->op == CMD_DRAW_ELEMENTS_INDIRECT || r->op == CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT;
+    bool multi = r->op == CMD_MULTI_DRAW_ARRAYS_INDIRECT_COUNT || r->op == CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT;
+    int k = elements ? 3 : 1;  // the indirect buffer's argument
+    uint64_t ind = r->x[k];
+    uint32_t n = 1, stride = elements ? 20 : 16;
+    if (multi) {
+        uint64_t cnt = r->x[k + 1];
+        n = (uint32_t)r->x[k + 2];
+        if (cnt && cnt >= GUEST_LO) { uint32_t c = *(const uint32_t *)(uintptr_t)cnt; if (c < n) n = c; }
+        if (r->x[k + 3]) stride = (uint32_t)r->x[k + 3];
+    }
+    static int nlog;
+    if (nlog < 8) {
+        nlog++;
+        LOG("[vk] indirect draw op %u: %u draw(s) at %llx stride %u\n", r->op, n, (unsigned long long)ind, stride);
+    }
+    if (!ind || ind < GUEST_LO || n > 4096) return;
+    CmdRec d;
+    memset(&d, 0, sizeof d);
+    d.op = elements ? CMD_DRAW_ELEMENTS : CMD_DRAW_ARRAYS;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint32_t *p = (const uint32_t *)(uintptr_t)(ind + (uint64_t)i * stride);
+        if (!p[0] || !p[1]) continue;  // (no vertices or no instances)
+        d.x[0] = r->x[0];  // mode
+        if (elements) {  // x: mode, index type, count, index buffer, base vertex, base instance, instances
+            d.x[1] = r->x[1]; d.x[2] = p[0];
+            d.x[3] = r->x[2] + (uint64_t)p[2] * (r->x[1] == 0 ? 1 : r->x[1] == 1 ? 2 : 4);  // first index (NVN index type 0/1/2: 8/16/32-bit)
+            d.x[4] = (uint64_t)(int64_t)(int32_t)p[3]; d.x[5] = p[4]; d.x[6] = p[1];
+        } else {  // x: mode, first, count, base instance, instances
+            d.x[1] = p[2]; d.x[2] = p[0]; d.x[3] = p[3]; d.x[4] = p[1];
+        }
+        draw(&d, elements);
+    }
+}
+
 // ================================================================== texture copies
 typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; } TexRefRec;
 
@@ -3888,6 +3941,10 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_DISPATCH: dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]); break;
         case CMD_DRAW_ARRAYS: draw(r, false); break;
         case CMD_DRAW_ELEMENTS: draw(r, true); break;
+        case CMD_DRAW_ARRAYS_INDIRECT: case CMD_DRAW_ELEMENTS_INDIRECT:
+        case CMD_MULTI_DRAW_ARRAYS_INDIRECT_COUNT: case CMD_MULTI_DRAW_ELEMENTS_INDIRECT_COUNT:
+            draw_indirect(r);
+            break;
         case CMD_UPDATE_UNIFORM_BUFFER:
             memcpy((void *)(uintptr_t)(r->x[0] + r->x[2]), x, r->x[3]);
             guest_copy_flush();  // (cbuf copies shared within the submission are stale now)
@@ -3913,6 +3970,10 @@ static void exec_list(uint64_t handle, int depth) {
             if (mode == 1 && vk_frame_counter() != frame_seen) { frame_seen = vk_frame_counter(); frame_ts = ns_to_gpu_ticks(plat_now_ns()); }
             if (!out) break;
             out[0] = 0;
+            // SAMPLES_PASSED (occlusion queries: Pokémon Z-A tests its objects with point draws and skips those that
+            // pass no samples): no occlusion queries here, so a count that always grows - every object visible
+            static uint64_t samples;
+            if (type == 1) out[0] = samples += 1u << 20;
             out[1] = mode == 1 ? frame_ts : mode == 3 ? SDL_GetTicksNS() : ns_to_gpu_ticks(plat_now_ns());  // (3 legacy: ns, the old bug)
             static uint64_t *prev_out;  // (frame pacing: the pair's start)
             if (mode == 0 || mode == 2) out[1] = pace_end_counter(prev_out, out, out[1]);
