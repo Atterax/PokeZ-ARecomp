@@ -6,5 +6,5 @@ cd "$S/../LASRecomp" 2>/dev/null || cd "$S/../.." || exit 1  # (from za-tools/ o
 export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"
 rm -f build/frame_*.png
 export LARECOMP_SETTINGS=$S/za.ini LARECOMP_SCREENSHOT_EVERY=${SHOT:-120} LARECOMP_WAIT_DUMP=${WAIT:-10} LARECOMP_PROF_SVC=1 LARECOMP_SKIP_WHY=1
-./build/lasrecomp.exe extracted --play > "$S/play.log" 2>&1
+./${EXE:-build/lasrecomp.exe} extracted --play > "$S/play.log" 2>&1
 echo "rc=$?"

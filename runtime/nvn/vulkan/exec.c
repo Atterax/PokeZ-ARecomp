@@ -1970,6 +1970,17 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     static const uint8_t zeros[0x10000];
     if (k == 0) {
         uint32_t drv[0x800 / 4] = {0};
+        if (si->uses_gmem) {  // storage buffers outside the guest memory window: their shader accesses read zero
+            static int nlog;
+            for (int i = 0; i < 16 && nlog < 30; i++) {
+                uint64_t a = st.sbuf[stage][i].addr, sz = st.sbuf[stage][i].size;
+                if (a && (a < gwin_base || a + sz > gwin_base + gwin_max)) {
+                    nlog++;
+                    LOG("[vk] storage buffer outside the gmem window: stage %d sb%d %llx+%llx (program %llx)\n", stage, i,
+                        (unsigned long long)a, (unsigned long long)sz, (unsigned long long)st.program->stages[stage].code_addr);
+                }
+            }
+        }
         if (stage == 5) {
             drv[0x200 / 4] = gx; drv[0x204 / 4] = gy; drv[0x208 / 4] = gz;
             for (int i = 0; i < 16; i++) {
@@ -2455,6 +2466,11 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
         }
     }
     if (h && st.spool && tsc < (uint32_t)st.spool->count) smp = vk_sampler(&((NvnSamplerDesc *)st.spool->entries)[tsc]);
+    {   // (debug) LARECOMP_CS_DUMMY_TEX=<compute code hex>: that compute shader samples 1x1 black textures
+        static uint64_t dummy_cs = ~0ull;
+        if (dummy_cs == ~0ull) dummy_cs = getenv("LARECOMP_CS_DUMMY_TEX") ? strtoull(getenv("LARECOMP_CS_DUMMY_TEX"), NULL, 16) : 0;
+        if (stage == 5 && dummy_cs && st.program && st.program->stages[5].code_addr == dummy_cs) view = VK_NULL_HANDLE;
+    }
     if (!view) view = vk_dummy_view(st_->type);
     if (!smp) smp = vk_default_sampler(true);
     *out = (VkDescriptorImageInfo){smp, view, VK_IMAGE_LAYOUT_GENERAL};
@@ -2642,6 +2658,22 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
             if (t) LOG(" %s%p/%#x", cp->si->tex[i].is_image ? "I:" : "", (void *)t, t->format);
         }
         LOG("\n");
+    }
+    if (getenv("LARECOMP_LOG_CS_TEX")) {  // (debug) each compute shader's textures, once
+        static uint64_t seen[64];
+        static int nseen;
+        uint64_t code = st.program->stages[5].code_addr;
+        bool have = false;
+        for (int i = 0; i < nseen; i++) have |= seen[i] == code;
+        if (!have && nseen < 64) {
+            seen[nseen++] = code;
+            for (int i = 0; i < cp->si->ntex; i++) {
+                NvnTexture *t = shader_texture_object(5, &cp->si->tex[i]);
+                LOG("[cs-tex] %llx tex%d: %p %ux%u fmt %#x levels %u target %u addr %llx\n", (unsigned long long)code, i, (void *)t,
+                    t ? t->width : 0, t ? t->height : 0, t ? t->format : 0, t ? t->levels : 0, t ? t->target : 0,
+                    (unsigned long long)(t ? t->addr : 0));
+            }
+        }
     }
     if (cp->si->uses_gmem_map) gfast_prepare(cb);
     VkDescriptorSet ds = stage_set(&cp->p, cp->p.set_layout[0], 0, 5, cp->si, NULL, NULL, gx, gy, gz, NULL);
@@ -3140,6 +3172,7 @@ static void draw_(CmdRec *r, bool indexed) {
             }
             uint64_t stride = k.stride[s], need;
             if (!stride) need = 256;
+            else if (k.divisor[s] && g_ind_gpu) need = v.size ? v.size : 1u << 20;  // (instances only the GPU knows: all)
             else if (k.divisor[s]) need = ((uint64_t)base_inst + inst + k.divisor[s] - 1) / k.divisor[s] * stride + 256;
             else need = (uint64_t)max_index * stride + 256;
             if (v.size && need > v.size) need = v.size;
@@ -3292,9 +3325,12 @@ static void draw_indirect(CmdRec *r) {
         if (r->x[k + 3]) stride = (uint32_t)r->x[k + 3];
     }
     static int nlog;
-    if (nlog < 8) {
+    static uint32_t seen_ops;
+    if (nlog < 8 || !(seen_ops & (1u << (r->op & 31)))) {
         nlog++;
-        LOG("[vk] indirect draw op %u: %u draw(s) at %llx stride %u\n", r->op, n, (unsigned long long)ind, stride);
+        seen_ops |= 1u << (r->op & 31);
+        LOG("[vk] indirect draw op %u: %u draw(s) at %llx stride %u (count buffer %llx max %llu)\n", r->op, n, (unsigned long long)ind,
+            stride, (unsigned long long)(multi ? r->x[k + 1] : 0), (unsigned long long)(multi ? r->x[k + 2] : 0));
     }
     if (!ind || ind < GUEST_LO || n > 4096) return;
     CmdRec d;

@@ -8,7 +8,7 @@ export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"
 rm -f build/frame_*.png build/pass_*.png
 export LARECOMP_INPUT="$IN" LARECOMP_KBD_AUTO=Teste LARECOMP_SCREENSHOT_EVERY=${SHOT:-60} LARECOMP_WAIT_DUMP=10 LARECOMP_PROF_SVC=1 \
     LARECOMP_SKIP_WHY=1
-./build/lasrecomp.exe extracted --play > "$S/auto.log" 2>&1 &
+./${EXE:-build/lasrecomp.exe} extracted --play > "$S/auto.log" 2>&1 &
 G=$!
 start=$SECONDS; last=""; stuck=0
 while kill -0 $G 2>/dev/null; do

@@ -136,6 +136,9 @@ int input_pad_family(void) {
     return env >= 0 ? env : pad_family;
 }
 
+// mouse camera: right stick deflection from the last motion with the right button held (input_handle_event), and its time
+static _Atomic int32_t mouse_rx, mouse_ry;
+static _Atomic uint64_t mouse_t;
 void input_handle_event(const SDL_Event *e) {
     static bool scanned;  // pads present at startup: their ADDED event may have gone to the start screen's loop
     if (!scanned) {
@@ -160,6 +163,16 @@ void input_handle_event(const SDL_Event *e) {
         break;
     case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
         recompute_pad();
+        break;
+    case SDL_EVENT_MOUSE_MOTION:  // right button held: the mouse turns the camera (right stick)
+        if (e->motion.state & SDL_BUTTON_RMASK) {
+            static double gain = -1;
+            if (gain < 0) gain = getenv("LARECOMP_MOUSE_GAIN") ? atof(getenv("LARECOMP_MOUSE_GAIN")) : 2500;
+            double x = e->motion.xrel * gain, y = -e->motion.yrel * gain;
+            mouse_rx = (int32_t)(x > 32767 ? 32767 : x < -32767 ? -32767 : x);
+            mouse_ry = (int32_t)(y > 32767 ? 32767 : y < -32767 ? -32767 : y);
+            mouse_t = SDL_GetTicksNS();
+        }
         break;
     }
 }
@@ -413,7 +426,9 @@ static void fill_state(Cpu *c) {
         if (renderer_present_count() < until) b |= 1ull << BTN_PLUS;
     }
     int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly) + script_ly);
-    int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry) + script_ry);
+    bool mouse = SDL_GetTicksNS() - mouse_t < 80000000ull;  // (the last mouse motion's deflection, for 80 ms)
+    int32_t mrx = mouse ? mouse_rx : 0, mry = mouse ? mouse_ry : 0;
+    int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx + mrx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry + mry) + script_ry);
     extern bool mirror_input(void);  // mirror mode, the world on screen (runtime/hle/mirror.c): left and right swap
     bool mirrored = !menu && mirror_input();
     if (mirrored) {
