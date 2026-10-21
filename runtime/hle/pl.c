@@ -40,6 +40,7 @@ static size_t bfttf_decode(uint8_t *d, size_t len) {
         uint32_t w0, w1, w2;
         memcpy(&w0, d, 4); memcpy(&w1, d + 4, 4); memcpy(&w2, d + 8, 4);
         uint32_t size = w1 ^ k, ver = w2 ^ k;
+        if (size > len - 8) size = __builtin_bswap32(size);  // (the console's files store it big-endian)
         if (size == 0 || size > len - 8 || (ver != 0x00000100u && ver != 0x4F54544Fu)) continue;  // sfnt 1.0 / OTTO
         (void)w0;
         for (size_t i = 0; i + 4 <= size; i += 4) {
