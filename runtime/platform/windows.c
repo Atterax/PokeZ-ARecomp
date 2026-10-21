@@ -181,8 +181,60 @@ void plat_fatal_notice(void) {
     MessageBoxA(NULL, text, "LAS Recomp", MB_ICONERROR | MB_OK);
 }
 
+// (profiling) LARECOMP_SAMPLE=<delay s>,<duration s>: after the delay, a thread samples the instruction pointer of
+// every other thread of the process each ~1 ms (suspend, read the context, resume) for the duration, then writes
+// build/samples.txt: "<thread id> <rip> <count>" lines (map the addresses with tools/za/samples.py and nm).
+#include <tlhelp32.h>
+#define SAMP_TAB (1u << 20)
+static struct { uint64_t rip; uint32_t tid, n; } *samp;
+static DWORD WINAPI sampler_main(void *arg) {
+    double delay = 0, dur = 10;
+    sscanf((const char *)arg, "%lf,%lf", &delay, &dur);
+    Sleep((DWORD)(delay * 1000));
+    samp = calloc(SAMP_TAB, sizeof *samp);
+    DWORD me = GetCurrentThreadId(), pid = GetCurrentProcessId();
+    ULONGLONG end = GetTickCount64() + (ULONGLONG)(dur * 1000);
+    uint64_t total = 0;
+    while (GetTickCount64() < end) {
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        THREADENTRY32 te = {.dwSize = sizeof te};
+        for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+            if (te.th32OwnerProcessID != pid || te.th32ThreadID == me) continue;
+            HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, te.th32ThreadID);
+            if (!h) continue;
+            CONTEXT ctx = {.ContextFlags = CONTEXT_CONTROL};
+            if (SuspendThread(h) != (DWORD)-1) {
+                if (GetThreadContext(h, &ctx)) {
+                    uint64_t k = (ctx.Rip * 0x9E3779B97F4A7C15ull) ^ te.th32ThreadID;
+                    uint32_t slot = (uint32_t)(k >> 40) & (SAMP_TAB - 1);
+                    for (int probe = 0; probe < 64; probe++, slot = (slot + 1) & (SAMP_TAB - 1)) {
+                        if (!samp[slot].n) { samp[slot].rip = ctx.Rip; samp[slot].tid = te.th32ThreadID; samp[slot].n = 1; break; }
+                        if (samp[slot].rip == ctx.Rip && samp[slot].tid == te.th32ThreadID) { samp[slot].n++; break; }
+                    }
+                    total++;
+                }
+                ResumeThread(h);
+            }
+            CloseHandle(h);
+        }
+        CloseHandle(snap);
+        Sleep(1);
+    }
+    FILE *f = fopen("build/samples.txt", "w");
+    if (f) {
+        for (uint32_t i = 0; i < SAMP_TAB; i++)
+            if (samp[i].n) fprintf(f, "%u %llx %u\n", samp[i].tid, (unsigned long long)samp[i].rip, samp[i].n);
+        fclose(f);
+    }
+    HMODULE game = GetModuleHandleA("lasgame.dll"), exe = GetModuleHandleA(NULL);
+    fprintf(stderr, "[sample] %llu samples -> build/samples.txt (lasgame.dll at %p, exe at %p)\n", (unsigned long long)total,
+            (void *)game, (void *)exe);
+    return 0;
+}
+
 void plat_init(void) {
     log_to_file_without_console();
+    if (getenv("LARECOMP_SAMPLE")) CreateThread(NULL, 0, sampler_main, getenv("LARECOMP_SAMPLE"), 0, NULL);
     require_cpu();
     _fmode = _O_BINARY;  // fopen/open default to binary (the runtime's "r"/"w" files are binary or LF text)
     _setmode(_fileno(stdout), _O_BINARY);

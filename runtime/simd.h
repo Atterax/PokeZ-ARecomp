@@ -10,6 +10,24 @@
 #include <fenv.h>
 #include <math.h>
 
+// Rounding mode switches of the FPCR.FZ / RMode slow paths: the SSE control register directly. The C library's
+// fesetround also programs the x87 unit and, on MinGW, goes through _controlfp: with FPCR.FZ set (Pokémon Z-A) every
+// scalar FP op takes the slow path with two switches, and they were a third of the lifted code's time. The FE_* values
+// keep MXCSR.RC's order (near, down, up, zero) in their library's encoding: MinGW's _controlfp one (0x100 steps, RC
+// shifted down by 5) or the x87 one (0x400 steps, by 3). (glibc's are enums, not seen here: it keeps its own.)
+#if defined(__x86_64__) && defined(FE_TOWARDZERO) && FE_TONEAREST == 0 &&     ((FE_DOWNWARD == 0x100 && FE_UPWARD == 0x200 && FE_TOWARDZERO == 0x300) ||      (FE_DOWNWARD == 0x400 && FE_UPWARD == 0x800 && FE_TOWARDZERO == 0xc00))
+#include <xmmintrin.h>
+#define RT_FE_SHIFT (FE_DOWNWARD == 0x100 ? 5 : 3)
+static inline int rt_fegetround(void) { return (int)((_mm_getcsr() >> RT_FE_SHIFT) & (unsigned)FE_TOWARDZERO); }
+static inline int rt_fesetround(int m) {
+    unsigned c = _mm_getcsr(), n = (c & ~0x6000u) | (((unsigned)m & (unsigned)FE_TOWARDZERO) << RT_FE_SHIFT);
+    if (n != c) _mm_setcsr(n);
+    return 0;
+}
+#define fegetround rt_fegetround
+#define fesetround rt_fesetround
+#endif
+
 #include "cpu.h"
 
 typedef __uint128_t u128;

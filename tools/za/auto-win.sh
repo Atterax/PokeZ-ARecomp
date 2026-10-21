@@ -4,6 +4,8 @@
 # direto e o encerra com taskkill após T s ou 25 s sem quadros novos. Log em za-tools/auto.log, quadros em build/frame_*.png
 S=$(cd "$(dirname "$0")" && pwd)
 cd "$S/../LASRecomp" 2>/dev/null || cd "$S/../.." || exit 1  # (from za-tools/ or LASRecomp/tools/za/)
+# EXE=build/o1/lasrecomp.exe also takes that build's game library
+[ -n "$EXE" ] && export LARECOMP_GAME_LIB="$PWD/$(dirname "$EXE")/lasgame.dll"
 export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"
 rm -f build/frame_*.png build/pass_*.png
 export LARECOMP_INPUT="$IN" LARECOMP_KBD_AUTO=Teste LARECOMP_SCREENSHOT_EVERY=${SHOT:-60} LARECOMP_WAIT_DUMP=10 LARECOMP_PROF_SVC=1 \

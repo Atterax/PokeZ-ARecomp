@@ -1613,10 +1613,9 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             static const char *const fmt[] = {"lane", "(1u << lane)", "((1u << lane) - 1u)", "((2u << lane) - 1u)",
                                               "(~((2u << lane) - 1u))", "(~((1u << lane) - 1u))"};
             int k = sr == 0 ? 0 : sr - 0x37;
-            // Graphics stages keep lane 0 for now: with the real index Taunie's legs vanished (some vertex / fragment
-            // shader's subgroup use still differs); LARECOMP_LANE_GRAPHICS=1 gives them the real one (investigation)
+            // (LARECOMP_LANE_COMPUTE_ONLY=1, investigation: graphics stages get lane 0, as before vertex SHFL was real)
             static int compute_only = -1;
-            if (compute_only < 0) compute_only = getenv("LARECOMP_LANE_GRAPHICS") == NULL;
+            if (compute_only < 0) compute_only = getenv("LARECOMP_LANE_COMPUTE_ONLY") != NULL;
             if ((!c->glsl && c->stage == STAGE_VERTEX) || (compute_only && c->stage != STAGE_COMPUTE)) {
                 static const char *const v0[] = {"0u", "1u", "0u", "1u", "0xFFFFFFFEu", "0xFFFFFFFFu"};
                 set_reg(c, d, v0[k]);
@@ -1845,9 +1844,9 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         char bb[32];
         const char *bv = bits(w, 28, 1) ? (sprintf(bb, "%uu", (unsigned)bits(w, 20, 5)), bb) : R((int)bits(w, 20, 8));
         int pd = (int)bits(w, 48, 3);
-        if (c->stage == STAGE_VERTEX) {
-            set_reg(c, d, R(a));  // no SIMD-group functions in vertex functions: lane-local value
-        } else if (c->glsl) {  // a quad xor (lane mask < 4) is the subgroup xor within the quad
+        if (c->stage == STAGE_VERTEX && !c->glsl) {
+            set_reg(c, d, R(a));  // no SIMD-group functions in MSL vertex functions: lane-local value
+        } else if (c->glsl) {  // (all stages: Vulkan subgroups. A quad xor - lane mask < 4 - is the subgroup xor in the quad)
             static const char *const fn[] = {"subgroupShuffle", "subgroupShuffleUp", "subgroupShuffleDown", "subgroupShuffleXor"};
             sprintf(t, "%s(%s, uint(%s))", fn[mode], R(a), bv);
             set_reg(c, d, t);

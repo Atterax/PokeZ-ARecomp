@@ -57,10 +57,18 @@ static inline void rt_set_fpsr(uint64_t v) { (void)v; }
 #endif
 
 // ---- memory: guest addresses are host addresses
-typedef uint16_t __attribute__((aligned(1), may_alias)) u16u;
-typedef uint32_t __attribute__((aligned(1), may_alias)) u32u;
-typedef uint64_t __attribute__((aligned(1), may_alias)) u64u;
-typedef uint8_t __attribute__((may_alias)) u8a;
+// GUEST_VOLATILE (an optimised game build: GENOPT="-O1 -DGUEST_VOLATILE"): every guest load / store is performed, as
+// on the hardware. Optimised without it, clang keeps a guest value in a register across a loop that polls it (Pokémon
+// Z-A hung at start-up spinning on a flag another thread sets).
+#ifdef GUEST_VOLATILE
+#define GUEST_MEM volatile
+#else
+#define GUEST_MEM
+#endif
+typedef GUEST_MEM uint16_t __attribute__((aligned(1), may_alias)) u16u;
+typedef GUEST_MEM uint32_t __attribute__((aligned(1), may_alias)) u32u;
+typedef GUEST_MEM uint64_t __attribute__((aligned(1), may_alias)) u64u;
+typedef GUEST_MEM uint8_t __attribute__((may_alias)) u8a;
 
 // Function-entry profiler (runtime/fnprof.c, LARECOMP_FNPROF): one predictable branch per call when off.
 extern volatile int g_fnprof;
