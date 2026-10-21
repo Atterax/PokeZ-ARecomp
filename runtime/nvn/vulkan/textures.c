@@ -1,6 +1,9 @@
 // Vulkan textures: NVN formats, images, change-detected uploads from guest memory, views and samplers
 // (counterpart of the texture half of metal.m and the view helpers of renderer.m).
+#include <SDL3/SDL_filesystem.h>
+#include <SDL3/SDL_surface.h>
 #include <SDL3/SDL_timer.h>
+#include <dirent.h>
 #include <float.h>
 #include <math.h>
 #include <pthread.h>
@@ -230,7 +233,7 @@ bool renderer_texture_presented(NvnTexture *t) {
 
 void renderer_texture_scale(NvnTexture *t, float *sx, float *sy) {
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;
-    if (b && b->scalable) { *sx = b->sx; *sy = b->sy; }
+    if (b && (b->scalable || b->hd)) { *sx = b->sx; *sy = b->sy; }
     else { *sx = 1; *sy = 1; }
 }
 
@@ -424,11 +427,13 @@ static TexBackend *tex_backend(NvnTexture *t) {
     return b;
 }
 
+static void hd_forget(NvnTexture *t);  // (HD texture packs, below)
 void backend_texture_destroyed(NvnTexture *t) {
     TexBackend *b = t->backend;
     if (b) {
         extern void vk_alias_texture_destroyed(NvnTexture *t);  // (exec.c copy aliases: a source's contents handed over)
         vk_alias_texture_destroyed(t);
+        hd_forget(t);
         live_remove(b);
         destroy_image(b);
         free(b->pending_rgba);
@@ -445,6 +450,140 @@ void vk_textures_reset(void) {
     while (g_nlive > 0) backend_texture_destroyed(g_live[g_nlive - 1]);
     vk_collect_dead();
     LOG("[vk] reboot: %d textures released\n", n);
+}
+
+
+// ================================================================== HD texture packs
+// A game texture is known by hash_full of its bytes as the game wrote them (deterministic: the same texture has the
+// same name in every run). LARECOMP_TEX_DUMP=1 (or setting tex_dump) saves each 2D colour texture the game uploads, as
+// it decodes (BCn / ASTC through the GPU), to textures/dump/<hash>.png - feed those to an upscaler (tools/za/
+// upscale_textures.py) and put the results in textures/hd/<hash>.png: such a texture is then drawn from that image
+// instead (any size; RGBA8, mipmaps made here), the shaders told its size over the game's as for render targets at the
+// internal resolution (texel fetches and size queries stay in the game's units). Textures the game rewrites go back to
+// its own data. Setting tex_hd = 0 / LARECOMP_TEX_HD=0: packs off.
+static int hd_on = -1, hd_dump = -1;
+static uint64_t *hd_set;  // sorted hashes of textures/hd/*.png
+static int hd_n;
+static int hd_cmp(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
+
+static void hd_init(void) {
+    if (hd_on >= 0) return;
+    const char *e = getenv("LARECOMP_TEX_HD");
+    hd_on = e ? atoi(e) != 0 : g_settings.tex_hd;
+    e = getenv("LARECOMP_TEX_DUMP");
+    hd_dump = e ? atoi(e) != 0 : g_settings.tex_dump;
+    if (hd_dump) { SDL_CreateDirectory("textures"); SDL_CreateDirectory("textures/dump"); }
+    if (!hd_on) return;
+    DIR *d = opendir("textures/hd");
+    if (!d) return;
+    int cap = 0;
+    for (struct dirent *de; (de = readdir(d));) {
+        unsigned long long h;
+        char ext[8] = "";
+        if (strlen(de->d_name) != 20 || sscanf(de->d_name, "%16llx.%4s", &h, ext) != 2 || strcmp(ext, "png")) continue;
+        if (hd_n == cap) { cap = cap ? cap * 2 : 1024; hd_set = realloc(hd_set, cap * sizeof *hd_set); }
+        hd_set[hd_n++] = h;
+    }
+    closedir(d);
+    qsort(hd_set, hd_n, sizeof *hd_set, hd_cmp);
+    LOG("[tex] HD pack: %d textures in textures/hd\n", hd_n);
+}
+
+static bool hd_has(uint64_t h) { return hd_n && bsearch(&h, hd_set, hd_n, sizeof h, hd_cmp); }
+
+// plain 2D colour textures the game fills from the CPU (not render targets, video frames or linear / changing ones)
+static bool hd_candidate(const NvnTexture *t, const TexBackend *b) {
+    return (t->target == 1 || t->target == 5) && !b->scalable && !b->gpu_owned && !b->dynamic && !b->pending_rgba &&
+           b->aspect == VK_IMAGE_ASPECT_COLOR_BIT && b->depth == 1 && b->layers == 1 && b->samples == 1 &&
+           t->width >= 16 && t->height >= 16 && !(t->flags & 0x10);
+}
+
+static bool hd_replace(NvnTexture *t, TexBackend *b, uint64_t h) {
+    char path[64];
+    snprintf(path, sizeof path, "textures/hd/%016llx.png", (unsigned long long)h);
+    SDL_Surface *s0 = SDL_LoadPNG(path);
+    if (!s0) { LOG("[tex] %s: %s\n", path, SDL_GetError()); return false; }
+    SDL_Surface *s = SDL_ConvertSurface(s0, SDL_PIXELFORMAT_ABGR8888);  // (R, G, B, A bytes)
+    SDL_DestroySurface(s0);
+    if (!s) return false;
+    uint32_t w = (uint32_t)s->w, hh = (uint32_t)s->h, levels = 1;
+    for (uint32_t m = w > hh ? w : hh; m > 1; m >>= 1) levels++;
+    VkFormat vf = vk_format_is_srgb(b->format) ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
+                            .imageType = VK_IMAGE_TYPE_2D, .format = vf, .extent = {w, hh, 1}, .mipLevels = levels,
+                            .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    VkImage img;
+    VmaAllocation mem;
+    if (vmaCreateImage(g_vk.vma, &ci, &ai, &img, &mem, NULL) != VK_SUCCESS) { SDL_DestroySurface(s); return false; }
+    destroy_image(b);
+    b->image = img, b->mem = mem, b->format = vf;
+    b->width = w, b->height = hh, b->depth = 1, b->layers = 1, b->levels = levels, b->samples = 1;
+    b->aspect = VK_IMAGE_ASPECT_COLOR_BIT, b->base_type = VK_IMAGE_VIEW_TYPE_2D, b->astc_bw = b->astc_bh = 0;
+    b->hd = true, b->sx = (float)w / (float)t->width, b->sy = (float)hh / (float)t->height;
+    VkCommandBuffer cb = vk_upload_cmd();
+    vk_image_init_layout(cb, img, VK_IMAGE_ASPECT_COLOR_BIT);
+    VkSpan sp = vk_transient((uint64_t)w * hh * 4, 16);
+    for (uint32_t y = 0; y < hh; y++) memcpy((uint8_t *)sp.ptr + (uint64_t)y * w * 4, (const uint8_t *)s->pixels + (uint64_t)y * s->pitch, (size_t)w * 4);
+    SDL_DestroySurface(s);
+    VkBufferImageCopy rg = {.bufferOffset = sp.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {w, hh, 1}};
+    vkCmdCopyBufferToImage(cb, sp.buf, img, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                           .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    for (uint32_t lv = 1; lv < levels; lv++) {  // each level a linear downsample of the one above
+        vkCmdPipelineBarrier2(cb, &di);
+        int32_t sw = (int32_t)level_w(b, lv - 1), sh = (int32_t)level_h(b, lv - 1);
+        VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv - 1, 0, 1}, .srcOffsets = {{0, 0, 0}, {sw, sh, 1}},
+                          .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, 0, 1},
+                          .dstOffsets = {{0, 0, 0}, {(int32_t)level_w(b, lv), (int32_t)level_h(b, lv), 1}}};
+        vkCmdBlitImage(cb, img, VK_IMAGE_LAYOUT_GENERAL, img, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+    }
+    vkCmdPipelineBarrier2(cb, &di);
+    static int n;
+    if (n++ < 20) LOG("[tex] HD %016llx: %ux%u for %ux%u\n", (unsigned long long)h, w, hh, t->width, t->height);
+    return true;
+}
+
+// Dumps: queued at upload, saved between frames (vk_texdump_process, from the present: no pass to interrupt)
+typedef struct { NvnTexture *t; uint64_t h; } HdDump;
+static HdDump hd_q[4096];
+static int hd_qn;
+static uint64_t *hd_done;  // hashes already dumped this run
+static int hd_done_n, hd_done_cap;
+
+static void hd_queue_dump(NvnTexture *t, uint64_t h) {
+    for (int i = 0; i < hd_done_n; i++) if (hd_done[i] == h) return;
+    if (hd_qn == 4096) return;
+    if (hd_done_n == hd_done_cap) { hd_done_cap = hd_done_cap ? hd_done_cap * 2 : 1024; hd_done = realloc(hd_done, hd_done_cap * sizeof *hd_done); }
+    hd_done[hd_done_n++] = h;
+    hd_q[hd_qn++] = (HdDump){t, h};
+}
+
+static void hd_forget(NvnTexture *t) {
+    for (int i = 0; i < hd_qn; i++) if (hd_q[i].t == t) hd_q[i].t = NULL;
+}
+
+void renderer_save_texture_tex(TexBackend *b, const char *path);
+void vk_texdump_process(void) {
+    if (!hd_qn) return;
+    int done = 0, k = 0;
+    for (int i = 0; i < hd_qn; i++) {
+        HdDump d = hd_q[i];
+        TexBackend *b = d.t ? d.t->backend : NULL;
+        if (!b || b->hd || b->data_hash != d.h) continue;  // (gone or changed)
+        if (done >= 24) { hd_q[k++] = d; continue; }  // (a few per frame: each one waits for the GPU)
+        char path[64];
+        snprintf(path, sizeof path, "textures/dump/%016llx.png", (unsigned long long)d.h);
+        FILE *f = fopen(path, "rb");
+        if (f) { fclose(f); continue; }  // (from an earlier run)
+        renderer_save_texture_tex(b, path);
+        done++;
+    }
+    hd_qn = k;
 }
 
 // ================================================================== uploads (same change detection as metal.m)
@@ -548,6 +687,18 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (b->tp > 0) b->tp_gen = texpatch_generation();
     b->data_hash = h;
     b->uploaded = true;
+    hd_init();
+    if (b->hd && (b->dynamic || !hd_has(h))) {  // an HD-replaced texture the game rewrote: back to its own image
+        destroy_image(b);
+        b->hd = false;
+        create_image(t, b);
+    } else if (b->hd) {
+        return;
+    }
+    if (hd_candidate(t, b)) {
+        if (hd_on && hd_has(h) && hd_replace(t, b, h)) return;
+        if (hd_dump) hd_queue_dump(t, h);
+    }
     if (b->format != mf.vf && !b->astc_bw) return;  // unsupported format: nothing sensible to copy
     VkCommandBuffer cb = vk_upload_cmd();
     uint32_t layers = t->layout.layers ? t->layout.layers : 1;

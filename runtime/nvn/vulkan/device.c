@@ -528,6 +528,8 @@ void backend_present(NvnTexture *t) {
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
     vk_end_pass();
+    extern void vk_texdump_process(void);  // (textures.c: queued texture dumps, between frames)
+    vk_texdump_process();
     static const float black[4] = {0, 0, 0, 1};
     uint64_t t0 = SDL_GetTicksNS();
     bool have = vk_frame_begin(black);

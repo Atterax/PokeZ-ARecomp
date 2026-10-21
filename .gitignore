@@ -17,3 +17,6 @@ tools/venv/
 venv/
 __pycache__/
 .DS_Store
+
+# texture dumps and HD packs (game art: users make their own)
+/textures/

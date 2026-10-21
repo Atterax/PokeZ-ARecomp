@@ -8,6 +8,10 @@ cd "$S/../LASRecomp" 2>/dev/null || cd "$S/../.." || exit 1  # (from za-tools/ o
 [ -n "$EXE" ] && [ -z "$LARECOMP_GAME_LIB" ] && export LARECOMP_GAME_LIB="$PWD/$(dirname "$EXE")/lasgame.dll"
 export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"
 rm -f build/frame_*.png build/pass_*.png
+# tests play on a scratch copy of the save (the game autosaves): build/testsave, fresh from save/ each run
+# (TESTSAVE_KEEP=1: carry on from the previous run's scratch save)
+[ -z "$TESTSAVE_KEEP" ] && { rm -rf build/testsave; mkdir -p build/testsave; cp -r save/save_0 build/testsave/; }
+export LARECOMP_SAVE_DIR=$PWD/build/testsave
 export LARECOMP_SETTINGS=$S/za.ini LARECOMP_INPUT="$IN" LARECOMP_KBD_AUTO=Teste LARECOMP_SCREENSHOT_EVERY=${SHOT:-60} LARECOMP_WAIT_DUMP=10 LARECOMP_PROF_SVC=1 \
     LARECOMP_SKIP_WHY=1
 ./${EXE:-build/lasrecomp.exe} extracted --play > "$S/auto.log" 2>&1 &
