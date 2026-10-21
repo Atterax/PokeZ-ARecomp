@@ -1613,7 +1613,11 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             static const char *const fmt[] = {"lane", "(1u << lane)", "((1u << lane) - 1u)", "((2u << lane) - 1u)",
                                               "(~((2u << lane) - 1u))", "(~((1u << lane) - 1u))"};
             int k = sr == 0 ? 0 : sr - 0x37;
-            if (!c->glsl && c->stage == STAGE_VERTEX) {
+            // Graphics stages keep lane 0 for now: with the real index Taunie's legs vanished (some vertex / fragment
+            // shader's subgroup use still differs); LARECOMP_LANE_GRAPHICS=1 gives them the real one (investigation)
+            static int compute_only = -1;
+            if (compute_only < 0) compute_only = getenv("LARECOMP_LANE_GRAPHICS") == NULL;
+            if ((!c->glsl && c->stage == STAGE_VERTEX) || (compute_only && c->stage != STAGE_COMPUTE)) {
                 static const char *const v0[] = {"0u", "1u", "0u", "1u", "0xFFFFFFFEu", "0xFFFFFFFFu"};
                 set_reg(c, d, v0[k]);
             } else {
