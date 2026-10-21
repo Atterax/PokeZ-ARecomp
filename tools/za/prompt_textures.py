@@ -30,6 +30,7 @@ ap.add_argument('--settings', default=None, help='settings file with bind_key_* 
 ap.add_argument('--out', default='textures/prompts')
 ap.add_argument('--scale', type=int, default=4)
 ap.add_argument('--font', default=None, help='bold TrueType font for the labels')
+ap.add_argument('--mods', default='mods', help="mods folder (runtime/services/fs.c): their UI archives' icons too")
 args = ap.parse_args()
 S = args.scale
 
@@ -152,13 +153,24 @@ def bc4(b):
     return [pal[(bits >> 3 * i) & 7] for i in range(16)]
 
 
-def decode_bc5(data, w, h, bh):  # -> float32 HxWx2 (red, green) 0..1
+def bc1_rg(b):  # a BC1 colour block (BC3's second half: always 4 colours) -> red, green of its 16 texels
+    c0, c1, bits = int.from_bytes(b[0:2], 'little'), int.from_bytes(b[2:4], 'little'), int.from_bytes(b[4:8], 'little')
+    rg = [((c >> 11) * 255 // 31, ((c >> 5) & 63) * 255 // 63) for c in (c0, c1)]
+    pal = rg + [tuple((2 * rg[0][k] + rg[1][k]) // 3 for k in (0, 1)), tuple((rg[0][k] + 2 * rg[1][k]) // 3 for k in (0, 1))]
+    return [pal[(bits >> 2 * i) & 3] for i in range(16)]
+
+
+def decode_bc5(data, w, h, bh, fmt=0x1e01):  # -> float32 HxWx2 (label, shape) 0..1; BC5, or BC3 (fmt 0x1c01)
     wb, hb = (w + 3) // 4, (h + 3) // 4
     lin = deswizzle(data, wb, hb, 16, bh)
     img = np.zeros((hb * 4, wb * 4, 2), np.float32)
     for y in range(hb):
         for x in range(wb):
             o = (y * wb + x) * 16
+            if fmt == 0x1c01:  # (BC3: the label in the colour, the shape in the alpha - the texture's channel swizzle)
+                img[y * 4:y * 4 + 4, x * 4:x * 4 + 4, 0] = np.array([c[0] for c in bc1_rg(lin[o + 8:o + 16])]).reshape(4, 4)
+                img[y * 4:y * 4 + 4, x * 4:x * 4 + 4, 1] = np.array(bc4(lin[o:o + 8])).reshape(4, 4)
+                continue
             img[y * 4:y * 4 + 4, x * 4:x * 4 + 4, 0] = np.array(bc4(lin[o:o + 8])).reshape(4, 4)
             img[y * 4:y * 4 + 4, x * 4:x * 4 + 4, 1] = np.array(bc4(lin[o + 8:o + 16])).reshape(4, 4)
     return img[:h, :w] / 255.0
@@ -655,6 +667,20 @@ def build_pack(m, off, files):
 
 # ------------------------------------------------------------------ main
 found = {}  # hash -> (name, decoded)
+bc3 = set()  # (those stored as BC3: written back label -> RGB, shape -> alpha)
+
+
+def scan_sarc(d):
+    if d[:4] != b'SARC': return
+    for f in sarc_files(d):
+        if f[:4] != b'BNTX': continue
+        for name, w, h, fmt, bh, data in bntx_textures(f):
+            if name not in ICONS or fmt not in (0x1e01, 0x1c01): continue  # (BC5; BC3 in some mods' archives)
+            hh = hash_full(data)
+            if hh not in found: found[hh] = (name, decode_bc5(data, w, h, bh, fmt))
+            if fmt == 0x1c01: bc3.add(hh)
+
+
 icon_fonts = []  # (Entry, magic, decoded TTF) of or_font / or_font_eng
 trpfs = os.path.join(args.romfs, 'arc', 'data.trpfs')
 print('reading', trpfs)
@@ -672,13 +698,12 @@ for ent in game_files(trpfs):
             from fontTools.ttLib import TTFont
             LABEL_FONT = TTFont(io.BytesIO(ttf))  # (the game's own letters for the font glyphs' labels)
         continue
-    if d[:4] != b'SARC': continue
-    for f in sarc_files(d):
-        if f[:4] != b'BNTX': continue
-        for name, w, h, fmt, bh, data in bntx_textures(f):
-            if name not in ICONS or fmt != 0x1e01: continue
-            hh = hash_full(data)
-            if hh not in found: found[hh] = (name, decode_bc5(data, w, h, bh))
+    scan_sarc(d)
+# the mods' UI archives (a translation's title screen has its own "PRESS (A)")
+for root, _, names in os.walk(args.mods):
+    for nm in names:
+        if nm.endswith('.arc'):
+            with open(os.path.join(root, nm), 'rb') as f: scan_sarc(f.read())
 print(len(found), 'icon textures,', len(icon_fonts), 'icon fonts')
 print('labels:', {b: key(b) for b in ('a', 'b', 'x', 'y', 'l', 'r', 'zl', 'zr', 'plus', 'minus')})
 # glyphs left as they are when the relabelled fonts don't fit their pack's room, in this order
@@ -692,6 +717,9 @@ for style in ('keyboard', 'xbox', 'xboxlabel'):
     for hh, (name, img) in sorted(found.items()):
         out = relabel(img, name, ICONS[name].split('|'), style)
         if out is None: continue
+        if hh in bc3:
+            r, g, _, _ = out.split()
+            out = Image.merge('RGBA', (r, r, r, g))
         out.save(os.path.join(d, '%016x.png' % hh))
         n += 1
     print(f'{d}: {n} textures')
