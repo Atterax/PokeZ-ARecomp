@@ -590,8 +590,8 @@ static void tab_about(void) {
         static const char *const fam[] = {"Nintendo", "Xbox", "PlayStation"};
         char autol[64];
         snprintf(autol, sizeof autol, "Auto (%s)", fam[input_pad_family() % 3]);
-        const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation"};
-        choice("Button icons", &g_settings.prompts, names, 4);
+        const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation", "Keyboard"};  // (Keyboard: Z-A, from the next boot)
+        choice("Button icons", &g_settings.prompts, names, 5);
     }
     ImGui::Spacing();
     header("System language");

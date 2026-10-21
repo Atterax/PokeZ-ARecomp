@@ -13,6 +13,7 @@
 
 #include "../hle.h"
 #include "../settings.h"
+#include <SDL3/SDL_gamepad.h>
 
 typedef struct { uint64_t addr, size; } Font;
 static Font fonts[2];  // [0] Standard (every type), [1] NintendoExt when a dump provides it
@@ -126,9 +127,15 @@ static void load_fonts(void) {
     if (!fonts[0].addr) FATAL("no usable system font substitute\n");
     // Xbox prompts (setting prompts = xbox, or auto with an Xbox controller): the button glyphs relabelled
     // (tools/za/xbox_font.py: A/B and X/Y traded, as the controls map by position)
+    // Keyboard prompts (auto with no controller connected at boot): the glyphs drawn as keys with the bound keys' names
+    // (tools/za/keyboard_font.py, from the settings' bind_key_* lines)
     extern int input_pad_family(void);
-    bool xbox = g_settings.prompts == PROMPTS_XBOX || (g_settings.prompts == PROMPTS_AUTO && input_pad_family() == 1);
-    if (!(xbox && load_one("fonts/nintendo_ext_003_xbox.ttf", &fonts[1])) &&
+    bool pad = SDL_HasGamepad();
+    bool xbox = g_settings.prompts == PROMPTS_XBOX || (g_settings.prompts == PROMPTS_AUTO && pad && input_pad_family() == 1);
+    bool keys = g_settings.prompts == PROMPTS_KEYBOARD || (g_settings.prompts == PROMPTS_AUTO && !pad);
+    LOG("[pl] button prompts: %s\n", keys ? "keyboard" : xbox ? "Xbox" : "Nintendo");
+    if (!(keys && load_one("fonts/nintendo_ext_003_keyboard.ttf", &fonts[1])) &&
+        !(xbox && load_one("fonts/nintendo_ext_003_xbox.ttf", &fonts[1])) &&
         !load_one("fonts/nintendo_ext_003.bfttf", &fonts[1]))
         load_one("fonts/nintendo_ext_003.ttf", &fonts[1]);
 }
