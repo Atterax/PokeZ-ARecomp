@@ -18,6 +18,7 @@
 #define R_NOT_FOUND 0xF201
 #define R_INVALID_ENUM 0xF001
 #define R_OUT_OF_RESOURCE 0xD001
+#define R_LIMIT_REACHED 0x10801
 
 #define PSEUDO_THREAD 0xFFFF8000u
 #define PSEUDO_PROCESS 0xFFFF8001u
@@ -152,7 +153,34 @@ static void region_remove(uint64_t addr) {
 // Physical memory (svcMapPhysicalMemory, the SDK's virtual address memory): a range may cover pages mapped before,
 // which keep their contents - only the gaps are new (zero: the window's pages are fresh until unmapped). Adjacent
 // ranges merge into one region (the SDK maps many small ones).
+// Application memory (GetInfo 6 / 21) and what the process uses of it (GetInfo 7 / 22): the heap, physical memory
+// (svcMapPhysicalMemory) and ~64 MB for the code, stacks and kernel objects. As on hardware, a physical mapping
+// beyond it fails with LimitReached - Pokémon Z-A maps all the free memory as one pool, then keeps asking for 4 MB
+// pieces until refused. Off by default (LARECOMP_PHYS_LIMIT=1): with the limit the game keeps fewer characters / props
+// loaded than on Ryujinx with its own (smaller) baseline - the 64 MB estimate is not what the hardware counts.
+#define APP_MEMORY 0xCD500000ull
+static uint64_t phys_mapped;
+static int phys_limit = -1;  // LARECOMP_PHYS_LIMIT=1: count physical memory as used and refuse mappings past APP_MEMORY
+static uint64_t used_memory(void) {
+    if (phys_limit < 0) phys_limit = getenv("LARECOMP_PHYS_LIMIT") != NULL;
+    return heap_size + (phys_limit ? phys_mapped : 0) + 0x4000000ull;
+}
+
+// bytes of [addr, addr + size) not mapped yet (physical memory regions)
+static uint64_t phys_new_bytes(uint64_t addr, uint64_t size) {
+    uint64_t end = addr + size, cur = addr, n = 0;
+    for (int i = 0; i < nregions && cur < end; i++) {
+        Region *r = &regions[i];
+        if (r->type != 7 || r->addr + r->size <= cur || r->addr >= end) continue;
+        if (r->addr > cur) n += r->addr - cur;
+        cur = r->addr + r->size;
+    }
+    if (cur < end) n += end - cur;
+    return n;
+}
+
 static void phys_map(uint64_t addr, uint64_t size) {
+    phys_mapped += phys_new_bytes(addr, size);
     uint64_t end = addr + size, cur = addr, gaps[64][2];
     int ngaps = 0;
     for (int i = 0; i < nregions && cur < end; i++) {
@@ -176,6 +204,8 @@ static void phys_map(uint64_t addr, uint64_t size) {
 // Unmapped pages are released and read as zero when mapped again; regions are trimmed or split.
 static void phys_unmap(uint64_t addr, uint64_t size) {
     uint64_t end = addr + size;
+    uint64_t was = size - phys_new_bytes(addr, size);  // (the mapped part of the range)
+    phys_mapped = was > phys_mapped ? 0 : phys_mapped - was;
     for (int i = 0; i < nregions; i++) {
         Region r = regions[i];
         if (r.type != 7 || r.addr + r.size <= addr || r.addr >= end) continue;
@@ -812,8 +842,8 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         case 3: v = ALIAS_SIZE; break;
         case 4: v = HEAP_BASE; break;
         case 5: v = HEAP_MAX; break;
-        case 6: case 21: v = 0xCD500000ull; break;  // application memory (3.2 GB, as on hardware)
-        case 7: case 22: v = heap_size + 0x4000000; break;
+        case 6: case 21: v = APP_MEMORY; break;  // application memory (3.2 GB, as on hardware)
+        case 7: case 22: v = used_memory(); break;
         case 8: v = 0; break;
         case 9: v = 0; break;
         case 11: v = ((uint64_t)arc4random() << 32) | arc4random(); break;
@@ -840,6 +870,15 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     }
     case 0x2C:  // MapPhysicalMemory(addr, size)
         if (ENV("LARECOMP_LOG_VAMM")) LOG("[kernel] MapPhysicalMemory %llx +%llx\n", x[0], x[1]);
+        {
+            if (used_memory() && phys_limit && used_memory() + phys_new_bytes(x[0], x[1]) > APP_MEMORY) {
+                static int nlog;
+                if (nlog++ < 4) LOG("[kernel] MapPhysicalMemory %llx +%llx: LimitReached (used %llu MB)\n", x[0], x[1],
+                                    (unsigned long long)(used_memory() >> 20));
+                x[0] = R_LIMIT_REACHED;
+                break;
+            }
+        }
         phys_map(x[0], x[1]);
         x[0] = R_OK;
         break;

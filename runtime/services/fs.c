@@ -326,16 +326,18 @@ static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
 }
 
 // Path of the RomFS file containing image offset `off` (NULL if none).
-const char *romfs_file_at(uint64_t off) {
+// the RomFS file holding image offset `off` (NULL: none), *base its start (optional)
+static const char *romfs_file_base(uint64_t off, uint64_t *base) {
     int lo = 0, hi = rom_nfiles - 1;
     while (lo <= hi) {
         int mid = (lo + hi) / 2;
         if (off < rom_files[mid].off) hi = mid - 1;
         else if (off >= rom_files[mid].off + rom_files[mid].size) lo = mid + 1;
-        else return rom_files[mid].path;
+        else { if (base) *base = rom_files[mid].off; return rom_files[mid].path; }
     }
     return NULL;
 }
+const char *romfs_file_at(uint64_t off) { return romfs_file_base(off, NULL); }
 
 void romfs_file_read_hook(const char *path);
 
@@ -352,6 +354,17 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
         if (size > b->size) size = b->size;
         ssize_t n = romfs_read(st->fd, (uint8_t *)(uintptr_t)b->addr, size, off);
         if (n < 0) LOG("[fs] storage read failed at %llx: %s\n", off, strerror(errno));
+        {   // (debug) LARECOMP_LOG_READS=<file>: every read as "<RomFS path> <offset in the file> <size>"
+            static FILE *rf;
+            static int on = -1;
+            if (on < 0) { const char *e = getenv("LARECOMP_LOG_READS"); on = e && (rf = fopen(e, "w")) != NULL; }
+            if (on) {
+                uint64_t base = 0;
+                const char *path = romfs_file_base(off, &base);
+                fprintf(rf, "%s %llx %llx\n", path ? path : "?", (unsigned long long)(off - base), (unsigned long long)size);
+                fflush(rf);
+            }
+        }
         {
             const char *path = romfs_file_at(off);
             static const char *last;

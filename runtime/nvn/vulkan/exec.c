@@ -3339,7 +3339,7 @@ static void draw_indirect(CmdRec *r) {
     for (uint32_t i = 0; i < n; i++) {
         const uint32_t *p = (const uint32_t *)(uintptr_t)(ind + (uint64_t)i * stride);
         static int nargs;
-        if (nargs < 40 && getenv("LARECOMP_LOG_INDIRECT")) {
+        if (nargs < 400 && getenv("LARECOMP_LOG_INDIRECT")) {
             nargs++;
             LOG("[vk] indirect %llx: %u %u %u %u %u\n", (unsigned long long)(ind + (uint64_t)i * stride), p[0], p[1], p[2], p[3],
                 elements ? p[4] : 0);
@@ -3351,6 +3351,20 @@ static void draw_indirect(CmdRec *r) {
             // The GPU fills in parts of the parameters (the instance count: Pokémon Z-A's culling compute), so the
             // draw reads them there; the CPU side covers the index range from the buffer's start (the first index
             // applies on the GPU) with one instance
+            static int gpu_args_log = -1;  // (debug) LARECOMP_LOG_GPU_ARGS=<n>: n parameter sets as the GPU sees them
+            if (gpu_args_log < 0) gpu_args_log = getenv("LARECOMP_LOG_GPU_ARGS") ? atoi(getenv("LARECOMP_LOG_GPU_ARGS")) : 0;
+            if (gpu_args_log > 0 && renderer_present_count() > 600) {
+                gpu_args_log--;
+                vk_end_pass();
+                VkSpan rb = vk_readback(32);
+                VkBufferCopy bc = {pa - gwin_base, rb.off, 20};
+                vk_full_barrier(vk_cmd());
+                vkCmdCopyBuffer(vk_cmd(), gmem_buf, rb.buf, 1, &bc);
+                renderer_flush();
+                const uint32_t *q = rb.ptr;
+                LOG("[vk] gpu args %llx: count %u instances %u first %u base %d base inst %u (cpu: %u %u)\n", (unsigned long long)pa,
+                    q[0], q[1], q[2], (int)q[3], q[4], p[0], p[1]);
+            }
             g_ind_gpu = true; g_ind_off = pa - gwin_base; g_ind_stride = stride;
             d.x[0] = r->x[0];
             if (elements) {
@@ -4070,7 +4084,29 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_DRAW_ARRAYS: draw(r, false); break;
         case CMD_DRAW_ELEMENTS: draw(r, true); break;
         case CMD_BEGIN_XFB: xfb_on = true; break;
-        case CMD_END_XFB: xfb_on = false; break;
+        case CMD_END_XFB: {
+            xfb_on = false;
+            static int nlog = -1;  // (debug) LARECOMP_LOG_XFB_DATA=<n>: the first entries of n sessions' buffers, as written
+            if (nlog < 0) nlog = getenv("LARECOMP_LOG_XFB_DATA") ? atoi(getenv("LARECOMP_LOG_XFB_DATA")) : 0;
+            if (nlog > 0 && renderer_present_count() > 600 && gmem_buf) {
+                nlog--;
+                vk_end_pass();
+                for (int b = 0; b < 3; b++) {
+                    uint64_t a = xfb_addr[b];
+                    if (!a || a < gwin_base || a - gwin_base + 64 > gmem_size) continue;
+                    VkSpan rb = vk_readback(64);
+                    VkBufferCopy bc = {a - gwin_base, rb.off, 64};
+                    vk_full_barrier(vk_cmd());
+                    vkCmdCopyBuffer(vk_cmd(), gmem_buf, rb.buf, 1, &bc);
+                    renderer_flush();
+                    const float *f = rb.ptr;
+                    const uint32_t *u = rb.ptr;
+                    LOG("[xfb] buffer %d %llx: %g %g %g %g %g %g | %08x %08x %08x %08x\n", b, (unsigned long long)a, f[0], f[1], f[2], f[3], f[4],
+                        f[5], u[0], u[1], u[2], u[3]);
+                }
+            }
+            break;
+        }
         case CMD_BIND_XFB_BUFFER:
             if (r->x[0] < 4) { xfb_addr[r->x[0]] = r->x[1]; xfb_size[r->x[0]] = r->x[2]; }
             break;

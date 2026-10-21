@@ -1606,7 +1606,22 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         case 0x25: set_reg(c, d, "ctaid.x"); break;
         case 0x26: set_reg(c, d, "ctaid.y"); break;
         case 0x27: set_reg(c, d, "ctaid.z"); break;
-        case 0x00: set_reg(c, d, "0u"); break;
+        // SR_LANEID and the lane masks (eq, lt, le, gt, ge: per Ryujinx's register numbering) - warp-aggregated atomics
+        // (ballot, a leader lane adds the popcount: Pokémon Z-A's culling counts instances so). (MSL vertex functions
+        // have no SIMD-group index: lane 0 there.)
+        case 0x00: case 0x38: case 0x39: case 0x3a: case 0x3b: case 0x3c: {
+            static const char *const fmt[] = {"lane", "(1u << lane)", "((1u << lane) - 1u)", "((2u << lane) - 1u)",
+                                              "(~((2u << lane) - 1u))", "(~((1u << lane) - 1u))"};
+            int k = sr == 0 ? 0 : sr - 0x37;
+            if (!c->glsl && c->stage == STAGE_VERTEX) {
+                static const char *const v0[] = {"0u", "1u", "0u", "1u", "0xFFFFFFFEu", "0xFFFFFFFFu"};
+                set_reg(c, d, v0[k]);
+            } else {
+                c->uses_lane = true;
+                set_reg(c, d, fmt[k]);
+            }
+            break;
+        }
         default: sprintf(t, "0u /* sr %#x */", sr); set_reg(c, d, t);
         }
     } else if (OPM(0x5c30000000000000ull, 0xfff8000000000000ull) || OPM(0x4c30000000000000ull, 0xfff8000000000000ull) ||

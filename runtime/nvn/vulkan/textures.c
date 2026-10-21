@@ -791,7 +791,8 @@ VkImageView vk_dummy_view(int textype) {
     VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL));
     VkCommandBuffer cb = vk_upload_cmd();
     vk_image_init_layout(cb, b->image, VK_IMAGE_ASPECT_COLOR_BIT);
-    VkClearColorValue zero = {{0, 0, 0, 0}};
+    float dv = getenv("LARECOMP_DUMMY_WHITE") ? 1.0f : 0.0f;  // (debug: white dummies)
+    VkClearColorValue zero = {{dv, dv, dv, dv}};
     VkImageSubresourceRange all = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, cube ? 6 : 1};
     vkCmdClearColorImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &all);
     b->format = VK_FORMAT_R8G8B8A8_UNORM;
