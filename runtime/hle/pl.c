@@ -12,6 +12,7 @@
 #include <strings.h>
 
 #include "../hle.h"
+#include "../settings.h"
 
 typedef struct { uint64_t addr, size; } Font;
 static Font fonts[2];  // [0] Standard (every type), [1] NintendoExt when a dump provides it
@@ -123,7 +124,13 @@ static void load_fonts(void) {
     for (size_t i = 0; i < sizeof std / sizeof *std && !fonts[0].addr; i++)
         if (std[i]) load_one(std[i], &fonts[0]);
     if (!fonts[0].addr) FATAL("no usable system font substitute\n");
-    if (!load_one("fonts/nintendo_ext_003.bfttf", &fonts[1])) load_one("fonts/nintendo_ext_003.ttf", &fonts[1]);
+    // Xbox prompts (setting prompts = xbox, or auto with an Xbox controller): the button glyphs relabelled
+    // (tools/za/xbox_font.py: A/B and X/Y traded, as the controls map by position)
+    extern int input_pad_family(void);
+    bool xbox = g_settings.prompts == PROMPTS_XBOX || (g_settings.prompts == PROMPTS_AUTO && input_pad_family() == 1);
+    if (!(xbox && load_one("fonts/nintendo_ext_003_xbox.ttf", &fonts[1])) &&
+        !load_one("fonts/nintendo_ext_003.bfttf", &fonts[1]))
+        load_one("fonts/nintendo_ext_003.ttf", &fonts[1]);
 }
 
 // SharedFontType: 0 Standard, 1 ChineseSimple, 2 ChineseSimpleExt, 3 ChineseTraditional, 4 Korean, 5 NintendoExt
