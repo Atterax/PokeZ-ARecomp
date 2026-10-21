@@ -2127,8 +2127,14 @@ static VkDescriptorBufferInfo gmem_info(void) {
 static VkBuffer gfast_buf;
 static VmaAllocation gfast_mem;
 static uint32_t gmap_tab[(GMAP_MAX + 1) * 4];  // this dispatch's table (stage_set copies it into binding 20)
-static VkBufferCopy gfast_cp[GMAP_MAX];       // its copies heap -> gfast_buf (reversed after a storing dispatch)
+static VkBufferCopy gfast_cp[GMAP_MAX];       // its copies heap -> gfast_buf
 static int gfast_n;
+// The copy back after a storing dispatch: only the bound buffers' own bytes, gfast_buf -> heap. The merged ranges
+// above also span alignment padding and the gaps between buffers - other data, which the CPU (a frame ahead) or
+// earlier GPU work may rewrite while the dispatch runs: copied back, the stale bytes clobbered it (Pokémon Z-A: an
+// indirect draw's instance count became an old float, 2 billion instances, device lost).
+static VkBufferCopy gfast_back[16];
+static int gfast_back_n;
 
 static VkDescriptorBufferInfo gfast_info(void) {
     if (!gfast_buf) {
@@ -2190,15 +2196,25 @@ static void gfast_prepare(VkCommandBuffer cb) {
     gmap_tab[GMAP_MAX * 4] = (uint32_t)m;
     memcpy(gfast_cp, cp, (size_t)m * sizeof cp[0]);
     gfast_n = m;
+    gfast_back_n = 0;
+    for (int i = 0; i < 16; i++) {  // each bound buffer's exact bytes, from wherever its merged range sits
+        uint64_t a = st.sbuf[5][i].addr, sz = st.sbuf[5][i].size;
+        if (!a || !sz || a < gwin_base || a - gwin_base + sz > gmem_size) continue;
+        uint64_t h = a - gwin_base;
+        for (int j = 0; j < m; j++)
+            if (h >= cp[j].srcOffset && h + sz <= cp[j].srcOffset + cp[j].size) {
+                gfast_back[gfast_back_n++] = (VkBufferCopy){cp[j].dstOffset + (h - cp[j].srcOffset), h, sz};
+                break;
+            }
+    }
 }
 
 // After a storing dispatch: its ranges back to the heap (before anything else reads them: draws, the CPU after the fence).
 static void gfast_finish(VkCommandBuffer cb) {
     if (!gfast_n) return;
-    VkBufferCopy back[GMAP_MAX];
-    for (int i = 0; i < gfast_n; i++) back[i] = (VkBufferCopy){gfast_cp[i].dstOffset, gfast_cp[i].srcOffset, gfast_cp[i].size};
     vk_full_barrier(cb);
-    vkCmdCopyBuffer(cb, gfast_buf, gmem_buf, (uint32_t)gfast_n, back);
+    // (overlapping bound buffers copy the same bytes twice - identical data, harmless)
+    if (gfast_back_n) vkCmdCopyBuffer(cb, gfast_buf, gmem_buf, (uint32_t)gfast_back_n, gfast_back);
     vk_full_barrier(cb);
     gfast_n = 0;
 }

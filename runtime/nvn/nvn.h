@@ -82,6 +82,7 @@ typedef struct NvnWindow {
     uint64_t textures[8];  // guest NVNtexture*
     int num, active, interval, next;
     int crop[4];
+    uint64_t present_seq[8];  // GPU submission that last presented each texture (its acquire sync waits for it)
 } NvnWindow;
 
 typedef struct NvnSync {

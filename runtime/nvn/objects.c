@@ -641,7 +641,11 @@ NVN(nvnWindowSetCrop) { int *cr = WIN->crop; cr[0] = (int)A(1); cr[1] = (int)A(2
 NVN(nvnWindowGetCrop) { memcpy(AP(1), WIN->crop, 16); }
 NVN(nvnWindowAcquireTexture) {
     NvnWindow *w = WIN;
-    if (A(1)) sync_of(A(1))->signaled = 1;
+    // The texture-available sync: on the console it signals once the GPU is done with the frame that last presented
+    // this texture, which holds the game at most a couple of frames ahead of the GPU. Signalled at once, the CPU ran
+    // ahead and rewrote per-frame buffers the GPU had yet to read (an indirect draw's instance count became a float:
+    // 2 billion instances, device lost).
+    if (A(1)) { NvnSync *s = sync_of(A(1)); s->signaled = 1; s->seq = w->next < 8 ? w->present_seq[w->next] : 0; }
     *(int32_t *)AP(2) = w->next;
     w->next = (w->next + 1) % (w->active ? w->active : 1);
     RET(0);  // NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS
@@ -676,6 +680,7 @@ NVN(nvnQueuePresentTexture) {
     if (i >= 0 && i < w->num) {
         present_pace(w->interval);
         backend_present(HOST(NvnTexture, w->textures[i]));
+        if (i < 8) w->present_seq[i] = renderer_fence_seq();  // (the submission just presented)
     }
 }
 
