@@ -444,3 +444,9 @@ bool plat_remove_tree(const char *dir) {
 
 // End the process at once, skipping DLL teardown (from an atexit handler, after flushing). Exit status 0.
 void plat_terminate(void) { TerminateProcess(GetCurrentProcess(), 0); }
+
+// stderr still the console (no redirect: started by a double click) - main.c then logs to a file
+int rt_stderr_is_console(void) {
+    DWORD t = GetFileType(GetStdHandle(STD_ERROR_HANDLE));
+    return t == FILE_TYPE_CHAR || t == FILE_TYPE_UNKNOWN;
+}
