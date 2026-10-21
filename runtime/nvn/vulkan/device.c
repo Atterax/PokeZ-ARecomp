@@ -109,6 +109,28 @@ static void pick_device(void) {
 }
 
 static bool g_fault_ext;
+static bool g_ckpt;
+static PFN_vkCmdSetCheckpointNV p_set_ckpt;
+
+void vk_checkpoint(VkCommandBuffer cb, uint64_t mark) {
+    if (!g_ckpt) return;
+    if (!p_set_ckpt) p_set_ckpt = (PFN_vkCmdSetCheckpointNV)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetCheckpointNV");
+    if (p_set_ckpt) p_set_ckpt(cb, (void *)(uintptr_t)mark);
+}
+
+uint32_t vk_checkpoints(uint64_t *mark, uint32_t *stage, uint32_t max) {
+    if (!g_ckpt) return 0;
+    PFN_vkGetQueueCheckpointDataNV get = (PFN_vkGetQueueCheckpointDataNV)vkGetDeviceProcAddr(g_vk.dev, "vkGetQueueCheckpointDataNV");
+    if (!get) return 0;
+    uint32_t n = 0;
+    get(g_vk.queue, &n, NULL);
+    if (n > max) n = max;
+    VkCheckpointDataNV d[16];
+    for (uint32_t i = 0; i < n; i++) d[i] = (VkCheckpointDataNV){.sType = VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV};
+    get(g_vk.queue, &n, d);
+    for (uint32_t i = 0; i < n; i++) { mark[i] = (uint64_t)(uintptr_t)d[i].pCheckpointMarker; stage[i] = d[i].stage; }
+    return n;
+}
 // After VK_ERROR_DEVICE_LOST: what the driver says faulted (VK_EXT_device_fault), into the log.
 void vk_device_fault_report(void) {
     static int once;
@@ -151,6 +173,9 @@ static void create_device(void) {
     bool fault = has_ext(ep, ne, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);  // device-lost diagnostics (vk_device_fault_report)
     if (fault) ext[n_ext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
     g_fault_ext = fault;
+    // (LARECOMP_VK_DEVLOST_TRACE: the last draw / dispatch reached, from the driver)
+    g_ckpt = getenv("LARECOMP_VK_DEVLOST_TRACE") && has_ext(ep, ne, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+    if (g_ckpt) ext[n_ext++] = VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME;
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)

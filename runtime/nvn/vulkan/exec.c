@@ -306,7 +306,10 @@ static char gp_label[512][112];
 static uint32_t gp_draws[512];
 // LARECOMP_VK_DEVLOST_TRACE=1: the last 64 GPU operations, dumped on device loss (with LARECOMP_SYNC_SUBMIT=1 the
 // dump ends with the command list that faulted).
-static char dl_ring[64][128];
+#define DL_N 4096  // (a power of two)
+static char dl_ring[DL_N][128];
+static uint64_t dl_args[DL_N];
+static uint32_t dl_snap[DL_N][5];  // (those parameters when the draw was recorded)  // a GPU indirect draw's parameters (guest = host address): read back in the dump
 static unsigned dl_n;
 static int dl_on = -1;
 static void dl_note(const char *fmt, ...) {
@@ -314,14 +317,40 @@ static void dl_note(const char *fmt, ...) {
     if (!dl_on) return;
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(dl_ring[dl_n++ & 63], sizeof dl_ring[0], fmt, ap);
+    dl_args[dl_n & (DL_N - 1)] = 0;
+    vsnprintf(dl_ring[dl_n++ & (DL_N - 1)], sizeof dl_ring[0], fmt, ap);
     va_end(ap);
 }
 void vk_dl_note_upload(void *img, uint32_t w, uint32_t h, uint32_t lv) { dl_note("  upload %p %ux%u lv%u", img, w, h, lv); }
 void vk_devlost_dump(void) {
     if (!dl_on) return;
     LOG("[vk] last GPU operations before the device loss (oldest first):\n");
-    for (unsigned i = dl_n > 64 ? dl_n - 64 : 0; i < dl_n; i++) LOG("[vk]   %s\n", dl_ring[i & 63]);
+    for (unsigned i = dl_n > 64 ? dl_n - 64 : 0; i < dl_n; i++) {
+        const uint32_t *q = (const uint32_t *)(uintptr_t)dl_args[i & (DL_N - 1)];
+        if (q) LOG("[vk]   %s (args now: %u %u %u %d %u)\n", dl_ring[i & (DL_N - 1)], q[0], q[1], q[2], (int)q[3], q[4]);
+        else LOG("[vk]   %s\n", dl_ring[i & (DL_N - 1)]);
+    }
+    // VK_NV_device_diagnostic_checkpoints: the last draw / dispatch each pipeline stage reached
+    extern uint32_t vk_checkpoints(uint64_t *mark, uint32_t *stage, uint32_t max);
+    uint64_t mark[16];
+    uint32_t stage[16], n = vk_checkpoints(mark, stage, 16);
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t m = mark[i];
+        LOG("[vk] checkpoint stage %#x: #%llu %s\n", stage[i], (unsigned long long)m,
+            m && m <= dl_n && dl_n - m < DL_N ? dl_ring[(m - 1) & (DL_N - 1)] : "(out of the trace)");
+    }
+    // the operations from the oldest checkpoint on (in flight when the GPU stopped), with indirect parameters
+    uint64_t lo = ~0ull;
+    for (uint32_t i = 0; i < n; i++) if (mark[i] && mark[i] < lo) lo = mark[i];
+    if (lo != ~0ull && dl_n - lo < DL_N)
+        for (uint64_t m = lo; m <= dl_n && m < lo + 48; m++) {
+            const uint32_t *q = (const uint32_t *)(uintptr_t)dl_args[(m - 1) & (DL_N - 1)];
+            const uint32_t *w = dl_snap[(m - 1) & (DL_N - 1)];
+            if (q) LOG("[vk]   #%llu %s (args %llx now: %u %u %u %d %u, recorded: %u %u %u %d %u)\n", (unsigned long long)m,
+                       dl_ring[(m - 1) & (DL_N - 1)], (unsigned long long)(uintptr_t)q, q[0], q[1], q[2], (int)q[3], q[4],
+                       w[0], w[1], w[2], (int)w[3], w[4]);
+            else LOG("[vk]   #%llu %s\n", (unsigned long long)m, dl_ring[(m - 1) & (DL_N - 1)]);
+        }
 }
 static void gp_mark(VkCommandBuffer cb, const char *fmt, ...) {
     if (!g_gpuprof_frame || gp_n >= 511) return;
@@ -2651,6 +2680,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     gp_mark(cb, "dispatch %ux%ux%u (local %ux%ux%u) cs %llx gmem %d", gx, gy, gz, cp->local[0], cp->local[1], cp->local[2],
             (unsigned long long)st.program->stages[5].code_addr, cp->si->uses_gmem);
     dl_note("dispatch %ux%ux%u cs %llx gmem %d", gx, gy, gz, (unsigned long long)st.program->stages[5].code_addr, cp->si->uses_gmem);
+    if (dl_on > 0) vk_checkpoint(cb, dl_n);
     nfeedback = 0;
     if (ct_on()) {
         LOG("[ct] dispatch cs %llx %ux%ux%u | tex", (unsigned long long)st.program->stages[5].code_addr, gx, gy, gz);
@@ -3239,6 +3269,13 @@ static void draw_(CmdRec *r, bool indexed) {
         } else if (!use_index) vkCmdDraw(cb, count, run_n[ri], first, base_inst + run_at[ri]);
         else vkCmdDrawIndexed(cb, icount, run_n[ri], 0, base_vertex, base_inst + run_at[ri]);
     }
+    dl_note("draw vs %llx fs %llx%s xfb %d", (unsigned long long)st.program->stages[0].code_addr,
+            (unsigned long long)st.program->stages[1].code_addr, g_ind_gpu && ind_ok ? " indirect" : "", xfb_on);
+    if (g_ind_gpu && ind_ok && dl_on > 0) {
+        dl_args[(dl_n - 1) & (DL_N - 1)] = gwin_base + g_ind_off;
+        memcpy(dl_snap[(dl_n - 1) & (DL_N - 1)], (const void *)(uintptr_t)(gwin_base + g_ind_off), 20);
+    }
+    if (dl_on > 0) vk_checkpoint(cb, dl_n);
     stat_draws++;
     cum_draws++;
     if (g_gpuprof_frame && gp_n) {

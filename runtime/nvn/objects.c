@@ -652,10 +652,31 @@ NVN(nvnQueueAcquireTexture) {
     w->next = (w->next + 1) % (w->active ? w->active : 1);
     RET(0);
 }
+// The console presents once per `interval` vsyncs of its 60 Hz display (Pokémon Z-A: 2, 30 fps) and the game steps its
+// world a fixed amount per frame, so presenting at the host's pace (mailbox, a 75 / 144 Hz monitor) sped it up.
+// LARECOMP_PRESENT_INTERVAL=<n> overrides the game's interval (0: no pacing).
+static void present_pace(int interval) {
+    static int forced = -2;
+    static uint64_t next;
+    if (forced == -2) forced = getenv("LARECOMP_PRESENT_INTERVAL") ? atoi(getenv("LARECOMP_PRESENT_INTERVAL")) : -1;
+    if (forced >= 0) interval = forced;
+    static int logged = -12345;
+    if (interval != logged) { logged = interval; LOG("[nvn] present interval %d\n", interval); }
+    if (interval <= 0) return;
+    if (interval > 4) interval = 1;  // (not a sane interval: the console's default)
+    uint64_t period = 16666667ull * (uint64_t)interval, now = plat_now_ns();
+    if (next > now && next - now <= period) plat_sleep_until_ns(next);
+    else next = now;  // (first frame, or more than a period late: no catching up)
+    next += period;
+}
+
 NVN(nvnQueuePresentTexture) {
     NvnWindow *w = HOST(NvnWindow, A(1));
     int i = (int)A(2);
-    if (i >= 0 && i < w->num) backend_present(HOST(NvnTexture, w->textures[i]));
+    if (i >= 0 && i < w->num) {
+        present_pace(w->interval);
+        backend_present(HOST(NvnTexture, w->textures[i]));
+    }
 }
 
 // ================================================================== small state objects
