@@ -460,6 +460,14 @@ static void tab_display(void) {
     }
     opt_toggle("Anisotropic filtering 16x", &g_settings.aniso16, false,
                "Sharper ground and walls at a distance and at grazing angles (applies to textures loaded afterwards).");
+    {   // HD texture pack (textures/hd: runtime/nvn/vulkan/textures.c hd_switch, tools/za/hd_pack.py): switches at once
+        int tx = g_settings.tex_hd ? 1 : 0;
+        static const char *tex[] = {"Original", "HD"};
+        if (opt_choice("Textures", &tx, tex, 2, 1,
+                       "Original: the game's own. HD: the HD texture pack (textures/hd), where it has a texture - "
+                       "sharper, more GPU memory."))
+            g_settings.tex_hd = tx == 1;
+    }
 
     opt_section("Rendering");
     // display order -> RES_* (the ini / enum order predates the menu order)

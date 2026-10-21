@@ -21,3 +21,4 @@ __pycache__/
 # texture dumps and HD packs (game art: users make their own)
 /textures/
 /mods/
+/tools/hdtools/

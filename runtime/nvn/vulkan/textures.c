@@ -460,11 +460,13 @@ void vk_textures_reset(void) {
 // upscale_textures.py) and put the results in textures/hd/<hash>.png: such a texture is then drawn from that image
 // instead (any size; RGBA8, mipmaps made here), the shaders told its size over the game's as for render targets at the
 // internal resolution (texel fetches and size queries stay in the game's units). Textures the game rewrites go back to
-// its own data. Setting tex_hd = 0 / LARECOMP_TEX_HD=0: packs off.
+// its own data. Setting tex_hd = 0 / LARECOMP_TEX_HD=0: packs off; F1 > Textures switches them while playing.
+// A pack texture can also be <hash>.dds (BC7 / BC1 / BC3 with its mip levels, as tools/za/hd_pack.py makes them):
+// smaller in GPU memory and quicker to load than a PNG, and preferred when both are there.
 // The same way, whatever the HD setting: the game's own button icons relabelled for the prompts' style
 // (textures/prompts/<style>, runtime/hle/pl.c pl_prompt_set; made by tools/za/prompt_textures.py), ahead of the pack.
 static int hd_on = -1, hd_dump = -1;
-typedef struct { uint64_t *h; int n; char dir[48]; } HdSet;  // sorted hashes of <dir>/*.png
+typedef struct { uint64_t *h; int n; char dir[48]; } HdSet;  // sorted hashes of <dir>/*.png, *.dds
 static HdSet hd_sets[2];  // [0] button prompts, [1] HD pack
 static int hd_cmp(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
 
@@ -476,12 +478,16 @@ static void hd_scan(HdSet *s, const char *dir) {
     for (struct dirent *de; (de = readdir(d));) {
         unsigned long long h;
         char ext[8] = "";
-        if (strlen(de->d_name) != 20 || sscanf(de->d_name, "%16llx.%4s", &h, ext) != 2 || strcmp(ext, "png")) continue;
+        if (strlen(de->d_name) != 20 || sscanf(de->d_name, "%16llx.%4s", &h, ext) != 2 || (strcmp(ext, "png") && strcmp(ext, "dds")))
+            continue;
         if (s->n == cap) { cap = cap ? cap * 2 : 1024; s->h = realloc(s->h, cap * sizeof *s->h); }
         s->h[s->n++] = h;
     }
     closedir(d);
     qsort(s->h, s->n, sizeof *s->h, hd_cmp);
+    int k = 0;  // (a texture there as both .png and .dds: once)
+    for (int i = 0; i < s->n; i++) if (!k || s->h[i] != s->h[k - 1]) s->h[k++] = s->h[i];
+    s->n = k;
     LOG("[tex] %d textures in %s\n", s->n, dir);
 }
 
@@ -501,7 +507,7 @@ static void hd_init(void) {
 }
 
 static const HdSet *hd_find(uint64_t h) {
-    for (int i = 0; i < 2; i++)
+    for (int i = 0; i < (hd_on > 0 ? 2 : 1); i++)
         if (hd_sets[i].n && bsearch(&h, hd_sets[i].h, hd_sets[i].n, sizeof h, hd_cmp)) return &hd_sets[i];
     return NULL;
 }
@@ -514,8 +520,12 @@ static bool hd_candidate(const NvnTexture *t, const TexBackend *b) {
            t->width >= 16 && t->height >= 16 && !(t->flags & 0x10);
 }
 
+static bool hd_load_dds(NvnTexture *t, TexBackend *b, uint64_t h, const char *path);
+
 static bool hd_replace(NvnTexture *t, TexBackend *b, uint64_t h) {
     char path[80];
+    snprintf(path, sizeof path, "%s/%016llx.dds", hd_find(h)->dir, (unsigned long long)h);
+    if (hd_load_dds(t, b, h, path)) return true;
     snprintf(path, sizeof path, "%s/%016llx.png", hd_find(h)->dir, (unsigned long long)h);
     SDL_Surface *s0 = SDL_LoadPNG(path);
     if (!s0) { LOG("[tex] %s: %s\n", path, SDL_GetError()); return false; }
@@ -564,6 +574,112 @@ static bool hd_replace(NvnTexture *t, TexBackend *b, uint64_t h) {
     return true;
 }
 
+// A .dds pack texture: block-compressed, every mip level in the file (DX10 header: BC7 / BC1 / BC3, sRGB or not; or
+// the legacy DXT1 / DXT5 codes)
+static bool hd_load_dds(NvnTexture *t, TexBackend *b, uint64_t h, const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *d = len > 148 ? malloc(len) : NULL;
+    bool ok = d && fread(d, 1, len, f) == (size_t)len && !memcmp(d, "DDS ", 4);
+    fclose(f);
+    if (!ok) { free(d); LOG("[tex] %s: not a DDS file\n", path); return false; }
+    uint32_t hh, w, levels, fourcc, dxgi = 0;
+    memcpy(&hh, d + 12, 4);
+    memcpy(&w, d + 16, 4);
+    memcpy(&levels, d + 28, 4);
+    memcpy(&fourcc, d + 84, 4);
+    size_t off = 128;
+    if (!memcmp(&fourcc, "DX10", 4)) { memcpy(&dxgi, d + 128, 4); off = 148; }
+    else if (!memcmp(&fourcc, "DXT1", 4)) dxgi = 71;
+    else if (!memcmp(&fourcc, "DXT5", 4)) dxgi = 77;
+    VkFormat vf;
+    uint32_t bpb = 16;
+    switch (dxgi) {
+    case 98: vf = VK_FORMAT_BC7_UNORM_BLOCK; break;
+    case 99: vf = VK_FORMAT_BC7_SRGB_BLOCK; break;
+    case 71: vf = VK_FORMAT_BC1_RGBA_UNORM_BLOCK; bpb = 8; break;
+    case 72: vf = VK_FORMAT_BC1_RGBA_SRGB_BLOCK; bpb = 8; break;
+    case 77: vf = VK_FORMAT_BC3_UNORM_BLOCK; break;
+    case 78: vf = VK_FORMAT_BC3_SRGB_BLOCK; break;
+    default: free(d); LOG("[tex] %s: unsupported DDS format %u\n", path, dxgi); return false;
+    }
+    if (!levels) levels = 1;
+    uint64_t total = 0;
+    for (uint32_t lv = 0; lv < levels; lv++) {
+        uint32_t lw = w >> lv ? w >> lv : 1, lh = hh >> lv ? hh >> lv : 1;
+        total += (uint64_t)((lw + 3) / 4) * ((lh + 3) / 4) * bpb;
+    }
+    if (off + total > (uint64_t)len) { free(d); LOG("[tex] %s: truncated\n", path); return false; }
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
+                            .imageType = VK_IMAGE_TYPE_2D, .format = vf, .extent = {w, hh, 1}, .mipLevels = levels,
+                            .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    VkImage img;
+    VmaAllocation mem;
+    if (vmaCreateImage(g_vk.vma, &ci, &ai, &img, &mem, NULL) != VK_SUCCESS) { free(d); return false; }
+    destroy_image(b);
+    b->image = img, b->mem = mem, b->format = vf;
+    b->width = w, b->height = hh, b->depth = 1, b->layers = 1, b->levels = levels, b->samples = 1;
+    b->aspect = VK_IMAGE_ASPECT_COLOR_BIT, b->base_type = VK_IMAGE_VIEW_TYPE_2D, b->astc_bw = b->astc_bh = 0;
+    b->hd = true, b->sx = (float)w / (float)t->width, b->sy = (float)hh / (float)t->height;
+    VkCommandBuffer cb = vk_upload_cmd();
+    vk_image_init_layout(cb, img, VK_IMAGE_ASPECT_COLOR_BIT);
+    VkSpan sp = vk_transient(total, 16);
+    memcpy(sp.ptr, d + off, total);
+    free(d);
+    uint64_t at = 0;
+    for (uint32_t lv = 0; lv < levels; lv++) {
+        uint32_t lw = w >> lv ? w >> lv : 1, lh = hh >> lv ? hh >> lv : 1;
+        VkBufferImageCopy rg = {.bufferOffset = sp.off + at, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, 0, 1},
+                                .imageExtent = {lw, lh, 1}};
+        vkCmdCopyBufferToImage(cb, sp.buf, img, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
+        at += (uint64_t)((lw + 3) / 4) * ((lh + 3) / 4) * bpb;
+    }
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                           .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(cb, &di);
+    static int n;
+    if (n++ < 20) LOG("[tex] HD %016llx: %ux%u (%u levels) for %ux%u\n", (unsigned long long)h, w, hh, levels, t->width, t->height);
+    return true;
+}
+
+// F1 > Textures (setting tex_hd) changed: between frames, every live texture goes back to the game's image or is
+// looked up in the pack again (the next upload check rehashes it)
+static void hd_switch(void) {
+    static int last = -1;
+    hd_init();
+    if (last < 0) { last = g_settings.tex_hd; return; }
+    if (g_settings.tex_hd == last) return;
+    last = g_settings.tex_hd;
+    if (last && !hd_sets[1].n) hd_scan(&hd_sets[1], "textures/hd");
+    bool was = hd_on > 0;
+    hd_on = last;
+    int n = 0;
+    for (int i = 0; i < g_nlive; i++) {
+        NvnTexture *t = g_live[i];
+        TexBackend *b = t->backend;
+        if (!b) continue;
+        if (was && !hd_on && b->hd && !(hd_sets[0].n && bsearch(&b->data_hash, hd_sets[0].h, hd_sets[0].n, sizeof b->data_hash, hd_cmp))) {
+            destroy_image(b);
+            b->hd = false;
+            create_image(t, b);
+            b->uploaded = false;
+            n++;
+        } else if (hd_on && !b->hd && !b->dynamic) {
+            b->uploaded = false;
+            n++;
+        }
+    }
+    LOG("[tex] textures: %s (%d re-uploaded)\n", hd_on ? "HD" : "original", n);
+}
+
 // Dumps: queued at upload, saved between frames (vk_texdump_process, from the present: no pass to interrupt)
 typedef struct { NvnTexture *t; uint64_t h; } HdDump;
 static HdDump hd_q[4096];
@@ -585,6 +701,7 @@ static void hd_forget(NvnTexture *t) {
 
 void renderer_save_texture_tex(TexBackend *b, const char *path);
 void vk_texdump_process(void) {
+    hd_switch();
     if (!hd_qn) return;
     int done = 0, k = 0;
     for (int i = 0; i < hd_qn; i++) {
