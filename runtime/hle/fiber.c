@@ -5,11 +5,19 @@
 // host context of its own (its own host stack: a ucontext, or a Win32 fiber on Windows), and the switch is a host
 // context switch.
 //
+// A switch publishes the fiber being left (its context in guest memory) before the host is off that fiber's stack, and
+// a job system may resume it on another thread right away: two threads on one stack. So a switch goes through a
+// trampoline fiber of the switching thread's own: there the fiber left is released (busy = 0: nothing runs on it any
+// more), the thread waits until the fiber it switches to is released by whoever left it, claims it and switches.
+// (Waiting on the trampoline, holding nothing, two threads swapping each other's fibers can't deadlock.)
+//
 // Each fiber also gets its own Cpu: the host frames of a suspended fiber hold their `Cpu *c`, and a job system may
 // resume the fiber on another thread. A switch copies the running thread's identity (thread object, TLS) into the
 // Cpu of the fiber it starts or resumes. The guest-visible state stays as the SDK leaves it: the 0xf0-byte register
 // frame on the fiber's stack, its sp in FiberType+0x50.
 #include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
 #include <string.h>
 #ifdef _WIN32
 #include <windows.h>
@@ -34,12 +42,28 @@ typedef struct Co {
 #endif
     Cpu *cpu;
     int started;
+    atomic_int busy;  // a host thread runs on this fiber (or is still leaving it)
 } Co;
 
 static Co *fibers[1024];
 static int ncos;
 static pthread_mutex_t co_lock = PTHREAD_MUTEX_INITIALIZER;
 static __thread Co *co_starting;
+// this thread's switch in progress (the trampoline's work) and its trampoline
+static __thread Co *t_from, *t_to;
+#ifdef _WIN32
+static __thread void *t_tramp;
+#else
+static __thread ucontext_t t_tramp_uc, t_dummy_uc;
+static __thread void *t_tramp_stack;
+#endif
+
+static void tramp_step(void) {
+    atomic_store_explicit(&t_from->busy, 0, memory_order_release);
+    int spins = 0;
+    while (atomic_exchange_explicit(&t_to->busy, 1, memory_order_acquire))
+        if (++spins > 64) sched_yield();
+}
 
 static Co *co_get(uint64_t key) {
     for (int i = 0; i < ncos; i++) if (fibers[i]->key == key) return fibers[i];
@@ -97,6 +121,14 @@ static void co_main(void) {
 }
 #ifdef _WIN32
 static void WINAPI co_fiber_main(void *p) { (void)p; co_main(); }
+static void WINAPI tramp_main(void *p) {
+    (void)p;
+    for (;;) { tramp_step(); SwitchToFiber(t_to->fiber); }
+}
+#else
+static void tramp_main(void) {
+    for (;;) { tramp_step(); swapcontext(&t_dummy_uc, &t_to->uc); }
+}
 #endif
 
 // nn::os::detail::FiberImplByHorizon::InitializeImpl(FiberType *fiber, void *entry): as the SDK, and a reused
@@ -122,6 +154,7 @@ HLE_FUNC("_ZN2nn2os6detail20DispatchFiberContextEPPNS1_22FiberContextForHorizonE
     Co *me = co_get(from), *dst = co_get(to);
     me->cpu = c;  // (whatever runs now: a fiber's own Cpu, or the thread's on its first switch)
     me->started = 1;
+    atomic_store(&me->busy, 1);  // (running on it: already so when we got here through a trampoline)
     if (!dst->cpu) {
         dst->cpu = calloc(1, sizeof(Cpu));  // (16-byte aligned on the 64-bit hosts)
     }
@@ -154,10 +187,23 @@ HLE_FUNC("_ZN2nn2os6detail20DispatchFiberContextEPPNS1_22FiberContextForHorizonE
 #endif
     pthread_mutex_unlock(&co_lock);
     if (fresh) co_starting = dst;
+    t_from = me;
+    t_to = dst;
 #ifdef _WIN32
-    SwitchToFiber(dst->fiber);
+    if (!t_tramp && !(t_tramp = CreateFiberEx(0, 1 << 16, FIBER_FLAG_FLOAT_SWITCH, tramp_main, NULL)))
+        FATAL("[fiber] no trampoline fiber (%lu)\n", GetLastError());
+    SwitchToFiber(t_tramp);
 #else
-    swapcontext(&me->uc, &dst->uc);
+    if (!t_tramp_stack) {
+        t_tramp_stack = mmap(NULL, 1 << 16, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (t_tramp_stack == MAP_FAILED) FATAL("[fiber] no trampoline stack\n");
+        getcontext(&t_tramp_uc);
+        t_tramp_uc.uc_stack.ss_sp = t_tramp_stack;
+        t_tramp_uc.uc_stack.ss_size = 1 << 16;
+        t_tramp_uc.uc_link = NULL;
+        makecontext(&t_tramp_uc, tramp_main, 0);
+    }
+    swapcontext(&me->uc, &t_tramp_uc);
 #endif
     // resumed (perhaps on another thread: whoever switched back copied its identity into c)
     frame_load(c, LD64(from));

@@ -2496,7 +2496,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         for (int b = 0; b < 4; b++) {
             uint64_t a = xfb_addr[b];
             if (!a || a < gwin_base || a - gwin_base + xfb_size[b] > gwin_max || (a & 3)) continue;
-            uint32_t u[4] = {(uint32_t)((a - gwin_base) >> 2), 0, 1, 0};
+            uint32_t u[4] = {(uint32_t)((a - gwin_base) >> 2), (uint32_t)(xfb_size[b] >> 2), 1, 0};  // (offset, size in words)
             memcpy(rs[66 + b], u, 16);
         }
     for (int i = 0; i < p->nbinds; i++) {
@@ -2761,8 +2761,11 @@ static void draw(CmdRec *r, bool indexed) {
     if (xfb_on) {
         xfb_note();
         static int nlog;
-        if (nlog++ < 12) LOG("[xfb] draw indexed %d mode %llu x1 %llx count %llu x3 %llx x4 %llx\n", indexed, (unsigned long long)r->x[0],
-                             (unsigned long long)r->x[1], (unsigned long long)r->x[2], (unsigned long long)r->x[3], (unsigned long long)r->x[4]);
+        if (nlog++ < 24)
+            LOG("[xfb] draw indexed %d mode %llu first %llx count %llu | buffers %llx+%llx %llx+%llx %llx+%llx\n", indexed,
+                (unsigned long long)r->x[0], (unsigned long long)r->x[1], (unsigned long long)r->x[2], (unsigned long long)xfb_addr[0],
+                (unsigned long long)xfb_size[0], (unsigned long long)xfb_addr[1], (unsigned long long)xfb_size[1],
+                (unsigned long long)xfb_addr[2], (unsigned long long)xfb_size[2]);
     }
     draw_(r, indexed);
     PROF_ADD(prof_draw);
@@ -3264,6 +3267,19 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
             const float *u = (const float *)(uintptr_t)st.ubuf[1][c].addr;
             LOG("[draw]   fcb%d %llx size %u:", c, (unsigned long long)st.ubuf[1][c].addr, (unsigned)st.ubuf[1][c].size);
             for (int k = 0; k < 96 && k * 4 < (int)st.ubuf[1][c].size; k++) LOG(" %.6g", u[k]);
+            LOG("\n");
+        }
+        for (int c = 0; c < 18; c++) {  // vertex cbufs (bone palettes...) and storage buffer 0
+            if (!((pr->vi->cbuf_mask >> c) & 1) || c < 3 || !st.ubuf[0][c - 3].addr) continue;
+            const float *u = (const float *)(uintptr_t)st.ubuf[0][c - 3].addr;
+            LOG("[draw]   vcb%d %llx size %u:", c, (unsigned long long)st.ubuf[0][c - 3].addr, (unsigned)st.ubuf[0][c - 3].size);
+            for (int k = 0; k < 24 && k * 4 < (int)st.ubuf[0][c - 3].size; k++) LOG(" %.5g", u[k]);
+            LOG("\n");
+        }
+        if (st.sbuf[0][0].addr) {
+            const uint32_t *w = (const uint32_t *)(uintptr_t)st.sbuf[0][0].addr;
+            LOG("[draw]   vsb0 %llx size %llu:", (unsigned long long)st.sbuf[0][0].addr, (unsigned long long)st.sbuf[0][0].size);
+            for (int k = 0; k < 16; k++) LOG(" %08x", w[k]);
             LOG("\n");
         }
     }

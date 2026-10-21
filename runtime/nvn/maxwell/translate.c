@@ -2200,8 +2200,11 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
                 if (!(c->out_comp[i] & (1u << comp))) continue;
                 while (b < 4 && k >= key->xfb_count[b]) { b++; k = 0; }
                 if (b >= 4) break;
-                sp(&s, "  if (floatBitsToUint(rscale[%d].z) != 0u) gmem_.w[floatBitsToUint(rscale[%d].x) + uint(gl_VertexIndex) * %uu + %du] = "
-                       "floatBitsToUint(v%d[%d]);\n", 66 + b, 66 + b, (unsigned)(key->xfb_stride[b] / 4), k, i, comp);
+                // (as on the hardware, nothing past the bound size: rscale[66 + b].y = the buffer's size in words)
+                unsigned sw = (unsigned)(key->xfb_stride[b] / 4);
+                sp(&s, "  if (floatBitsToUint(rscale[%d].z) != 0u && uint(gl_VertexIndex) * %uu + %du < floatBitsToUint(rscale[%d].y)) "
+                       "gmem_.w[floatBitsToUint(rscale[%d].x) + uint(gl_VertexIndex) * %uu + %du] = floatBitsToUint(v%d[%d]);\n",
+                       66 + b, sw, k, 66 + b, 66 + b, sw, k, i, comp);
                 k++;
             }
     }
