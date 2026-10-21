@@ -8,7 +8,7 @@ cd "$S/../LASRecomp" 2>/dev/null || cd "$S/../.." || exit 1  # (from za-tools/ o
 [ -n "$EXE" ] && [ -z "$LARECOMP_GAME_LIB" ] && export LARECOMP_GAME_LIB="$PWD/$(dirname "$EXE")/lasgame.dll"
 export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"
 rm -f build/frame_*.png build/pass_*.png
-export LARECOMP_INPUT="$IN" LARECOMP_KBD_AUTO=Teste LARECOMP_SCREENSHOT_EVERY=${SHOT:-60} LARECOMP_WAIT_DUMP=10 LARECOMP_PROF_SVC=1 \
+export LARECOMP_SETTINGS=$S/za.ini LARECOMP_INPUT="$IN" LARECOMP_KBD_AUTO=Teste LARECOMP_SCREENSHOT_EVERY=${SHOT:-60} LARECOMP_WAIT_DUMP=10 LARECOMP_PROF_SVC=1 \
     LARECOMP_SKIP_WHY=1
 ./${EXE:-build/lasrecomp.exe} extracted --play > "$S/auto.log" 2>&1 &
 G=$!

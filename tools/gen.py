@@ -520,7 +520,7 @@ class Module:
         return out
 
 
-from patches import PATCHES
+from patches import PATCHES, ZA_PATCHES, ZA_MAIN_BUILD_ID
 
 LA_MAIN_BUILD_ID = 'ae16f71e002af8cb'  # Link's Awakening v1.0.0 (runtime/ui/launcher.mm BUILD_ID)
 
@@ -568,7 +568,11 @@ def main():
     if Nso(main_nso).build_id[:16] != LA_MAIN_BUILD_ID:
         PATCHES.clear()
         RANDO_CODE.clear()
-        print(f'{args.name}: not Link\'s Awakening (main build {Nso(main_nso).build_id[:16]}): no game patches')
+        if Nso(main_nso).build_id[:16] == ZA_MAIN_BUILD_ID and args.name == 'main':
+            PATCHES.update(ZA_PATCHES)
+            print(f'{args.name}: Pokémon Legends Z-A: {len(ZA_PATCHES)} game patch(es)')
+        else:
+            print(f'{args.name}: not Link\'s Awakening (main build {Nso(main_nso).build_id[:16]}): no game patches')
     starts = m.boundaries()
     hle = {}
     if args.hle and os.path.exists(args.hle):

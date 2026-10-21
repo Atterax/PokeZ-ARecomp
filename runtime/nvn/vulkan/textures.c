@@ -11,6 +11,7 @@
 #include "../astc.h"
 #include "../renderer.h"
 #include "../texpatch.h"
+#include "../../settings.h"
 
 // ================================================================== formats
 typedef struct { VkFormat vf; uint8_t expand_rgb, alpha_one; } VkFmt;
@@ -852,6 +853,12 @@ VkSampler vk_sampler(NvnSamplerDesc *d) {
     if (si.maxLod < si.minLod) si.maxLod = si.minLod;
     si.mipLodBias = d->lod_bias;
     if (d->max_aniso > 1) { si.anisotropyEnable = VK_TRUE; si.maxAnisotropy = fminf(d->max_aniso, 16); }
+    // (setting aniso16: every mipmapped, linearly filtered sampler at 16x - ground and walls stay sharp at grazing
+    // angles; the Switch games mostly ask for 1-4x to save bandwidth. Not shadow / depth-compare samplers.)
+    if (g_settings.aniso16 && mf == 5 && !d->compare_mode && g_vk.props.limits.maxSamplerAnisotropy >= 16) {
+        si.anisotropyEnable = VK_TRUE;
+        si.maxAnisotropy = 16;
+    }
     static float lodmin = -1;
     if (lodmin < 0) lodmin = getenv("LARECOMP_LOD_MIN") ? (float)atof(getenv("LARECOMP_LOD_MIN")) : 0;
     if (lodmin > 0 && mf > 1) si.minLod = fmaxf(si.minLod, lodmin);

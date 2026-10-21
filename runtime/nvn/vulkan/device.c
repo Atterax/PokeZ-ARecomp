@@ -448,6 +448,18 @@ static void save_window_image(VkCommandBuffer cb, VkSpan *out) {
     image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 }
 
+typedef struct { uint32_t w, h; bool bgr; char path[256]; uint8_t *px; } ShotJob;
+static int shot_thread(void *arg) {
+    ShotJob *j = arg;
+    uint64_t n = (uint64_t)j->w * j->h;
+    for (uint64_t i = 0; j->bgr && i < n; i++) { uint8_t t = j->px[i * 4]; j->px[i * 4] = j->px[i * 4 + 2]; j->px[i * 4 + 2] = t; }
+    for (uint64_t i = 0; i < n; i++) j->px[i * 4 + 3] = 255;
+    vk_save_png(j->path, j->px, j->w, j->h);
+    free(j->px);
+    free(j);
+    return 0;
+}
+
 // End rendering into the window image and present it. shot_path: also save the window image as PNG.
 void vk_frame_end(const char *shot_path) {
     if (!cur_frame.ok) return;
@@ -466,13 +478,18 @@ void vk_frame_end(const char *shot_path) {
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) recreate_swapchain();
     cur_frame.ok = false;
     if (shot_path) {
+        // (the PNG is encoded on a thread of its own: done here it held the frame ~250 ms - a periodic hitch with
+        // LARECOMP_SCREENSHOT_EVERY at 60 fps)
         vk_wait_seq(seq);
-        uint32_t w = g_vk.sc_extent.width, h = g_vk.sc_extent.height;
-        uint8_t *px = shot.ptr;
-        bool bgr = g_vk.sc_format == VK_FORMAT_B8G8R8A8_UNORM || g_vk.sc_format == VK_FORMAT_B8G8R8A8_SRGB;
-        for (uint64_t i = 0; bgr && i < (uint64_t)w * h; i++) { uint8_t t = px[i * 4]; px[i * 4] = px[i * 4 + 2]; px[i * 4 + 2] = t; }
-        for (uint64_t i = 0; i < (uint64_t)w * h; i++) px[i * 4 + 3] = 255;
-        vk_save_png(shot_path, px, w, h);
+        ShotJob *j = malloc(sizeof *j);
+        j->w = g_vk.sc_extent.width, j->h = g_vk.sc_extent.height;
+        j->bgr = g_vk.sc_format == VK_FORMAT_B8G8R8A8_UNORM || g_vk.sc_format == VK_FORMAT_B8G8R8A8_SRGB;
+        snprintf(j->path, sizeof j->path, "%s", shot_path);
+        j->px = malloc((size_t)j->w * j->h * 4);
+        memcpy(j->px, shot.ptr, (size_t)j->w * j->h * 4);
+        SDL_Thread *t = SDL_CreateThread(shot_thread, "png", j);
+        if (t) SDL_DetachThread(t);
+        else shot_thread(j);
     }
 }
 

@@ -447,6 +447,19 @@ static void tab_display(void) {
         g_want_fullscreen_apply.store(true);
     }
     opt_toggle("Show FPS", &g_settings.show_fps, false, "Shows the frame rate in the top right corner.");
+    {   // Pokémon Z-A's frame mode (runtime/hle/framepace.c rt_za_frame_cfg): applies from the next frame
+        extern bool g_za_frame_hook;
+        if (g_za_frame_hook) {
+            int fr = g_settings.fps60 ? 1 : 0;
+            static const char *rates[] = {"30 fps (Switch)", "60 fps"};
+            if (opt_choice("Frame rate", &fr, rates, 2, 0,
+                           "30 fps: as on the Switch. 60 fps: the game presents every vsync and steps its world 1/60 s "
+                           "a frame - same speed, smoother; needs a faster CPU."))
+                g_settings.fps60 = fr == 1;
+        }
+    }
+    opt_toggle("Anisotropic filtering 16x", &g_settings.aniso16, false,
+               "Sharper ground and walls at a distance and at grazing angles (applies to textures loaded afterwards).");
 
     opt_section("Rendering");
     // display order -> RES_* (the ini / enum order predates the menu order)

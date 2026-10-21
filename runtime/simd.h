@@ -70,6 +70,28 @@ typedef u128 __attribute__((aligned(1), may_alias)) u128u;
 #define FPCR_RM (3u << 22)
 #define FPCR_SLOW (FPCR_FZ | FPCR_RM)
 
+// FPCR.FZ alone (round to nearest) - how games run - is the host's MXCSR FTZ + DAZ (flush denormal results / inputs
+// to zero) on x86: the FP ops take their native path with those bits set instead of the scalar slow path (rounding
+// mode switches, volatile temporaries: a quarter to a third of some of Pokémon Z-A's threads). The bits belong to the
+// host thread; they are set on the first such op and cleared again by an op under any other FPCR. (ARM detects
+// tininess before rounding, x86 after: results within an ulp of the smallest normal may differ - harmless.)
+#if defined(__x86_64__) && !defined(LARECOMP_NO_HOST_FTZ)
+#include <xmmintrin.h>
+#define SIMD_MX_FZ 0x8040u  // FTZ | DAZ
+static inline __attribute__((always_inline)) int simd_fz_host(uint64_t fpcr) {
+    unsigned m = _mm_getcsr();
+    if ((fpcr & FPCR_SLOW) == FPCR_FZ) {
+        if ((m & SIMD_MX_FZ) != SIMD_MX_FZ) _mm_setcsr(m | SIMD_MX_FZ);
+        return 1;
+    }
+    if (m & SIMD_MX_FZ) _mm_setcsr(m & ~SIMD_MX_FZ);
+    return 0;
+}
+#define SIMD_FZ_FAST(fpcr) simd_fz_host(fpcr)
+#else
+#define SIMD_FZ_FAST(fpcr) 0
+#endif
+
 enum { FOP_ADD, FOP_SUB, FOP_MUL, FOP_MULX, FOP_NMUL, FOP_DIV, FOP_ABD, FOP_SQRT, FOP_MADD, FOP_RECPS, FOP_RSQRTS,
        FOP_MAX, FOP_MIN, FOP_MAXNM, FOP_MINNM };
 

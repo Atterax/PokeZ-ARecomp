@@ -42,3 +42,17 @@ uint32_t rt_frame_steps(uint32_t interval) {
     if (steps > 1) g_frame_steps_late++;
     return (uint32_t)steps;
 }
+
+// Pokémon Z-A's frame mode (tools/patches.py ZA_FRAME_CFG): its configured vsyncs per frame - 1 (1: 30 fps). With
+// the fps60 setting (or LARECOMP_FPS=60) 0: it presents every vsync and steps its world 1/60 s a frame; slower frames
+// still get the vsyncs that really passed (the game's own dynamic step), so the speed holds. LARECOMP_FPS=30: as is.
+#include "../settings.h"
+bool g_za_frame_hook;  // (the game is Pokémon Z-A: exec.c leaves its GPU timing counters alone)
+int32_t rt_za_frame_cfg(int32_t cfg) {
+    g_za_frame_hook = true;
+    const char *e = ENV("LARECOMP_FPS");
+    bool on = e ? atoi(e) >= 60 : g_settings.fps60;
+    static int logged = -1;
+    if (logged != (int)on) { logged = on; LOG("[pace] game frame mode %d -> %d (%s)\n", cfg, on ? 0 : cfg, on ? "60 fps" : "as is"); }
+    return on ? 0 : cfg;
+}

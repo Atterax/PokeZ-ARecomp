@@ -145,7 +145,11 @@ static uint64_t stat_pace_over;
 
 void vk_pace_frame(void) {
     static int on = -1;
+    // (off for Pokémon Z-A - its frame mode is its own (rt_za_frame_cfg), and it sizes its dynamic resolution from
+    // these counters: slow-looking frames made it drop the resolution, pixelated while moving)
+    extern bool g_za_frame_hook;
     if (on < 0) { const char *e = getenv("LARECOMP_PACE"); on = !e || atoi(e) != 0; }
+    if (g_za_frame_hook && !getenv("LARECOMP_PACE")) on = 0;
     static uint64_t last, last_wait;
     static uint8_t over[60];
     static int idx, nover, calm;
