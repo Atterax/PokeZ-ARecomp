@@ -132,6 +132,10 @@ static void load_fonts(void) {
     extern int input_pad_family(void);
     bool pad = SDL_HasGamepad();
     bool xbox = g_settings.prompts == PROMPTS_XBOX || (g_settings.prompts == PROMPTS_AUTO && pad && input_pad_family() == 1);
+    // (only with the controls by position - the Switch's A on the east button: mapped by letter, A on the Xbox pad's A,
+    // the game's own letters are already right - its UI icons, which no font here changes, then match too)
+    extern int16_t g_bind_pad[];
+    if (g_bind_pad[0] != SDL_GAMEPAD_BUTTON_EAST) xbox = false;
     bool keys = g_settings.prompts == PROMPTS_KEYBOARD || (g_settings.prompts == PROMPTS_AUTO && !pad);
     LOG("[pl] button prompts: %s\n", keys ? "keyboard" : xbox ? "Xbox" : "Nintendo");
     if (!(keys && load_one("fonts/nintendo_ext_003_keyboard.ttf", &fonts[1])) &&
