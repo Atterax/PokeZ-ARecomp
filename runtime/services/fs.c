@@ -23,7 +23,7 @@ static int romfs_fd = -1;
 typedef struct { uint64_t start, size; char *path; int fd; const uint8_t *mem; } Overlay;
 // in-image patches (copies of RomFS tables with changes): header, dir meta, file hash, file meta
 typedef struct { uint64_t off, size; uint8_t *data; } Patch;
-static Patch patches[8];
+static Patch patches[16];
 static int npatches;
 static Overlay *ov;
 static int ov_n, ov_cap;
@@ -220,6 +220,56 @@ static void add_new_files(int fd, const uint64_t *h, const uint8_t *dmeta, uint6
     LOG("[fs] randomizer: %d new romfs files\n", added);
 }
 
+// Button prompts (runtime/hle/pl.c pl_prompt_set): textures/prompts/<style>/romfs.patch, made by
+// tools/za/prompt_textures.py - Pokémon Z-A's icon fonts relabelled, in their pack rebuilt to the same size. "ZAROMFS1",
+// a u32 count, then records (u8 kind = 0, u16 path length, path, u64 offset, u64 length, data): the bytes replace those
+// at that offset in that RomFS file.
+static void prompt_patch(void) {
+    extern const char *pl_prompt_set(void);
+    const char *set = pl_prompt_set();
+    if (!set) return;
+    char path[128];
+    snprintf(path, sizeof path, "textures/prompts/%s/romfs.patch", set);
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *d = malloc(len > 0 ? len : 1);
+    bool ok = len > 12 && fread(d, 1, len, f) == (size_t)len && !memcmp(d, "ZAROMFS1", 8);
+    fclose(f);
+    if (!ok) { LOG("[fs] %s: not a patch file\n", path); free(d); return; }
+    uint32_t n;
+    memcpy(&n, d + 8, 4);
+    uint64_t p = 12;
+    int applied = 0;
+    for (uint32_t r = 0; r < n && p + 19 <= (uint64_t)len; r++) {
+        uint16_t pl;
+        memcpy(&pl, d + p + 1, 2);
+        char name[256];
+        snprintf(name, sizeof name, "%.*s", pl, (const char *)d + p + 3);
+        uint64_t off, size;
+        memcpy(&off, d + p + 3 + pl, 8);
+        memcpy(&size, d + p + 11 + pl, 8);
+        const uint8_t *data = d + p + 19 + pl;
+        uint8_t kind = d[p];
+        p += 19 + pl + size;
+        if (p > (uint64_t)len) break;
+        RomFile *rf = NULL;
+        for (int i = 0; i < rom_nfiles && !rf; i++) if (!strcmp(rom_files[i].path, name)) rf = &rom_files[i];
+        if (kind || !rf || off + size > rf->size || npatches == (int)(sizeof patches / sizeof *patches)) {
+            LOG("[fs] %s: %s not patched\n", path, name);
+            continue;
+        }
+        uint8_t *copy = malloc(size);
+        memcpy(copy, data, size);
+        patches[npatches++] = (Patch){rf->off + off, size, copy};
+        applied++;
+    }
+    free(d);
+    LOG("[fs] button prompts: %d patches from %s\n", applied, path);
+}
+
 static void rom_index(int fd) {
     uint64_t h[10];
     if (pread(fd, h, sizeof h, 0) != (ssize_t)sizeof h) return;
@@ -278,6 +328,7 @@ static void rom_index(int fd) {
         ov_end = (ov_end + size + 0xF) & ~0xFull;
     }
     if (ov_n) LOG("[fs] randomizer: %d romfs files replaced\n", ov_n);
+    prompt_patch();
     if (ov_meta) { patches[npatches++] = (Patch){ov_meta_off, ov_meta_size, ov_meta}; }
     add_new_files(fd, h, dmeta, dsz, fsz);
     qsort(rom_files, rom_nfiles, sizeof *rom_files, rom_cmp);
@@ -288,11 +339,11 @@ static void rom_index(int fd) {
 
 // Virtual RomFS image read: original bytes, with the patched file table and appended replacement files.
 static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
-    if (!ov_n) return pread(fd, dst, size, (off_t)off);
+    if (!ov_n && !npatches) return pread(fd, dst, size, (off_t)off);
     uint64_t done = 0;
     while (done < size) {
         uint64_t o = off + done, n = size - done;
-        if (o >= ov[0].start) {  // appended region
+        if (ov_n && o >= ov[0].start) {  // appended region
             int i = 0;
             while (i < ov_n && !(o >= ov[i].start && o < ov[i].start + ((ov[i].size + 0xF) & ~0xFull))) i++;
             if (i == ov_n) { memset(dst + done, 0, n); done += n; break; }
@@ -309,7 +360,7 @@ static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
             if (r < 0) r = 0;
             if ((uint64_t)r < n) memset(dst + done + r, 0, n - r);
         } else {
-            if (o + n > ov[0].start) n = ov[0].start - o;
+            if (ov_n && o + n > ov[0].start) n = ov[0].start - o;
             ssize_t r = pread(fd, dst + done, n, (off_t)o);
             if (r < 0) r = 0;
             if ((uint64_t)r < n) memset(dst + done + r, 0, n - r);

@@ -126,24 +126,34 @@ static void load_fonts(void) {
         if (std[i]) load_one(std[i], &fonts[0]);
     if (!fonts[0].addr) FATAL("no usable system font substitute\n");
     // Xbox prompts (setting prompts = xbox, or auto with an Xbox controller): the button glyphs relabelled
-    // (tools/za/xbox_font.py: A/B and X/Y traded, as the controls map by position)
-    // Keyboard prompts (auto with no controller connected at boot): the glyphs drawn as keys with the bound keys' names
-    // (tools/za/keyboard_font.py, from the settings' bind_key_* lines)
+    // (tools/za/xbox_font.py). Keyboard prompts (auto with no controller connected at boot): the glyphs drawn as keys
+    // with the bound keys' names (tools/za/keyboard_font.py, from the settings' bind_key_* lines)
+    const char *pl_prompt_set(void);
+    const char *set = pl_prompt_set();
+    LOG("[pl] button prompts: %s\n", set ? set : "Nintendo");
+    char path[64];
+    snprintf(path, sizeof path, "fonts/nintendo_ext_003_%s.ttf", set ? set : "");
+    if (!(set && load_one(path, &fonts[1])) && !load_one("fonts/nintendo_ext_003.bfttf", &fonts[1]))
+        load_one("fonts/nintendo_ext_003.ttf", &fonts[1]);
+}
+
+// The prompts' style, chosen once at boot: "keyboard", "xbox" (controls by position: A/B and X/Y traded - the
+// Switch's A on the east button), "xboxlabel" (by letter, A on the Xbox pad's A: the letters stay; both name the
+// shoulders / triggers / menu buttons LB RB LT RT Menu View) or NULL (the game's own). Names both the button glyph
+// font (fonts/nintendo_ext_003_<set>.ttf: tools/za/keyboard_font.py, xbox_font.py) and the game's own UI icons
+// relabelled (textures/prompts/<set>: tools/za/prompt_textures.py, runtime/nvn/vulkan/textures.c).
+const char *pl_prompt_set(void) {
+    static int done;
+    static const char *set;
+    if (done) return set;
+    done = 1;
     extern int input_pad_family(void);
+    extern int16_t g_bind_pad[];
     bool pad = SDL_HasGamepad();
     bool xbox = g_settings.prompts == PROMPTS_XBOX || (g_settings.prompts == PROMPTS_AUTO && pad && input_pad_family() == 1);
-    // (A/B and X/Y traded only with the controls by position - the Switch's A on the east button. Mapped by letter, A
-    // on the Xbox pad's A, the letters stay - and the game's own UI icons, which no font here changes, match them;
-    // both variants name the shoulders / triggers / menu buttons LB RB LT RT Menu View: tools/za/xbox_font.py)
-    extern int16_t g_bind_pad[];
-    const char *xbox_font = g_bind_pad[0] == SDL_GAMEPAD_BUTTON_EAST ? "fonts/nintendo_ext_003_xbox.ttf"
-                                                                       : "fonts/nintendo_ext_003_xboxlabel.ttf";
     bool keys = g_settings.prompts == PROMPTS_KEYBOARD || (g_settings.prompts == PROMPTS_AUTO && !pad);
-    LOG("[pl] button prompts: %s\n", keys ? "keyboard" : xbox ? "Xbox" : "Nintendo");
-    if (!(keys && load_one("fonts/nintendo_ext_003_keyboard.ttf", &fonts[1])) &&
-        !(xbox && load_one(xbox_font, &fonts[1])) &&
-        !load_one("fonts/nintendo_ext_003.bfttf", &fonts[1]))
-        load_one("fonts/nintendo_ext_003.ttf", &fonts[1]);
+    set = keys ? "keyboard" : !xbox ? NULL : g_bind_pad[0] == SDL_GAMEPAD_BUTTON_EAST ? "xbox" : "xboxlabel";
+    return set;
 }
 
 // SharedFontType: 0 Standard, 1 ChineseSimple, 2 ChineseSimpleExt, 3 ChineseTraditional, 4 Korean, 5 NintendoExt

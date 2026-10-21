@@ -461,10 +461,29 @@ void vk_textures_reset(void) {
 // instead (any size; RGBA8, mipmaps made here), the shaders told its size over the game's as for render targets at the
 // internal resolution (texel fetches and size queries stay in the game's units). Textures the game rewrites go back to
 // its own data. Setting tex_hd = 0 / LARECOMP_TEX_HD=0: packs off.
+// The same way, whatever the HD setting: the game's own button icons relabelled for the prompts' style
+// (textures/prompts/<style>, runtime/hle/pl.c pl_prompt_set; made by tools/za/prompt_textures.py), ahead of the pack.
 static int hd_on = -1, hd_dump = -1;
-static uint64_t *hd_set;  // sorted hashes of textures/hd/*.png
-static int hd_n;
+typedef struct { uint64_t *h; int n; char dir[48]; } HdSet;  // sorted hashes of <dir>/*.png
+static HdSet hd_sets[2];  // [0] button prompts, [1] HD pack
 static int hd_cmp(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
+
+static void hd_scan(HdSet *s, const char *dir) {
+    snprintf(s->dir, sizeof s->dir, "%s", dir);
+    DIR *d = opendir(dir);
+    if (!d) return;
+    int cap = 0;
+    for (struct dirent *de; (de = readdir(d));) {
+        unsigned long long h;
+        char ext[8] = "";
+        if (strlen(de->d_name) != 20 || sscanf(de->d_name, "%16llx.%4s", &h, ext) != 2 || strcmp(ext, "png")) continue;
+        if (s->n == cap) { cap = cap ? cap * 2 : 1024; s->h = realloc(s->h, cap * sizeof *s->h); }
+        s->h[s->n++] = h;
+    }
+    closedir(d);
+    qsort(s->h, s->n, sizeof *s->h, hd_cmp);
+    LOG("[tex] %d textures in %s\n", s->n, dir);
+}
 
 static void hd_init(void) {
     if (hd_on >= 0) return;
@@ -473,23 +492,20 @@ static void hd_init(void) {
     e = getenv("LARECOMP_TEX_DUMP");
     hd_dump = e ? atoi(e) != 0 : g_settings.tex_dump;
     if (hd_dump) { SDL_CreateDirectory("textures"); SDL_CreateDirectory("textures/dump"); }
-    if (!hd_on) return;
-    DIR *d = opendir("textures/hd");
-    if (!d) return;
-    int cap = 0;
-    for (struct dirent *de; (de = readdir(d));) {
-        unsigned long long h;
-        char ext[8] = "";
-        if (strlen(de->d_name) != 20 || sscanf(de->d_name, "%16llx.%4s", &h, ext) != 2 || strcmp(ext, "png")) continue;
-        if (hd_n == cap) { cap = cap ? cap * 2 : 1024; hd_set = realloc(hd_set, cap * sizeof *hd_set); }
-        hd_set[hd_n++] = h;
-    }
-    closedir(d);
-    qsort(hd_set, hd_n, sizeof *hd_set, hd_cmp);
-    LOG("[tex] HD pack: %d textures in textures/hd\n", hd_n);
+    extern const char *pl_prompt_set(void);
+    const char *set = pl_prompt_set();
+    char dir[48];
+    snprintf(dir, sizeof dir, "textures/prompts/%s", set ? set : "");
+    if (set) hd_scan(&hd_sets[0], dir);
+    if (hd_on) hd_scan(&hd_sets[1], "textures/hd");
 }
 
-static bool hd_has(uint64_t h) { return hd_n && bsearch(&h, hd_set, hd_n, sizeof h, hd_cmp); }
+static const HdSet *hd_find(uint64_t h) {
+    for (int i = 0; i < 2; i++)
+        if (hd_sets[i].n && bsearch(&h, hd_sets[i].h, hd_sets[i].n, sizeof h, hd_cmp)) return &hd_sets[i];
+    return NULL;
+}
+static bool hd_has(uint64_t h) { return hd_find(h) != NULL; }
 
 // plain 2D colour textures the game fills from the CPU (not render targets, video frames or linear / changing ones)
 static bool hd_candidate(const NvnTexture *t, const TexBackend *b) {
@@ -499,8 +515,8 @@ static bool hd_candidate(const NvnTexture *t, const TexBackend *b) {
 }
 
 static bool hd_replace(NvnTexture *t, TexBackend *b, uint64_t h) {
-    char path[64];
-    snprintf(path, sizeof path, "textures/hd/%016llx.png", (unsigned long long)h);
+    char path[80];
+    snprintf(path, sizeof path, "%s/%016llx.png", hd_find(h)->dir, (unsigned long long)h);
     SDL_Surface *s0 = SDL_LoadPNG(path);
     if (!s0) { LOG("[tex] %s: %s\n", path, SDL_GetError()); return false; }
     SDL_Surface *s = SDL_ConvertSurface(s0, SDL_PIXELFORMAT_ABGR8888);  // (R, G, B, A bytes)
@@ -696,7 +712,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
         return;
     }
     if (hd_candidate(t, b)) {
-        if (hd_on && hd_has(h) && hd_replace(t, b, h)) return;
+        if (hd_has(h) && hd_replace(t, b, h)) return;
         if (hd_dump) hd_queue_dump(t, h);
     }
     if (b->format != mf.vf && !b->astc_bw) return;  // unsupported format: nothing sensible to copy
