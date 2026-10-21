@@ -11,6 +11,9 @@
 #include "../rando.h"
 #include "../ipc.h"
 
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
 #define FS_PATH_NOT_FOUND MAKE_RESULT(2, 1)
 #define FS_PATH_EXISTS MAKE_RESULT(2, 2)
 #define FS_TARGET_LOCKED MAKE_RESULT(2, 7)
@@ -386,10 +389,11 @@ static void trpfd_unlist(int fd, const uint8_t *fmeta, uint64_t foff, uint64_t f
 }
 
 // Button prompts (runtime/hle/pl.c pl_prompt_set): textures/prompts/<style>/romfs.patch, made by
-// tools/za/prompt_textures.py - Pokémon Z-A's icon fonts relabelled, in their pack rebuilt to the same size. "ZAROMFS1",
-// a u32 count, then records (u8 kind = 0, u16 path length, path, u64 offset, u64 length, data): the bytes replace those
-// at that offset in that RomFS file.
-static void prompt_patch(void) {
+// tools/za/prompt_textures.py - Pokémon Z-A's icon fonts relabelled, in their pack rebuilt to the same size. "ZAROMFS2",
+// a u32 count, then records (u8 kind = 0, u16 path length, path, u64 offset, u64 length, u64 FNV-1a 64 of the bytes
+// replaced, data): the bytes replace those at that offset in that RomFS file - only when the file has the bytes the
+// record was made for (one patch file covers several game versions; another version's records are left out).
+static void prompt_patch(int fd) {
     extern const char *pl_prompt_set(void);
     const char *set = pl_prompt_set();
     if (!set) return;
@@ -401,24 +405,25 @@ static void prompt_patch(void) {
     long len = ftell(f);
     fseek(f, 0, SEEK_SET);
     uint8_t *d = malloc(len > 0 ? len : 1);
-    bool ok = len > 12 && fread(d, 1, len, f) == (size_t)len && !memcmp(d, "ZAROMFS1", 8);
+    bool ok = len > 12 && fread(d, 1, len, f) == (size_t)len && !memcmp(d, "ZAROMFS2", 8);
     fclose(f);
     if (!ok) { LOG("[fs] %s: not a patch file\n", path); free(d); return; }
     uint32_t n;
     memcpy(&n, d + 8, 4);
     uint64_t p = 12;
     int applied = 0;
-    for (uint32_t r = 0; r < n && p + 19 <= (uint64_t)len; r++) {
+    for (uint32_t r = 0; r < n && p + 27 <= (uint64_t)len; r++) {
         uint16_t pl;
         memcpy(&pl, d + p + 1, 2);
         char name[256];
         snprintf(name, sizeof name, "%.*s", pl, (const char *)d + p + 3);
-        uint64_t off, size;
+        uint64_t off, size, want;
         memcpy(&off, d + p + 3 + pl, 8);
         memcpy(&size, d + p + 11 + pl, 8);
-        const uint8_t *data = d + p + 19 + pl;
+        memcpy(&want, d + p + 19 + pl, 8);
+        const uint8_t *data = d + p + 27 + pl;
         uint8_t kind = d[p];
-        p += 19 + pl + size;
+        p += 27 + pl + size;
         if (p > (uint64_t)len) break;
         RomFile *rf = NULL;
         for (int i = 0; i < rom_nfiles && !rf; i++) if (!strcmp(rom_files[i].path, name)) rf = &rom_files[i];
@@ -427,6 +432,10 @@ static void prompt_patch(void) {
             continue;
         }
         uint8_t *copy = malloc(size);
+        uint64_t have = 0xCBF29CE484222645ull;
+        if (pread(fd, copy, size, (off_t)(rf->off + off)) == (ssize_t)size)
+            for (uint64_t i = 0; i < size; i++) have = (have ^ copy[i]) * 0x100000001B3ull;
+        if (have != want) { free(copy); continue; }  // (another game version's)
         memcpy(copy, data, size);
         patches[npatches++] = (Patch){rf->off + off, size, copy};
         applied++;
@@ -494,7 +503,7 @@ static void rom_index(int fd) {
         ov_end = (ov_end + size + 0xF) & ~0xFull;
     }
     if (ov_n) LOG("[fs] %d romfs files replaced (mods / randomizer)\n", ov_n);
-    prompt_patch();
+    prompt_patch(fd);
     if (ov_meta) { patches[npatches++] = (Patch){ov_meta_off, ov_meta_size, ov_meta}; }
     add_new_files(fd, h, dmeta, dsz, fsz);
     qsort(rom_files, rom_nfiles, sizeof *rom_files, rom_cmp);
@@ -599,6 +608,25 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
     }
     case 4: OUT(uint64_t, 0) = ov_n ? ov_end : st->size; resp_size(resp, 8); break;  // GetSize
     default: LOG("[fs] IStorage cmd %u (ok)\n", req->cmd);
+    }
+}
+
+// a plain storage: a host file's bytes (add-on content)
+static void plain_storage(Service *s, IpcReq *req, IpcResp *resp) {
+    Storage *st = s->state;
+    switch (req->cmd) {
+    case 0: {  // Read(offset, size) -> B buffer
+        uint64_t off = IN(uint64_t, 0), size = IN(uint64_t, 8);
+        IpcBuf *b = out_buf(req, 0);
+        if (!b) { resp->result = MAKE_RESULT(2, 6001); break; }
+        if (size > b->size) size = b->size;
+        ssize_t n = pread(st->fd, (uint8_t *)(uintptr_t)b->addr, size, (off_t)off);
+        if (n < 0) n = 0;
+        if ((uint64_t)n < size) memset((uint8_t *)(uintptr_t)b->addr + n, 0, size - n);
+        break;
+    }
+    case 4: OUT(uint64_t, 0) = st->size; resp_size(resp, 8); break;  // GetSize
+    default: LOG("[fs] IStorage(aoc) cmd %u (ok)\n", req->cmd);
     }
 }
 
@@ -836,10 +864,28 @@ SERVICE("fsp-srv", fsp_srv) {
         break;
     }
     case 200: ipc_return_object(resp, open_romfs_storage()); break;  // OpenDataStorageByCurrentProcess
-    case 202:  // OpenDataStorageByDataId (system data archives)
-        LOG("[fs] OpenDataStorageByDataId %llx (not available)\n", IN(uint64_t, 8));
-        resp->result = MAKE_RESULT(2, 1001);
+    case 202: {  // OpenDataStorageByDataId: add-on content (the game root's aoc/<id>.bin, services/misc.c), no system data
+        uint64_t id = IN(uint64_t, 8);
+        char path[1100];
+        snprintf(path, sizeof path, "%s", g_romfs_dir);
+        char *slash = strrchr(path, '/');
+        snprintf(slash ? slash + 1 : path, sizeof path - (slash ? (size_t)(slash + 1 - path) : 0), "aoc/%016llx.bin",
+                 (unsigned long long)id);
+        int fd = open(path, O_RDONLY | O_BINARY);
+        if (fd < 0) {
+            LOG("[fs] OpenDataStorageByDataId %llx (not available)\n", (unsigned long long)id);
+            resp->result = MAKE_RESULT(2, 1001);
+            break;
+        }
+        Storage *st = calloc(1, sizeof *st);
+        st->fd = fd;
+        struct stat sb;
+        fstat(fd, &sb);
+        st->size = sb.st_size;
+        LOG("[fs] add-on content %016llx: %s\n", (unsigned long long)id, path);
+        ipc_return_object(resp, service_new("IStorage(aoc)", plain_storage, st));
         break;
+    }
     case 1005: OUT(uint32_t, 0) = 0; resp_size(resp, 4); break;  // GetGlobalAccessLogMode
     case 1003: case 1004: case 1006: break;
     case 1011: memset(resp->data, 0, 0x10); resp_size(resp, 0x10); break;

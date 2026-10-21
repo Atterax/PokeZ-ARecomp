@@ -24,7 +24,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 ap = argparse.ArgumentParser()
-ap.add_argument('--romfs', default='extracted/romfs')
+ap.add_argument('--romfs', action='append', help='game files folder (default extracted/romfs); more than once: several game versions')
 ap.add_argument('--ooz', required=True, help='ooz shared library (ooz_decompress export)')
 ap.add_argument('--settings', default=None, help='settings file with bind_key_* lines (default: none = defaults)')
 ap.add_argument('--out', default='textures/prompts')
@@ -32,6 +32,7 @@ ap.add_argument('--scale', type=int, default=4)
 ap.add_argument('--font', default=None, help='bold TrueType font for the labels')
 ap.add_argument('--mods', default='mods', help="mods folder (runtime/services/fs.c): their UI archives' icons too")
 args = ap.parse_args()
+args.romfs = args.romfs or ['extracted/romfs']
 S = args.scale
 
 # ------------------------------------------------------------------ game files: ONEPACK -> packs -> SARC -> BNTX
@@ -681,31 +682,46 @@ def scan_sarc(d):
             if fmt == 0x1c01: bc3.add(hh)
 
 
-icon_fonts = []  # (Entry, magic, decoded TTF) of or_font / or_font_eng
-trpfs = os.path.join(args.romfs, 'arc', 'data.trpfs')
-print('reading', trpfs)
-for ent in game_files(trpfs):
-    comp, size, raw = ent.comp, ent.size, ent.raw
-    try:
-        d = unpack(comp, size, raw)
-    except ValueError:
-        continue
-    if size < 0x20000 and d[:4] == b'6\xf8\x1a\x1e':  # (a small .bfttf: the icon fonts, the UI's bold condensed)
-        ttf = bfttf_decode(d)
-        if b'or_font' in ttf.replace(b'\0', b''): icon_fonts.append((ent, d[:4], ttf))
-        elif b'UniversNextPro-BoldCond' in ttf.replace(b'\0', b''):
-            import io
-            from fontTools.ttLib import TTFont
-            LABEL_FONT = TTFont(io.BytesIO(ttf))  # (the game's own letters for the font glyphs' labels)
-        continue
-    scan_sarc(d)
+icon_fonts = {}  # game files folder -> [(Entry, magic, decoded TTF) of or_font / or_font_eng]
+for romfs in args.romfs:
+    trpfs = os.path.join(romfs, 'arc', 'data.trpfs')
+    print('reading', trpfs)
+    icon_fonts[romfs] = []
+    for ent in game_files(trpfs):
+        comp, size, raw = ent.comp, ent.size, ent.raw
+        try:
+            d = unpack(comp, size, raw)
+        except ValueError:
+            continue
+        if size < 0x20000 and d[:4] == b'6\xf8\x1a\x1e':  # (a small .bfttf: the icon fonts, the UI's bold condensed)
+            ttf = bfttf_decode(d)
+            if b'or_font' in ttf.replace(b'\0', b''): icon_fonts[romfs].append((ent, d[:4], ttf))
+            elif b'UniversNextPro-BoldCond' in ttf.replace(b'\0', b''):
+                import io
+                from fontTools.ttLib import TTFont
+                LABEL_FONT = TTFont(io.BytesIO(ttf))  # (the game's own letters for the font glyphs' labels)
+            continue
+        scan_sarc(d)
 # the mods' UI archives (a translation's title screen has its own "PRESS (A)")
 for root, _, names in os.walk(args.mods):
     for nm in names:
         if nm.endswith('.arc'):
             with open(os.path.join(root, nm), 'rb') as f: scan_sarc(f.read())
-print(len(found), 'icon textures,', len(icon_fonts), 'icon fonts')
+print(len(found), 'icon textures,', sum(len(v) for v in icon_fonts.values()), 'icon fonts')
 print('labels:', {b: key(b) for b in ('a', 'b', 'x', 'y', 'l', 'r', 'zl', 'zr', 'plus', 'minus')})
+
+
+def fnv64(b):  # FNV-1a 64 (runtime/services/fs.c checks the bytes a patch replaces with it)
+    h = 0xCBF29CE484222645
+    for x in b: h = ((h ^ x) * 0x100000001B3) & M64
+    return h
+
+
+def record(path, off, orig, data):
+    p = path.encode()
+    return struct.pack('<BH', 0, len(p)) + p + struct.pack('<QQQ', off, len(data), fnv64(orig)) + data
+
+
 # glyphs left as they are when the relabelled fonts don't fit their pack's room, in this order
 OPTIONAL = [(0xE33C, 0xE33D, 0xE33E, 0xE33F), (0xE338, 0xE339), (0xE325, 0xE326, 0xE327, 0xE328)]
 for style in ('keyboard', 'xbox', 'xboxlabel'):
@@ -725,28 +741,37 @@ for style in ('keyboard', 'xbox', 'xboxlabel'):
     print(f'{d}: {n} textures')
     # The icon fonts: their pack rebuilt with them relabelled, in place of the game's in data.trpfs (romfs.patch,
     # runtime/services/fs.c). It has to fit where the pack was - the game takes a pack's size from where the next
-    # one starts - so the fonts are stored subroutinized and, when still too big, some glyphs are left alone.
+    # one starts - so the fonts are stored subroutinized and, when still too big, some glyphs are left alone. One
+    # patch file for every game version given (--romfs, more than once): the runtime applies the records whose
+    # original bytes are the ones it has.
     import io
     from fontTools.ttLib import TTFont
     patch = os.path.join(d, 'romfs.patch')
     if os.path.exists(patch): os.remove(patch)
-    if not icon_fonts: continue
-    e0 = icon_fonts[0][0]
-    for k in range(len(OPTIONAL) + 1):
-        skip = {c for grp in OPTIONAL[:k] for c in grp}
-        files = {}
-        for ent, magic, ttf in icon_fonts:
-            t = TTFont(io.BytesIO(ttf))
-            if relabel_font(t, style, skip): files[ent.index] = bfttf_encode(magic, font_bytes(t))
-        pack = build_pack(e0.m, e0.pack_off, files)
-        if len(pack) <= e0.slot: break
-    else:
-        print(f'{d}: the icon fonts don\'t fit their pack ({len(pack)} > {e0.slot} bytes), left as they are')
-        continue
-    if skip: print(f'{d}: (to fit, {len(skip)} icon font glyphs left as they are)')
-    pack += bytes(e0.slot - len(pack))
-    size_at, _ = trpfd_pack_size_at(os.path.join(args.romfs, 'arc', 'data.trpfd'), e0.pack_hash)
-    recs = [struct.pack('<BH', 0, 14) + b'arc/data.trpfs' + struct.pack('<QQ', e0.pack_off, len(pack)) + pack,
-            struct.pack('<BH', 0, 14) + b'arc/data.trpfd' + struct.pack('<QQ', size_at, 8) + struct.pack('<Q', len(pack))]
-    open(patch, 'wb').write(b'ZAROMFS1' + struct.pack('<I', len(recs)) + b''.join(recs))
-    print(f'{patch}: icon fonts ({len(files)}, pack {len(pack)} bytes)')
+    recs = []
+    for romfs, fonts in icon_fonts.items():
+        if not fonts: continue
+        e0 = fonts[0][0]
+        for k in range(len(OPTIONAL) + 1):
+            skip = {c for grp in OPTIONAL[:k] for c in grp}
+            files = {}
+            for ent, magic, ttf in fonts:
+                t = TTFont(io.BytesIO(ttf))
+                if relabel_font(t, style, skip): files[ent.index] = bfttf_encode(magic, font_bytes(t))
+            pack = build_pack(e0.m, e0.pack_off, files)
+            if len(pack) <= e0.slot: break
+        else:
+            print(f'{d}: {romfs}: the icon fonts don\'t fit their pack ({len(pack)} > {e0.slot} bytes), left as they are')
+            continue
+        if skip: print(f'{d}: {romfs}: (to fit, {len(skip)} icon font glyphs left as they are)')
+        pack += bytes(e0.slot - len(pack))
+        trpfd = os.path.join(romfs, 'arc', 'data.trpfd')
+        size_at, _ = trpfd_pack_size_at(trpfd, e0.pack_hash)
+        with open(trpfd, 'rb') as f:
+            f.seek(size_at)
+            old_size = f.read(8)
+        recs.append(record('arc/data.trpfs', e0.pack_off, e0.m[e0.pack_off:e0.pack_off + e0.slot], pack))
+        recs.append(record('arc/data.trpfd', size_at, old_size, struct.pack('<Q', len(pack))))
+    if recs:
+        open(patch, 'wb').write(b'ZAROMFS2' + struct.pack('<I', len(recs)) + b''.join(recs))
+        print(f'{patch}: icon fonts for {len(recs) // 2} game version(s)')
