@@ -2760,6 +2760,12 @@ static void draw(CmdRec *r, bool indexed) {
     PROF_T0();
     if (xfb_on) {
         xfb_note();
+        // the transform feedback buffers are GPU-written: never served from the vertex cache's CPU-side copies (later
+        // draws read them as vertex streams - Z-A's characters take their per-instance data from them; a stale copy
+        // froze their animation and stretched their meshes)
+        for (int b = 0; b < 4; b++)
+            if (xfb_addr[b] >= gwin_base && xfb_size[b] && xfb_addr[b] - gwin_base < gwin_max)
+                vc_mark_gpu(xfb_addr[b] - gwin_base, xfb_addr[b] - gwin_base + xfb_size[b]);
         static int nlog;
         if (nlog++ < 24)
             LOG("[xfb] draw indexed %d mode %llu first %llx count %llu | buffers %llx+%llx %llx+%llx %llx+%llx\n", indexed,
