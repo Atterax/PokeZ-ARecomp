@@ -173,6 +173,7 @@ static void create_device(void) {
                                             .timelineSemaphore = VK_TRUE, .shaderInt8 = VK_TRUE, .samplerMirrorClampToEdge = VK_TRUE,
                                             .uniformAndStorageBuffer8BitAccess = VK_TRUE, .storageBuffer8BitAccess = VK_TRUE,
                                             .scalarBlockLayout = VK_TRUE, .shaderOutputLayer = have12.shaderOutputLayer,
+                                            .samplerFilterMinmax = have12.samplerFilterMinmax,
                                             .shaderOutputViewportIndex = have12.shaderOutputViewportIndex, .pNext = &f13};
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
                                             .storageBuffer16BitAccess = VK_TRUE, .pNext = &f12};

@@ -2469,7 +2469,8 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
     {   // (debug) LARECOMP_CS_DUMMY_TEX=<compute code hex>: that compute shader samples 1x1 black textures
         static uint64_t dummy_cs = ~0ull;
         if (dummy_cs == ~0ull) dummy_cs = getenv("LARECOMP_CS_DUMMY_TEX") ? strtoull(getenv("LARECOMP_CS_DUMMY_TEX"), NULL, 16) : 0;
-        if (stage == 5 && dummy_cs && st.program && st.program->stages[5].code_addr == dummy_cs) view = VK_NULL_HANDLE;
+        if (stage == 5 && dummy_cs && st.program && (dummy_cs == 1 || st.program->stages[5].code_addr == dummy_cs))
+            view = VK_NULL_HANDLE;  // (1: every compute shader - code addresses change between runs)
     }
     if (!view) view = vk_dummy_view(st_->type);
     if (!smp) smp = vk_default_sampler(true);

@@ -350,6 +350,16 @@ static void create_image(NvnTexture *t, TexBackend *b) {
         VkClearDepthStencilValue zero = {0.0f, 0};
         VkImageSubresourceRange rg = {b->aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
         vkCmdClearDepthStencilImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &rg);
+        if (levels > 1 && (b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) {
+            // Levels below 0 of a depth image (Pokémon Z-A's GPU culling tests small / distant objects against coarse
+            // levels of its scene depth - a hierarchical-Z pyramid nothing here fills in): its depth is reversed, so
+            // 0 is far and hides nothing (1.0 culled the gate, lamp posts and planters). LARECOMP_HIZ_FAR=<value>.
+            static float far = -1;
+            if (far < 0) far = getenv("LARECOMP_HIZ_FAR") ? (float)atof(getenv("LARECOMP_HIZ_FAR")) : 0.0f;
+            VkClearDepthStencilValue fv = {far, 0};
+            VkImageSubresourceRange r1 = {VK_IMAGE_ASPECT_DEPTH_BIT, 1, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
+            vkCmdClearDepthStencilImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, &fv, 1, &r1);
+        }
         VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                                .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                                .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
@@ -863,6 +873,17 @@ VkSampler vk_sampler(NvnSamplerDesc *d) {
             si.borderColor = VK_BORDER_COLOR_FLOAT_CUSTOM_EXT;
             si.pNext = &cb;
         } else si.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+    }
+    // NVN reduction filter (AVERAGE 0, MIN 1, MAX 2 == VkSamplerReductionMode): Pokémon Z-A builds its hierarchical-Z
+    // pyramid with a MIN-filtered linear fetch (the farthest of 4 reversed depths) - averaged, the coarse levels came
+    // out too near and its GPU culling hid small props (planters) at mid range.
+    VkSamplerReductionModeCreateInfo rm = {.sType = VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO};
+    if (d->reduction == 1 || d->reduction == 2) {
+        rm.reductionMode = d->reduction == 1 ? VK_SAMPLER_REDUCTION_MODE_MIN : VK_SAMPLER_REDUCTION_MODE_MAX;
+        rm.pNext = si.pNext;
+        si.pNext = &rm;
+        static int logged;
+        if (!logged++) LOG("[vk] sampler reduction filter %u (min filter %u)\n", d->reduction, d->min_filter);
     }
     VkSampler s;
     VK_CHECK(vkCreateSampler(g_vk.dev, &si, NULL, &s));
