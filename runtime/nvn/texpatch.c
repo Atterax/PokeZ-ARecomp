@@ -1,6 +1,6 @@
 // Button prompts in the controller's own style, and the Hero Mode HUD icon hidden: edits made to the game's own UI
 // textures as they are uploaded (ideas from the GameBanana mods "XBOX UI", "PS4 UI Buttons" and "No Hero Mode
-// Indicator", credited in README.md; none of their files are used and no game art ships with the recomp).
+// Indicator", credited in docs/LASRecomp-README.md; none of their files are used and no game art ships with the recomp).
 //
 // The prompt glyphs are 48x48 layout textures (BtnA_00, BtnL_01, ... in the UI archives' __Combined.bntx: BC5
 // masks, BC3 / ASTC colour versions) and the pictogram font's sheet (pictogram.bffnt: RGBA8, the inline icons of

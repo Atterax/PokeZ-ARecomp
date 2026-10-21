@@ -1,4 +1,4 @@
-// Quality-of-life options re-implemented from community GameBanana mods (credits in README.md; none of their files
+// Quality-of-life options re-implemented from community GameBanana mods (credits in docs/LASRecomp-README.md; none of their files
 // are used): 360-degree movement and blur removal ("360 Controls (And More!)"). Button prompts are
 // runtime/nvn/texpatch.c, the Hero Mode icon is hidden there too.
 #include <math.h>
