@@ -1,14 +1,25 @@
 # ZA Recomp
 
-A native PC port of **Pokémon Legends: Z-A** (Nintendo Switch, v1.0.0) built by **static recompilation**: the game's
-ARM64 code is translated ahead of time into C and compiled for x86-64, and the Switch's operating system and GPU
-(NVN) are reimplemented on the PC (Vulkan). No emulator runs at play time.
+**English** | [Português (Brasil)](README.pt-BR.md)
+
+A native PC port of **Pokémon Legends: Z-A** (Nintendo Switch, v1.0.0 and v2.0.0) built by **static recompilation**:
+the game's ARM64 code is translated ahead of time into C and compiled for x86-64, and the Switch's operating system
+and GPU (NVN) are reimplemented on the PC (Vulkan). No emulator runs at play time.
 
 This is a fork of **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by **Peiikai** - the recompiler, the runtime
 and the NVN-to-Vulkan / Maxwell shader translation all come from that project, made for *The Legend of Zelda:
 Link's Awakening*. This fork extends it to run Pokémon Legends: Z-A.
 
 > **You need your own copy of the game.** No game files, code, assets or fonts are included in this repository.
+
+## Screenshots
+
+| | |
+|---|---|
+| ![Lumiose City at 60 fps](docs/screenshots/lumiose.jpg) | ![The port's settings menu (F1)](docs/screenshots/settings.jpg) |
+| Lumiose City, 60 fps | The port's settings menu (F1) |
+| ![The game's menu](docs/screenshots/menu.jpg) | ![The bag](docs/screenshots/bag.jpg) |
+| The game's menu (Brazilian Portuguese translation mod) | The bag |
 
 ## Status
 
