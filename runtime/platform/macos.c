@@ -1,4 +1,5 @@
 // macOS host layer (runtime/platform.h).
+#include <errno.h>
 #include <crt_externs.h>
 #include <dlfcn.h>
 #include <execinfo.h>
@@ -165,3 +166,9 @@ static int rm_entry(const char *path, const struct stat *sb, int flag, struct FT
     return remove(path);
 }
 bool plat_remove_tree(const char *dir) { return nftw(dir, rm_entry, 16, FTW_DEPTH | FTW_PHYS) == 0; }
+
+int plat_open_file(const char *path, int flags) { return open(path, flags, 0644); }
+int plat_rename(const char *from, const char *to) {
+    if (!access(to, F_OK)) { errno = EEXIST; return -1; }
+    return rename(from, to);
+}

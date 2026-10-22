@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "../hle.h"
+#include "../platform.h"
 #include "../rando.h"
 #include "../ipc.h"
 
@@ -665,6 +666,7 @@ static uint32_t errno_result(void) {
     if (errno == ENOENT || errno == ENOTDIR) return FS_PATH_NOT_FOUND;
     if (errno == EEXIST) return FS_PATH_EXISTS;
     if (errno == ENOTEMPTY) return FS_NOT_EMPTY;
+    LOG("[fs] host error %d (%s): result 2002-4000\n", errno, strerror(errno));  // (the game aborts on it)
     return MAKE_RESULT(2, 4000);
 }
 
@@ -782,7 +784,7 @@ static void filesystem(Service *s, IpcReq *req, IpcResp *resp) {
     host_path(fs, in_path(req, 0), p, sizeof p);
     switch (req->cmd) {
     case 0: {  // CreateFile(option, size)
-        int fd = open(p, O_CREAT | O_EXCL | O_RDWR, 0644);
+        int fd = plat_open_file(p, O_CREAT | O_EXCL | O_RDWR);
         if (fd < 0) { resp->result = errno_result(); break; }
         if (ftruncate(fd, IN(int64_t, 8))) resp->result = errno_result();
         close(fd);
@@ -794,7 +796,7 @@ static void filesystem(Service *s, IpcReq *req, IpcResp *resp) {
     case 4: if (rm_rf(p, false)) resp->result = errno_result(); break;
     case 5: case 6:
         host_path(fs, in_path(req, 1), p2, sizeof p2);
-        if (rename(p, p2)) resp->result = errno_result();
+        if (plat_rename(p, p2)) resp->result = errno_result();
         break;
     case 7: {  // GetEntryType
         struct stat sb;
@@ -805,7 +807,7 @@ static void filesystem(Service *s, IpcReq *req, IpcResp *resp) {
     }
     case 8: {  // OpenFile(mode)
         uint32_t mode = IN(uint32_t, 0);
-        int fd = open(p, (mode & 2) ? O_RDWR : O_RDONLY);
+        int fd = plat_open_file(p, (mode & 2) ? O_RDWR : O_RDONLY);  // (renamable / deletable while open, as on the console)
         if (fd < 0) { resp->result = errno_result(); break; }
         HostFile *f = calloc(1, sizeof *f);
         f->fd = fd;

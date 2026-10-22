@@ -654,6 +654,9 @@ static bool hd_load_dds(NvnTexture *t, TexBackend *b, uint64_t h, const char *pa
 // looked up in the pack again (the next upload check rehashes it)
 static void hd_switch(void) {
     static int last = -1;
+    static long flip_at = -2;  // (tests: LARECOMP_TEX_HD_FLIP=<frame> switches the setting at that frame, as F1 would)
+    if (flip_at == -2) { const char *e = getenv("LARECOMP_TEX_HD_FLIP"); flip_at = e ? atol(e) : -1; }
+    if (flip_at >= 0 && vk_frame_counter() == (uint64_t)flip_at) g_settings.tex_hd = !g_settings.tex_hd;
     hd_init();
     if (last < 0) { last = g_settings.tex_hd; return; }
     if (g_settings.tex_hd == last) return;

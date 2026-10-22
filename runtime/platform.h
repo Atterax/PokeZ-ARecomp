@@ -50,6 +50,11 @@ PlatProc plat_spawn(const char *const argv[], const char *log_path, bool append_
 int plat_proc_wait(PlatProc p, bool block);  // exit code, or -1 while still running (block = false)
 void plat_proc_kill(PlatProc p);             // end it and what it started (then it's gone: no wait)
 bool plat_remove_tree(const char *dir);      // rm -rf
+// A game file opened the way the console's file systems allow: it can be renamed or deleted while open (Windows:
+// shared delete access). flags: O_RDONLY / O_RDWR, O_CREAT, O_EXCL; errno set on failure. Rename: fails if the target
+// exists (EEXIST), as the console's does.
+int plat_open_file(const char *path, int flags);
+int plat_rename(const char *from, const char *to);
 #ifdef _WIN32
 #define PLAT_EXE_SUFFIX ".exe"
 #define PLAT_VENV_PYTHON "venv/Scripts/python.exe"  // relative to the venv's parent

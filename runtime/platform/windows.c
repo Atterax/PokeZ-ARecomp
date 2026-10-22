@@ -1,5 +1,6 @@
 // Windows host layer (runtime/platform.h).
 #include <windows.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -449,4 +450,27 @@ void plat_terminate(void) { TerminateProcess(GetCurrentProcess(), 0); }
 int rt_stderr_is_console(void) {
     DWORD t = GetFileType(GetStdHandle(STD_ERROR_HANDLE));
     return t == FILE_TYPE_CHAR || t == FILE_TYPE_UNKNOWN;
+}
+
+static void set_errno_win(DWORD e) {
+    errno = e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND ? ENOENT
+          : e == ERROR_FILE_EXISTS || e == ERROR_ALREADY_EXISTS ? EEXIST
+          : e == ERROR_DIR_NOT_EMPTY ? ENOTEMPTY : EACCES;
+}
+
+int plat_open_file(const char *path, int flags) {
+    DWORD access = (flags & O_RDWR) ? GENERIC_READ | GENERIC_WRITE : GENERIC_READ;
+    DWORD disp = !(flags & O_CREAT) ? OPEN_EXISTING : (flags & O_EXCL) ? CREATE_NEW : OPEN_ALWAYS;
+    HANDLE h = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, disp,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) { set_errno_win(GetLastError()); return -1; }
+    int fd = _open_osfhandle((intptr_t)h, ((flags & O_RDWR) ? _O_RDWR : _O_RDONLY) | _O_BINARY);
+    if (fd < 0) CloseHandle(h);
+    return fd;
+}
+
+int plat_rename(const char *from, const char *to) {
+    if (MoveFileExA(from, to, 0)) return 0;  // (no MOVEFILE_REPLACE_EXISTING: the console's rename refuses too)
+    set_errno_win(GetLastError());
+    return -1;
 }

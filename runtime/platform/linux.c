@@ -268,3 +268,9 @@ bool plat_remove_tree(const char *dir) { return nftw(dir, rm_entry, 16, FTW_DEPT
 // End the process at once, skipping the library teardown: as on Windows, the GPU driver's threads crashed in exit()
 // while the game's threads still submitted work.
 void plat_terminate(void) { _exit(0); }
+
+int plat_open_file(const char *path, int flags) { return open(path, flags, 0644); }
+int plat_rename(const char *from, const char *to) {
+    if (!access(to, F_OK)) { errno = EEXIST; return -1; }
+    return rename(from, to);
+}
