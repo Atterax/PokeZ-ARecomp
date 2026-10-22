@@ -122,9 +122,9 @@ for pi, fh, d in trinity.pack_files(trpfs, oodle, 1 << 20):
         if mm: path = slashes(mm.group(1), f'/{model}.trmdl', fh)
         if not path:  # (named after another file of the folder: any tail like name.ext, fewer slashes tried)
             for k in range(len(base) - 3, max(len(base) - 40, 0), -1):
-                if re.fullmatch(r'[a-z0-9_]+\.[a-z]+', base[k:]) and re.match(r'[a-z0-9]', base[k]) and 
-                        (path := slashes(base[:k], f'/{model}.trmdl', fh, most=3)):
-                    break
+                if not re.fullmatch(r'[a-z0-9_]+\.[a-z]+', base[k:]) or not re.match(r'[a-z0-9]', base[k]): continue
+                path = slashes(base[:k], f'/{model}.trmdl', fh, most=3)
+                if path: break
     if not path:
         miss += 1
         if miss <= 15: print('no path for', model, 'pack', pack)
