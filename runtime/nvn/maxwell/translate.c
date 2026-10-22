@@ -2111,6 +2111,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (info->uses_gmem)
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem { uint w[]; } gmem_;\n", set, GMEM_BUFFER_INDEX,
            c->uses_gmem_store ? "" : "readonly ");
+    if (xfb) sp(&s, "layout(std430, set = %d, binding = %d) buffer XfbOut { uint w[]; } xfbo_;\n", set, XFB_BUFFER_INDEX);
     if (info->uses_gmem_map) {  // (compute) the dispatch's storage buffers, device-local: gmap[i] = heap offset, size, word
         sp(&s, "layout(std140, set = %d, binding = %d) uniform GMap { uvec4 gmap[%d]; };\n", set, GMAP_BUFFER_INDEX, GMAP_MAX + 1);
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GFast { uint w[]; } gfast_;\n", set, GFAST_BUFFER_INDEX,
@@ -2203,7 +2204,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
                 // (as on the hardware, nothing past the bound size: rscale[66 + b].y = the buffer's size in words)
                 unsigned sw = (unsigned)(key->xfb_stride[b] / 4);
                 sp(&s, "  if (floatBitsToUint(rscale[%d].z) != 0u && uint(gl_VertexIndex) * %uu + %du < floatBitsToUint(rscale[%d].y)) "
-                       "gmem_.w[floatBitsToUint(rscale[%d].x) + uint(gl_VertexIndex) * %uu + %du] = floatBitsToUint(v%d[%d]);\n",
+                       "xfbo_.w[floatBitsToUint(rscale[%d].x) + uint(gl_VertexIndex) * %uu + %du] = floatBitsToUint(v%d[%d]);\n",
                        66 + b, sw, k, 66 + b, 66 + b, sw, k, i, comp);
                 k++;
             }

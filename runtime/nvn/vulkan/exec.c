@@ -19,6 +19,7 @@
 // LARECOMP_SKIP_WHY=1: skipped draws / dispatches per source line, with the stats
 static uint32_t skip_why[4096];
 #define stat_skipped_here() (stat_skipped++, skip_why[__LINE__ & 4095]++)
+static uint64_t stat_vtx_cached, stat_vtx_host, stat_xfb_sessions;  // vertex stream bytes bound from the vertex cache / from host memory
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static uint64_t stat_upload_bytes;
 // LARECOMP_VK_PROF=1: render-thread time per category in the fps log (exec = whole command lists, draw = draw(),
@@ -308,6 +309,7 @@ void vk_full_barrier(VkCommandBuffer cb) {
 
 static void ring_retire(void);
 void vc_flush(void);
+static void xm_copy_back(VkCommandBuffer cb);
 
 // ---- LARECOMP_GPUPROF_AT=<frame>: GPU time per pass / dispatch / copy of that frame, logged as "[gpuprof]".
 // A timestamp (ALL_COMMANDS: after everything before it) at each mark; a row = the work since the previous mark.
@@ -402,6 +404,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     vk_end_pass();
     Sub *s = sub();
     if (!s->main_begun && !s->upload_begun && !wait && !signal) return;
+    if (s->main_begun) xm_copy_back(s->main);  // (transform feedback output, to the heap)
     VkCommandBufferSubmitInfo cbs[2];
     int n = 0;
     vc_flush();
@@ -757,11 +760,13 @@ const char *renderer_stats(void) {
         LOG("\n");
     }
     snprintf(stats_text, sizeof stats_text,
-             "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, wait %.0fms, compile %d, fbcopy %llu, upload %.1fMB",
+             "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, wait %.0fms, compile %d, fbcopy %llu, upload %.1fMB, "
+             "vertices %.0fMB cached %.0fMB host, xfb sessions %llu",
              (unsigned long long)stat_draws, (unsigned long long)stat_skipped, (unsigned long long)stat_passes,
              (unsigned long long)stat_dispatches, (unsigned long long)stat_flushes, (double)stat_wait_ns / 1e6,
-             atomic_exchange(&stat_compiles, 0), (unsigned long long)stat_feedback_copies, (double)stat_upload_bytes / 1048576.0);
-    stat_feedback_copies = stat_upload_bytes = 0;
+             atomic_exchange(&stat_compiles, 0), (unsigned long long)stat_feedback_copies, (double)stat_upload_bytes / 1048576.0,
+             (double)stat_vtx_cached / 1048576.0, (double)stat_vtx_host / 1048576.0, (unsigned long long)stat_xfb_sessions);
+    stat_feedback_copies = stat_upload_bytes = stat_vtx_cached = stat_vtx_host = stat_xfb_sessions = 0;
     if (getenv("LARECOMP_SKIP_WHY")) {
         LOG("[vk] skipped by line:");
         for (int i = 0; i < 4096; i++) if (skip_why[i]) LOG(" %d:%u", i, skip_why[i]);
@@ -2159,6 +2164,98 @@ static VkDescriptorBufferInfo gfast_info(void) {
     return (VkDescriptorBufferInfo){gfast_buf, 0, GFAST_SIZE};
 }
 
+// ---- transform feedback mirror. Pokémon Z-A skins its characters with transform feedback - ~140 sessions a frame,
+// their buffers in one ~6 MB arena - and its draws then read the results as vertex streams. Written into the guest
+// heap's import (host memory), every vertex was a scattered write across PCIe: 3 ms of GPU time a frame (7 with
+// mods/MaxLOD). Instead the sessions write a device-local mirror of the arena (XFB_BUFFER_INDEX), the vertex streams
+// inside parts written that way read it (guest_direct), and at each submission's end the parts written are copied
+// back to the heap in one transfer, for anything else that reads them there. Ranges outside the mirror's 64 MB
+// window go to the heap as before. LARECOMP_VK_XFB_MIRROR=0: off.
+#define XM_SIZE (64ull << 20)
+#define XM_CHUNK 256ull
+static VkBuffer xm_buf;
+static VmaAllocation xm_mem;
+static uint64_t xm_lo;  // guest address of the mirror's first byte (0: not placed yet)
+static uint8_t xm_written[XM_SIZE / XM_CHUNK / 8];  // chunks written by transform feedback (current in the mirror)
+static VkBufferCopy xm_back[256];  // this submission's written ranges (mirror -> heap)
+static int xm_back_n;
+static bool xm_draw;  // this draw's transform feedback goes to the mirror
+static uint64_t stat_xm_fallback;
+
+static bool xm_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("LARECOMP_VK_XFB_MIRROR"); on = !e || atoi(e) != 0; }
+    return on && g_vk.host_import;
+}
+
+static bool xm_inside(uint64_t a, uint64_t n) { return xm_lo && a >= xm_lo && a + n <= xm_lo + XM_SIZE; }
+
+static bool xm_all_written(uint64_t a, uint64_t n) {
+    if (!n || !xm_inside(a, n)) return false;
+    for (uint64_t c = (a - xm_lo) / XM_CHUNK; c <= (a + n - 1 - xm_lo) / XM_CHUNK; c++)
+        if (!(xm_written[c >> 3] >> (c & 7) & 1)) return false;
+    return true;
+}
+
+// before a transform feedback draw: can its buffers all go to the mirror? (then they're marked written, and queued
+// for the copy back)
+static bool xm_prepare(void) {
+    if (!xm_on() || !gmem_buf) return false;
+    if (!xm_buf) {
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = XM_SIZE,
+                                 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &xm_buf, &xm_mem, NULL) != VK_SUCCESS) { xm_buf = VK_NULL_HANDLE; return false; }
+    }
+    for (int b = 0; b < 4; b++) {
+        if (!xfb_addr[b] || !xfb_size[b]) continue;
+        if (!xm_lo) {  // placed around the first session's buffers (the arena is a few MB)
+            uint64_t lo = (xfb_addr[b] & ~0xFFFFFull) - (16ull << 20);
+            xm_lo = lo < gwin_base ? gwin_base : lo;
+            LOG("[vk] transform feedback mirror at %llx (+%llu MB)\n", (unsigned long long)xm_lo, (unsigned long long)(XM_SIZE >> 20));
+        }
+        if ((xfb_addr[b] & 3) || !xm_inside(xfb_addr[b], xfb_size[b])) { stat_xm_fallback++; return false; }
+    }
+    for (int b = 0; b < 4; b++) {
+        if (!xfb_addr[b] || !xfb_size[b]) continue;
+        uint64_t o = xfb_addr[b] - xm_lo;
+        for (uint64_t c = o / XM_CHUNK; c <= (o + xfb_size[b] - 1) / XM_CHUNK; c++) xm_written[c >> 3] |= (uint8_t)(1u << (c & 7));
+        int i = 0;
+        while (i < xm_back_n && !(xm_back[i].srcOffset == o && xm_back[i].size == xfb_size[b])) i++;
+        if (i == xm_back_n) {
+            if (xm_back_n == (int)(sizeof xm_back / sizeof *xm_back)) {  // (full: one range over them all)
+                uint64_t lo = xm_back[0].srcOffset, hi = lo + xm_back[0].size;
+                for (int k = 1; k < xm_back_n; k++) {
+                    if (xm_back[k].srcOffset < lo) lo = xm_back[k].srcOffset;
+                    if (xm_back[k].srcOffset + xm_back[k].size > hi) hi = xm_back[k].srcOffset + xm_back[k].size;
+                }
+                xm_back[0] = (VkBufferCopy){lo, xm_lo - gwin_base + lo, hi - lo};
+                xm_back_n = 1;
+            }
+            xm_back[xm_back_n++] = (VkBufferCopy){o, xm_lo - gwin_base + o, xfb_size[b]};
+        }
+    }
+    return true;
+}
+
+// a vertex stream inside the mirror's transform feedback output: read there
+static bool xm_lookup(uint64_t a, uint64_t n, VkBuffer *buf, VkDeviceSize *off) {
+    if (!xm_buf || !xm_all_written(a, n)) return false;
+    *buf = xm_buf;
+    *off = a - xm_lo;
+    return true;
+}
+
+// the submission's end (outside any pass): what transform feedback wrote, to the heap
+static void xm_copy_back(VkCommandBuffer cb) {
+    if (!xm_back_n || !xm_buf || !gmem_buf) { xm_back_n = 0; return; }
+    vk_full_barrier(cb);
+    vkCmdCopyBuffer(cb, xm_buf, gmem_buf, (uint32_t)xm_back_n, xm_back);
+    vk_full_barrier(cb);
+    xm_back_n = 0;
+}
+
 static void gfast_prepare(VkCommandBuffer cb) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("LARECOMP_VK_GMEM_FAST"); on = !e || atoi(e) != 0; }
@@ -2443,13 +2540,16 @@ void vc_flush(void) {
 // device-local cache above, else read in place - no per-draw copy, no index scan for the copy size. The game fences its
 // CPU writes as on the Switch. Falls back to copies outside the heap or without the import; LARECOMP_VK_COPY_VERTICES=1
 // forces copies.
+
 static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
     static int copy = -1;
     if (copy < 0) copy = getenv("LARECOMP_VK_COPY_VERTICES") != NULL;
     if (copy || addr < gwin_base) return false;
     if (addr + size > gwin_base + gmem_size && gwin_want() != gmem_tried) { gmem_tried = gwin_want(); gmem_info(); }
     if (!gmem_buf || addr + size > gwin_base + gmem_size) return false;
-    if (vcache_lookup(addr, size, buf, off)) return true;
+    if (vcache_lookup(addr, size, buf, off)) { stat_vtx_cached += size; return true; }
+    if (xm_lookup(addr, size, buf, off)) { stat_vtx_cached += size; return true; }
+    stat_vtx_host += size;
     *buf = gmem_buf;
     *off = addr - gwin_base;
     return true;
@@ -2472,6 +2572,8 @@ void vk_exec_reset(void) {
         gmem_mem = VK_NULL_HANDLE;
     }
     gmem_size = gmem_tried = 0;
+    xm_lo = 0, xm_back_n = 0;  // (the transform feedback mirror: placed again, nothing written yet)
+    memset(xm_written, 0, sizeof xm_written);
     for (int i = 0; i < VC_TAB; i++)  // (the vertex cache: copies of the old pages)
         if (vc_tab[i].buf) vmaDestroyBuffer(g_vk.vma, vc_tab[i].buf, vc_tab[i].mem);
     memset(vc_tab, 0, sizeof vc_tab);
@@ -2554,7 +2656,8 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         for (int b = 0; b < 4; b++) {
             uint64_t a = xfb_addr[b];
             if (!a || a < gwin_base || a - gwin_base + xfb_size[b] > gwin_max || (a & 3)) continue;
-            uint32_t u[4] = {(uint32_t)((a - gwin_base) >> 2), (uint32_t)(xfb_size[b] >> 2), 1, 0};  // (offset, size in words)
+            uint64_t base = xm_draw ? xm_lo : gwin_base;  // (the transform feedback mirror's offsets, or the heap's)
+            uint32_t u[4] = {(uint32_t)((a - base) >> 2), (uint32_t)(xfb_size[b] >> 2), 1, 0};  // (offset, size in words)
             memcpy(rs[66 + b], u, 16);
         }
     for (int i = 0; i < p->nbinds; i++) {
@@ -2577,7 +2680,8 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
             bi[n] = cbuf_info(stage, si, (int)b->binding, gx, gy, gz);
             w[n].pBufferInfo = &bi[n];
         } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
-            bi[n] = b->binding == GFAST_BUFFER_INDEX ? gfast_info() : gmem_info();
+            bi[n] = b->binding == GFAST_BUFFER_INDEX ? gfast_info()
+                  : b->binding == XFB_BUFFER_INDEX && xm_draw ? (VkDescriptorBufferInfo){xm_buf, 0, XM_SIZE} : gmem_info();
             w[n].pBufferInfo = &bi[n];
         } else {
             continue;  // rscale / tint: written below, once the textures (and their scales) are known
@@ -2838,6 +2942,7 @@ static void draw(CmdRec *r, bool indexed) {
         for (int b = 0; b < 4; b++)
             if (xfb_addr[b] >= gwin_base && xfb_size[b] && xfb_addr[b] - gwin_base < gwin_max)
                 vc_mark_gpu(xfb_addr[b] - gwin_base, xfb_addr[b] - gwin_base + xfb_size[b]);
+        xm_draw = xm_prepare();
         static int nlog;
         if (nlog++ < 24)
             LOG("[xfb] draw indexed %d mode %llu first %llx count %llu | buffers %llx+%llx %llx+%llx %llx+%llx\n", indexed,
@@ -4190,7 +4295,7 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_DISPATCH: dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]); break;
         case CMD_DRAW_ARRAYS: draw(r, false); break;
         case CMD_DRAW_ELEMENTS: draw(r, true); break;
-        case CMD_BEGIN_XFB: xfb_on = true; break;
+        case CMD_BEGIN_XFB: xfb_on = true; stat_xfb_sessions++; break;
         case CMD_END_XFB: {
             xfb_on = false;
             static int nlog = -1;  // (debug) LARECOMP_LOG_XFB_DATA=<n>: the first entries of n sessions' buffers, as written

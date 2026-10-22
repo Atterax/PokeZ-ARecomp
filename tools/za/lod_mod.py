@@ -15,6 +15,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument('--ooz', required=True)
 ap.add_argument('--romfs', default='extracted/romfs')
 ap.add_argument('--out', default='mods/MaxLOD')
+ap.add_argument('--levels', type=int, default=0, help='0: always the full mesh; N: each LOD N levels more detailed')
 args = ap.parse_args()
 M64 = (1 << 64) - 1
 
@@ -51,7 +52,7 @@ def pack_hashes(path):
 
 
 def full_lod(d):
-    """the model with every mesh slot on its full mesh (the one without _lodN), or None if it has no LODs"""
+    """the model with its mesh slots on more detailed meshes (--levels), or None if it has no LODs"""
     fb = trinity.FB(d)
     root = fb.u32(0)
     t = fb.table(root)
@@ -66,13 +67,17 @@ def full_lod(d):
         if not f or f[0] is None: return None
         s = f[0] + fb.u32(f[0])
         names.append((mt, d[s + 4:s + 4 + fb.u32(s)].decode('latin1')))
-    full = [mt for mt, nm in names if not re.search(r'_lod\d+\.trmsh$', nm)]
-    if len(full) != 1 or not any(re.search(r'_lod\d+\.trmsh$', nm) for _, nm in names): return None
+    level = {mt: int(m.group(1)) if (m := re.search(r'_lod(\d+)\.trmsh$', nm)) else 0 for mt, nm in names}
+    by_level = {lv: mt for mt, lv in level.items()}
+    if 0 not in by_level or len(by_level) < 2: return None
     out = bytearray(d)
     for i in range(n):
         e = p + 4 * i
-        if full[0] <= e: return None  # (an offset must point forward)
-        struct.pack_into('<I', out, e, full[0] - e)
+        mt = e + fb.u32(e)
+        want = max(level[mt] - args.levels, 0) if args.levels else 0  # (the nearest more detailed version there is)
+        while want not in by_level: want -= 1
+        if by_level[want] <= e: return None  # (an offset must point forward)
+        struct.pack_into('<I', out, e, by_level[want] - e)
     return bytes(out), names
 
 
