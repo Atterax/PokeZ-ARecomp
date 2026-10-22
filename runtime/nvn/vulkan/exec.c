@@ -2168,15 +2168,18 @@ static VkDescriptorBufferInfo gfast_info(void) {
 // their buffers in one ~6 MB arena - and its draws then read the results as vertex streams. Written into the guest
 // heap's import (host memory), every vertex was a scattered write across PCIe: 3 ms of GPU time a frame (7 with
 // mods/MaxLOD). Instead the sessions write a device-local mirror of the arena (XFB_BUFFER_INDEX), the vertex streams
-// inside parts written that way read it (guest_direct), and at each submission's end the parts written are copied
-// back to the heap in one transfer, for anything else that reads them there. Ranges outside the mirror's 64 MB
+// inside parts written that way read it (guest_direct), and at each session's end the parts written are copied back
+// to the heap (one small DMA transfer), for anything else that reads them there. Ranges outside the mirror's 64 MB
 // window go to the heap as before. LARECOMP_VK_XFB_MIRROR=0: off.
 #define XM_SIZE (64ull << 20)
 #define XM_CHUNK 256ull
 static VkBuffer xm_buf;
 static VmaAllocation xm_mem;
 static uint64_t xm_lo;  // guest address of the mirror's first byte (0: not placed yet)
-static uint8_t xm_written[XM_SIZE / XM_CHUNK / 8];  // chunks written by transform feedback (current in the mirror)
+// the frame each chunk was last written by transform feedback (+1; 0: never): only this frame's are read from the
+// mirror - the game reuses the arena's memory (other data written by the CPU when areas / outfits change: read from
+// the mirror, a stale skinning drew the player black)
+static uint32_t xm_written[XM_SIZE / XM_CHUNK];
 static VkBufferCopy xm_back[256];  // this submission's written ranges (mirror -> heap)
 static int xm_back_n;
 static bool xm_draw;  // this draw's transform feedback goes to the mirror
@@ -2192,8 +2195,9 @@ static bool xm_inside(uint64_t a, uint64_t n) { return xm_lo && a >= xm_lo && a 
 
 static bool xm_all_written(uint64_t a, uint64_t n) {
     if (!n || !xm_inside(a, n)) return false;
+    uint32_t now = (uint32_t)vk_frame_counter() + 1;
     for (uint64_t c = (a - xm_lo) / XM_CHUNK; c <= (a + n - 1 - xm_lo) / XM_CHUNK; c++)
-        if (!(xm_written[c >> 3] >> (c & 7) & 1)) return false;
+        if (xm_written[c] != now) return false;
     return true;
 }
 
@@ -2220,7 +2224,8 @@ static bool xm_prepare(void) {
     for (int b = 0; b < 4; b++) {
         if (!xfb_addr[b] || !xfb_size[b]) continue;
         uint64_t o = xfb_addr[b] - xm_lo;
-        for (uint64_t c = o / XM_CHUNK; c <= (o + xfb_size[b] - 1) / XM_CHUNK; c++) xm_written[c >> 3] |= (uint8_t)(1u << (c & 7));
+        uint32_t now = (uint32_t)vk_frame_counter() + 1;
+        for (uint64_t c = o / XM_CHUNK; c <= (o + xfb_size[b] - 1) / XM_CHUNK; c++) xm_written[c] = now;
         int i = 0;
         while (i < xm_back_n && !(xm_back[i].srcOffset == o && xm_back[i].size == xfb_size[b])) i++;
         if (i == xm_back_n) {
@@ -4298,6 +4303,9 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_BEGIN_XFB: xfb_on = true; stat_xfb_sessions++; break;
         case CMD_END_XFB: {
             xfb_on = false;
+            // the mirror's output, to the heap right away: shaders read it there as storage (e.g. the characters'
+            // shading - left for the submission's end, cutscenes drew them black and scenery vanished)
+            if (xm_back_n) { vk_end_pass(); xm_copy_back(vk_cmd()); }
             static int nlog = -1;  // (debug) LARECOMP_LOG_XFB_DATA=<n>: the first entries of n sessions' buffers, as written
             if (nlog < 0) nlog = getenv("LARECOMP_LOG_XFB_DATA") ? atoi(getenv("LARECOMP_LOG_XFB_DATA")) : 0;
             if (nlog > 0 && renderer_present_count() > 600 && gmem_buf) {
