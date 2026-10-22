@@ -2815,6 +2815,19 @@ static void xfb_note(void) {
 }
 
 static void draw_(CmdRec *r, bool indexed);
+// A draw of a handful of vertices - a full-screen pass: post-processing, a menu's backdrop, the composite into the
+// window image - whose shader or pipeline is still being built is waited for (a few ms, once) rather than skipped:
+// skipping one of those left the whole frame black (Pokémon Z-A: a black flash as a menu opened or closed).
+// Scene draws are still skipped until ready (a moment's pop-in instead of a hitch).
+static bool wait_built(_Atomic int *state, const CmdRec *r) {
+    if (atomic_load(state) == 1) return true;
+    if (r->x[2] > 6) return false;
+    uint64_t t0 = SDL_GetTicksNS();
+    while (atomic_load(state) == 0 && SDL_GetTicksNS() - t0 < 2000000000ull) SDL_Delay(1);
+    static int n;
+    if (n++ < 20) LOG("[vk] full-screen draw waited %.1f ms for its shader / pipeline\n", (SDL_GetTicksNS() - t0) / 1e6);
+    return atomic_load(state) == 1;
+}
 static void draw(CmdRec *r, bool indexed) {
     PROF_T0();
     if (xfb_on) {
@@ -2855,7 +2868,7 @@ static void draw_(CmdRec *r, bool indexed) {
         }
     }
     Prog *pr = get_program(st.program, &vkey, &fkey);
-    if (!pr || atomic_load(&pr->state) != 1) { stat_skipped_here(); return; }
+    if (!pr || !wait_built(&pr->state, r)) { stat_skipped_here(); return; }
     g_mirror_w = 0;
     {   // mirror mode (runtime/hle/mirror.c; as renderer.m): the scene's composite into the window image is mirrored
         extern bool mirror_draw(bool composite);
@@ -2975,7 +2988,7 @@ static void draw_(CmdRec *r, bool indexed) {
         pipe_tab[pslot].pipe = pp;
         run_job(build_pipeline, pp);
     }
-    if (atomic_load(&pp->state) != 1) { stat_skipped_here(); return; }
+    if (!wait_built(&pp->state, r)) { stat_skipped_here(); return; }
     ss_enabled();
     if (ss_need(SS_PIPE, ss.pipe == pp->pipe)) { ss.pipe = pp->pipe; vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe); }
     uint64_t prof_td_ = prof ? SDL_GetTicksNS() : 0;

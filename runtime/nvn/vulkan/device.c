@@ -523,6 +523,85 @@ void backend_represent(void) {
     else SDL_Delay(16);
 }
 
+// ---- black frame probe: each presented game image, shrunk to 32x18 on the GPU and read back a few frames later; a
+// frame that comes out black between normal ones is logged ("[black]") with what was presented - the occasional black
+// flash. Costs one tiny blit a frame. LARECOMP_BLACK_PROBE=0: off.
+typedef struct { VkImage img; VmaAllocation im; VkBuffer buf; VmaAllocation bm; void *map; uint64_t seq, frame;
+                 const void *tex; uint32_t w, h, fmt; bool used; } Probe;
+static Probe probes[4];
+static uint64_t probe_dark_since;
+
+static void probe_check(Probe *p) {
+    const uint8_t *px = p->map;
+    double sum = 0;
+    for (int i = 0; i < 32 * 18; i++) sum += 0.299 * px[4 * i] + 0.587 * px[4 * i + 1] + 0.114 * px[4 * i + 2];
+    double mean = sum / (32 * 18);
+    static double prev = -1;
+    static uint64_t prev_frame;
+    static const void *prev_tex;
+    static int n;
+    if (prev >= 25 && mean < 3 && p->frame == prev_frame + 1 && n++ < 60)
+        LOG("[black] frame %llu presented a black image (mean %.1f, the frame before %.1f): texture %p %ux%u fmt %u%s\n",
+            (unsigned long long)p->frame, mean, prev, p->tex, p->w, p->h, p->fmt,
+            p->tex != prev_tex ? " - another texture than the frame before" : "");
+    if (prev < 3 && mean >= 25 && probe_dark_since && p->frame - probe_dark_since <= 6 && n < 60)
+        LOG("[black] ... normal again at frame %llu (%llu dark frames)\n", (unsigned long long)p->frame,
+            (unsigned long long)(p->frame - probe_dark_since));
+    if (mean < 3 && prev >= 3) probe_dark_since = p->frame;
+    prev = mean, prev_frame = p->frame, prev_tex = p->tex;
+}
+
+static void black_probe(TexBackend *b, const void *tex, uint64_t frame) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("LARECOMP_BLACK_PROBE"); on = !e || atoi(e) != 0; }
+    if (!on || !b->image || (b->aspect & VK_IMAGE_ASPECT_COLOR_BIT) == 0) return;
+    uint64_t done = vk_completed_seq();
+    for (int i = 0; i < 4; i++) {  // (in frame order: the oldest first)
+        Probe *q = NULL;
+        for (int k = 0; k < 4; k++)
+            if (probes[k].used && probes[k].seq <= done && (!q || probes[k].frame < q->frame)) q = &probes[k];
+        if (!q) break;
+        probe_check(q);
+        q->used = false;
+    }
+    Probe *p = NULL;
+    for (int k = 0; k < 4 && !p; k++) if (!probes[k].used) p = &probes[k];
+    if (!p) return;
+    VkCommandBuffer cb = vk_cmd();
+    if (!p->img) {
+        VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+                                .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = {32, 18, 1}, .mipLevels = 1, .arrayLayers = 1,
+                                .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                                .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        if (vmaCreateImage(g_vk.vma, &ci, &ai, &p->img, &p->im, NULL) != VK_SUCCESS) { on = 0; return; }
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 32 * 18 * 4,
+                                 .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ba = {.usage = VMA_MEMORY_USAGE_AUTO,
+                                      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        VmaAllocationInfo info;
+        if (vmaCreateBuffer(g_vk.vma, &bi, &ba, &p->buf, &p->bm, &info) != VK_SUCCESS) { on = 0; return; }
+        p->map = info.pMappedData;
+        vk_image_init_layout(cb, p->img, VK_IMAGE_ASPECT_COLOR_BIT);
+    }
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(cb, &di);
+    VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                      .srcOffsets = {{0, 0, 0}, {(int32_t)b->width, (int32_t)b->height, 1}},
+                      .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {32, 18, 1}}};
+    vkCmdBlitImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, p->img, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+    vkCmdPipelineBarrier2(cb, &di);
+    VkBufferImageCopy rg = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {32, 18, 1}};
+    vkCmdCopyImageToBuffer(cb, p->img, VK_IMAGE_LAYOUT_GENERAL, p->buf, 1, &rg);
+    vkCmdPipelineBarrier2(cb, &di);
+    p->used = true, p->seq = vk_pending_seq(), p->frame = frame, p->tex = tex;
+    p->w = b->width, p->h = b->height, p->fmt = (uint32_t)b->format;
+}
+
 void backend_present(NvnTexture *t) {
     g_last_presented = t;
     TexBackend *b = vk_tex(t, true);
@@ -530,6 +609,7 @@ void backend_present(NvnTexture *t) {
     vk_end_pass();
     extern void vk_texdump_process(void);  // (textures.c: queued texture dumps, between frames)
     vk_texdump_process();
+    black_probe(b, t, total_frames);
     static const float black[4] = {0, 0, 0, 1};
     uint64_t t0 = SDL_GetTicksNS();
     bool have = vk_frame_begin(black);
