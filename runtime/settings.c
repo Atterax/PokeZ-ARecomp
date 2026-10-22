@@ -97,6 +97,7 @@ void settings_load(void) {
         else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
         else if (!strcmp(key, "fps60")) g_settings.fps60 = atoi(val) != 0;
         else if (!strcmp(key, "aniso16")) g_settings.aniso16 = atoi(val) != 0;
+        else if (!strcmp(key, "dynamic_res")) g_settings.game_drs = !strcmp(val, "game");
         else if (!strcmp(key, "tex_hd")) g_settings.tex_hd = atoi(val) != 0;
         else if (!strcmp(key, "tex_dump")) g_settings.tex_dump = atoi(val) != 0;
         else if (!strcmp(key, "resolution")) {
@@ -157,6 +158,7 @@ void settings_save(void) {
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
     fprintf(f, "fps60 = %d\n", g_settings.fps60);
     fprintf(f, "aniso16 = %d\n", g_settings.aniso16);
+    fprintf(f, "dynamic_res = %s\n", g_settings.game_drs ? "game" : "off");
     fprintf(f, "tex_hd = %d\n", g_settings.tex_hd);
     fprintf(f, "tex_dump = %d\n", g_settings.tex_dump);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler == UPSCALE_METALFX ? "metalfx" : g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");

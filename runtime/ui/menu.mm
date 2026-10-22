@@ -460,6 +460,17 @@ static void tab_display(void) {
     }
     opt_toggle("Anisotropic filtering 16x", &g_settings.aniso16, false,
                "Sharper ground and walls at a distance and at grazing angles (applies to textures loaded afterwards).");
+    {   // Pokémon Z-A's dynamic resolution (runtime/nvn/vulkan/exec.c vk_counter_mode)
+        extern bool g_za_frame_hook;
+        if (g_za_frame_hook) {
+            int dr = g_settings.game_drs ? 1 : 0;
+            static const char *drs[] = {"Off (full)", "Game's"};
+            if (opt_choice("Dynamic resolution", &dr, drs, 2, 0,
+                           "Off: the game always renders at its full resolution - sharp. Game's: as on the Switch, it "
+                           "lowers the resolution (to about 55%) whenever it thinks the GPU is busy."))
+                g_settings.game_drs = dr == 1;
+        }
+    }
     {   // HD texture pack (textures/hd: runtime/nvn/vulkan/textures.c hd_switch, tools/za/hd_pack.py): switches at once
         int tx = g_settings.tex_hd ? 1 : 0;
         static const char *tex[] = {"Original", "HD"};

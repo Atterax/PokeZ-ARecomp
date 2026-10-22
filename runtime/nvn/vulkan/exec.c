@@ -118,12 +118,20 @@ static bool cq_calibrated;
 static int counter_mode = -1;  // 0 cpu, 1 frozen, 2 gpu
 static uint64_t stat_counters_gpu;
 
+// Pokémon Z-A sizes its dynamic resolution from these counters - and the GPU time they show includes our translation's
+// passes, so on any PC it sat at its floor (55-65% of 1080p: pixelated, aliased). Unless the setting dynamic_res =
+// game, Z-A's counters show no GPU time (as "frozen"): it renders at full resolution, its frame mode being its own
+// (rt_za_frame_cfg). F1 > Dynamic resolution; applies at once.
 static int vk_counter_mode(void) {
+    static bool env;
     if (counter_mode < 0) {
         const char *e = getenv("LARECOMP_VK_COUNTER");
+        env = e != NULL;
         counter_mode = e && !strcmp(e, "cpu") ? 0 : e && !strcmp(e, "frozen") ? 1 : e && !strcmp(e, "legacy") ? 3 : 2;
         if (counter_mode == 2 && !g_vk.props.limits.timestampComputeAndGraphics) counter_mode = 0;
     }
+    extern bool g_za_frame_hook;
+    if (!env && g_za_frame_hook && !g_settings.game_drs) return 1;
     return counter_mode;
 }
 
