@@ -235,15 +235,53 @@ static void add_unit(Units *us, const char *src, const char *work, const char *s
     u->bytes = stat(src, &st) == 0 ? (unsigned long long)st.st_size : 0;
 }
 
+// Giant functions. The generator gives a function of thousands of instructions a file of its own, and clang -O1
+// takes minutes on some of them (its optimizations grow faster than the function: Pokémon Z-A's slowest, f_7000cc0310,
+// 10 minutes alone - 0.7 s at -O0). 166 such files were half the compile time and held the end of the build (the
+// bar standing at ~96%). Those are compiled at -O0: they run once in a while (setup, loading tables), and the game
+// doesn't notice. The few that do run every frame are listed (HOT_GIANTS, found with the sampling profiler over a
+// recorded play: ~3x slower at -O0) and stay at -O1. LARECOMP_GAMEBUILD_GIANT=<instructions> (0: none) for tests.
+#define GIANT_INSNS 1000
+static const char *const HOT_GIANTS[] = {
+    // Pokémon Z-A 2.0.0 (a recorded 7-minute play: city, Pokémon Center, menus); other builds: all at -O0, slower
+    "f_70000064b0", "f_700001ee3c", "f_7000028b70", "f_7000035f20", "f_7000048720", "f_700009f010",
+    "f_700012ee50", "f_70002182f0", "f_700021bb80", "f_7000435b10", "f_7000b11660", "f_7000da8320",
+    "f_7000e74fb0", "f_7000f15740", "f_7001810840", "f_7001835870", "f_7001b51e18",
+};
+
+static bool cold_giant(const char *src) {
+    static long limit = -2;
+    if (limit == -2) limit = getenv("LARECOMP_GAMEBUILD_GIANT") ? atol(getenv("LARECOMP_GAMEBUILD_GIANT")) : GIANT_INSNS;
+    if (limit <= 0) return false;
+    FILE *f = fopen(src, "rb");
+    if (!f) return false;
+    char line[512], name[64] = "";
+    long labels = 0;
+    int defs = 0;
+    while (fgets(line, sizeof line, f)) {  // (the generator's own layout: "void f_<addr>(Cpu *c) {", "L_<addr>:;")
+        if (line[0] == 'L' && line[1] == '_') labels++;
+        else if (!strncmp(line, "void f_", 7) && strstr(line, "(Cpu *c) {")) {
+            if (++defs > 1) break;
+            sscanf(line + 5, "%63[^(]", name);
+        }
+    }
+    fclose(f);
+    if (defs != 1 || labels <= limit) return false;
+    for (size_t i = 0; i < sizeof HOT_GIANTS / sizeof HOT_GIANTS[0]; i++)
+        if (!strcmp(name, HOT_GIANTS[i])) return false;
+    return true;
+}
+
 // The flags the game code was built with (GAMELIB_CFLAGS, part of its id). zig cc reads -march=<cpu> with its own CPU
 // names (x86_64_v3) and takes "-<feature>" off the end, so x86-64-v3 would be CPU "x86": the same CPU as -mcpu there.
 // A CPU without AVX2 / FMA / BMI2 (gamelib_old_cpu) gets x86-64-v2: the same results (tools/test_simd.py), the fused
 // multiply-adds done by the C library - slower.
-static void add_cflags(Args *a, const Tools *t) {
+static void add_cflags(Args *a, const Tools *t, bool giant) {
     char buf[1024];
     snprintf(buf, sizeof buf, "%s", GAMELIB_CFLAGS);
     for (char *f = strtok(buf, " "); f; f = strtok(NULL, " ")) {
         if (!strcmp(f, "-march=x86-64-v3") && gamelib_old_cpu()) f = (char *)"-march=x86-64-v2";
+        if (giant && f[0] == '-' && f[1] == 'O') f = (char *)"-O0";
         if (t->zig && !strncmp(f, "-march=", 7)) {
             char cpu[128];
             snprintf(cpu, sizeof cpu, "-mcpu=%s", f + 7);
@@ -258,7 +296,12 @@ static void add_cflags(Args *a, const Tools *t) {
 static PlatProc start_compile(const Tools *t, const Unit *u) {
     Args a = {0};
     compiler(&a, t);
-    add_cflags(&a, t);
+    bool giant = cold_giant(u->src);
+    add_cflags(&a, t, giant);
+    // no debug info (zig cc adds it by default: a fifth of the compile time, and nothing reads it); -O0 in zig cc
+    // also turns on its undefined-behaviour checks, whose runtime the game library doesn't link
+    add(&a, "-g0");
+    if (giant) { add(&a, "-fno-sanitize=all"); add(&a, "-fno-stack-protector"); }
     char inc[1200];
     snprintf(inc, sizeof inc, "-I%s", t->inc);
     add(&a, inc);
