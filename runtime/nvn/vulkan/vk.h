@@ -36,15 +36,11 @@ VK_DEVICE_COMMANDS_13(VK_DECLARE_COMMAND_13)
 #undef VK_DECLARE_COMMAND_13
 #define vkGetSemaphoreCounterValue vkp_vkGetSemaphoreCounterValue
 #define vkWaitSemaphores vkp_vkWaitSemaphores
-#define vkCmdBeginRendering vkp_vkCmdBeginRendering
-#define vkCmdEndRendering vkp_vkCmdEndRendering
 #define vkCmdSetCullMode vkp_vkCmdSetCullMode
-#define vkCmdSetDepthBiasEnable vkp_vkCmdSetDepthBiasEnable
 #define vkCmdSetDepthCompareOp vkp_vkCmdSetDepthCompareOp
 #define vkCmdSetDepthTestEnable vkp_vkCmdSetDepthTestEnable
 #define vkCmdSetDepthWriteEnable vkp_vkCmdSetDepthWriteEnable
 #define vkCmdSetFrontFace vkp_vkCmdSetFrontFace
-#define vkCmdSetPrimitiveRestartEnable vkp_vkCmdSetPrimitiveRestartEnable
 #define vkCmdSetPrimitiveTopology vkp_vkCmdSetPrimitiveTopology
 #define vkCmdSetStencilOp vkp_vkCmdSetStencilOp
 #define vkCmdSetStencilTestEnable vkp_vkCmdSetStencilTestEnable
@@ -54,11 +50,40 @@ VK_DEVICE_COMMANDS_13(VK_DECLARE_COMMAND_13)
 typedef struct {
     uint32_t api;  // the Vulkan version used: the device's, at most 1.3
     bool sync1;    // no synchronization2: barriers, submits and timestamps through the Vulkan 1.0 commands
+    bool render_pass;  // no dynamic rendering: render passes and framebuffers (compat_rp.c)
+    bool no_eds2;      // no extended dynamic state 2: primitive restart in the pipeline key, depth bias always on in
+                       // the pipeline (its values are dynamic and zero while the game has it off: the same)
 } VkCompat;
 extern VkCompat g_vkc;
 void vkc_CmdPipelineBarrier2(VkCommandBuffer cb, const VkDependencyInfo *d);
 VkResult vkc_QueueSubmit2(VkQueue q, uint32_t n, const VkSubmitInfo2 *si, VkFence fence);
 void vkc_CmdWriteTimestamp2(VkCommandBuffer cb, VkPipelineStageFlags2 stage, VkQueryPool pool, uint32_t query);
+// (compat_rp.c)
+void vkc_CmdBeginRendering(VkCommandBuffer cb, const VkRenderingInfo *ri);
+void vkc_CmdEndRendering(VkCommandBuffer cb);
+VkResult vkc_CreateGraphicsPipelines(VkDevice dev, VkPipelineCache cache, uint32_t n, const VkGraphicsPipelineCreateInfo *ci,
+                                     const VkAllocationCallbacks *al, VkPipeline *out);
+VkResult vkc_CreateImageView(VkDevice dev, const VkImageViewCreateInfo *ci, const VkAllocationCallbacks *al, VkImageView *v);
+void vkc_DestroyImageView(VkDevice dev, VkImageView v, const VkAllocationCallbacks *al);
+VkResult vkc_vmaCreateImage(VmaAllocator a, const VkImageCreateInfo *ci, const VmaAllocationCreateInfo *ai, VkImage *img,
+                            VmaAllocation *mem, VmaAllocationInfo *info);
+VkRenderPass vkc_render_pass_for(uint32_t ncolor, const VkFormat *color, VkFormat depth, VkFormat stencil,
+                                 VkSampleCountFlagBits samples, VkImageLayout layout);
+// (no extended dynamic state 2: exec.c bakes these into the pipeline instead)
+static inline void vkc_CmdSetDepthBiasEnable(VkCommandBuffer cb, VkBool32 on) {
+    if (vkp_vkCmdSetDepthBiasEnable) vkp_vkCmdSetDepthBiasEnable(cb, on);
+}
+static inline void vkc_CmdSetPrimitiveRestartEnable(VkCommandBuffer cb, VkBool32 on) {
+    if (vkp_vkCmdSetPrimitiveRestartEnable) vkp_vkCmdSetPrimitiveRestartEnable(cb, on);
+}
+#define vkCmdSetDepthBiasEnable vkc_CmdSetDepthBiasEnable
+#define vkCmdSetPrimitiveRestartEnable vkc_CmdSetPrimitiveRestartEnable
+#define vkCmdBeginRendering vkc_CmdBeginRendering
+#define vkCmdEndRendering vkc_CmdEndRendering
+#define vkCreateGraphicsPipelines vkc_CreateGraphicsPipelines
+#define vkCreateImageView vkc_CreateImageView
+#define vkDestroyImageView vkc_DestroyImageView
+#define vmaCreateImage vkc_vmaCreateImage
 #define vkCmdPipelineBarrier2 vkc_CmdPipelineBarrier2
 #define vkQueueSubmit2 vkc_QueueSubmit2
 #define vkCmdWriteTimestamp2 vkc_CmdWriteTimestamp2

@@ -23,7 +23,10 @@ extern "C" bool vk_imgui_backend_init(void) {
     ii.ImageCount = (g_vk.sc_count > 3 ? g_vk.sc_count : 3) + 1;  // vertex buffers rotate per image: cover frames in flight
     ii.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
     ii.PipelineCache = g_vk.pcache;
-    ii.UseDynamicRendering = true;
+    ii.UseDynamicRendering = !g_vkc.render_pass;  // (else a render pass like vk_frame_begin's: compat_rp.c)
+    if (g_vkc.render_pass)
+        ii.RenderPass = vkc_render_pass_for(1, &g_vk.sc_format, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_1_BIT,
+                                            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     ii.PipelineRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
     ii.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
     ii.PipelineRenderingCreateInfo.pColorAttachmentFormats = &g_vk.sc_format;

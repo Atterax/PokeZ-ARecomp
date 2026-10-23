@@ -1131,7 +1131,8 @@ static const VkDynamicState DYN[] = {
     VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE, VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE, VK_DYNAMIC_STATE_DEPTH_COMPARE_OP,
     VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE, VK_DYNAMIC_STATE_STENCIL_OP, VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE,
     VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE};
-#define NDYN (sizeof DYN / sizeof DYN[0])
+// (the last two are extended dynamic state 2: left out without it, vk.h VkCompat.no_eds2)
+#define NDYN (sizeof DYN / sizeof DYN[0] - (g_vkc.no_eds2 ? 2 : 0))
 
 // Fixed-function state that isn't part of a pipeline is set explicitly on every bind (it persists across pipelines).
 static void dyn_defaults(VkCommandBuffer cb) {
@@ -1603,6 +1604,7 @@ typedef struct {
     uint32_t stride[17], divisor[17], used_streams;
     uint8_t blend[8][8];
     uint8_t blend_on, a2c, topo_class, poly_fill;
+    uint8_t restart;  // (no extended dynamic state 2 only: primitive restart, a strip topology)
     uint32_t write_mask[8];
 } PipeKey;
 
@@ -1654,9 +1656,13 @@ static void build_pipeline(void *arg) {
                                                .vertexAttributeDescriptionCount = na, .pVertexAttributeDescriptions = va};
     VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
                                                  .topology = topo_class_base(k->topo_class)};
+    if (k->restart)  // (a list topology can't take primitive restart: the strip of its class, the draw sets the same)
+        ia.topology = k->topo_class == 1 ? VK_PRIMITIVE_TOPOLOGY_LINE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
+        ia.primitiveRestartEnable = VK_TRUE;
     VkPipelineViewportStateCreateInfo vs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
     VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-                                                 .polygonMode = k->poly_fill ? VK_POLYGON_MODE_FILL : VK_POLYGON_MODE_LINE, .lineWidth = 1};
+                                                 .polygonMode = k->poly_fill ? VK_POLYGON_MODE_FILL : VK_POLYGON_MODE_LINE, .lineWidth = 1,
+                                                 .depthBiasEnable = g_vkc.no_eds2};
     VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
                                                .rasterizationSamples = (VkSampleCountFlagBits)k->samples, .alphaToCoverageEnable = k->a2c};
     VkPipelineDepthStencilStateCreateInfo ds = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
@@ -3147,6 +3153,7 @@ static void draw_(CmdRec *r, bool indexed) {
     k.a2c = st.ms[0xC] != 0;
     k.topo_class = cls;
     k.poly_fill = st.poly[2] != 1;
+    if (g_vkc.no_eds2) k.restart = st.prim_restart && native && (mode == 3 || mode == 5);  // (as SS_PRE below)
     uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
     if (!ph) ph = 1;
     uint32_t pslot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1);

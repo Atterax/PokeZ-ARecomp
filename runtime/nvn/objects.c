@@ -1,4 +1,5 @@
 // NVN objects, builders, and state objects (everything except command recording).
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -112,10 +113,27 @@ NVN(nvnQueueGetTotalCommandMemoryUsed) { RET(0); }
 NVN(nvnQueueGetTotalControlMemoryUsed) { RET(0); }
 NVN(nvnQueueGetTotalComputeMemoryUsed) { RET(0); }
 NVN(nvnQueueResetMemoryUsageCounts) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnQueueResetMemoryUsageCounts\n"); }
+// A texture finalized on one game thread while another thread's nvnQueueSubmitCommands runs a list that reads it
+// through the texture pool was freed under it (its backend pointer then garbage: a crash in vk_view_int_kind, a few
+// times in a dozen runs). The two take turns; recursive, as executing a list may end up finalizing.
+static pthread_mutex_t exec_lock;
+static pthread_once_t exec_lock_once = PTHREAD_ONCE_INIT;
+static void exec_lock_init(void) {
+    pthread_mutexattr_t a;
+    pthread_mutexattr_init(&a);
+    pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&exec_lock, &a);
+    pthread_mutexattr_destroy(&a);
+}
+static void exec_lock_take(void) { pthread_once(&exec_lock_once, exec_lock_init); pthread_mutex_lock(&exec_lock); }
+static void exec_lock_give(void) { pthread_mutex_unlock(&exec_lock); }
+
 NVN(nvnQueueSubmitCommands) {
     int n = (int)A(1);
     const uint64_t *handles = AP(2);
+    exec_lock_take();
     for (int i = 0; i < n; i++) backend_execute(handles[i]);
+    exec_lock_give();
 }
 NVN(nvnQueueFlush) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnQueueFlush\n"); }
 NVN(nvnQueueFinish) { (void)c; renderer_sync(); }
@@ -366,7 +384,12 @@ NVN(nvnTextureInitialize) {
 }
 NVN(nvnTextureFinalize) {
     NvnTexture *t = HOST(NvnTexture, A(0));
-    if (t) { backend_texture_destroyed(t); free(t); }
+    if (t) {
+        exec_lock_take();  // (not while a submitted list may be reading it: nvnQueueSubmitCommands)
+        backend_texture_destroyed(t);
+        free(t);
+        exec_lock_give();
+    }
     SET_HOST(A(0), 0);
 }
 NVN(nvnTextureSetDebugLabel) {
