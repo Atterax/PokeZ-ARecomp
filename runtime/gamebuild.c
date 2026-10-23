@@ -142,7 +142,9 @@ static bool find_tools(Tools *t) {
 #ifdef _WIN32
     if (!rt_resource("lasrecomp.dll.a", "build/lasrecomp.dll.a", t->implib, sizeof t->implib)) return false;
     t->zig_rt[0] = 0;
-    if (t->zig && rt_resource("zig" SEP "rt" SEP "link.rsp", NULL, t->zig_rt, sizeof t->zig_rt)) {
+    // (zig/rt-v2: the same runtime built for x86-64-v2, for gamelib_old_cpu)
+    const char *rsp = gamelib_old_cpu() ? "zig" SEP "rt-v2" SEP "link.rsp" : "zig" SEP "rt" SEP "link.rsp";
+    if (t->zig && rt_resource(rsp, NULL, t->zig_rt, sizeof t->zig_rt)) {
         char *s = strrchr(t->zig_rt, '/'), *b = strrchr(t->zig_rt, '\\');
         if (b > s) s = b;
         if (s) *s = 0;
@@ -235,10 +237,13 @@ static void add_unit(Units *us, const char *src, const char *work, const char *s
 
 // The flags the game code was built with (GAMELIB_CFLAGS, part of its id). zig cc reads -march=<cpu> with its own CPU
 // names (x86_64_v3) and takes "-<feature>" off the end, so x86-64-v3 would be CPU "x86": the same CPU as -mcpu there.
+// A CPU without AVX2 / FMA / BMI2 (gamelib_old_cpu) gets x86-64-v2: the same results (tools/test_simd.py), the fused
+// multiply-adds done by the C library - slower.
 static void add_cflags(Args *a, const Tools *t) {
     char buf[1024];
     snprintf(buf, sizeof buf, "%s", GAMELIB_CFLAGS);
     for (char *f = strtok(buf, " "); f; f = strtok(NULL, " ")) {
+        if (!strcmp(f, "-march=x86-64-v3") && gamelib_old_cpu()) f = (char *)"-march=x86-64-v2";
         if (t->zig && !strncmp(f, "-march=", 7)) {
             char cpu[128];
             snprintf(cpu, sizeof cpu, "-mcpu=%s", f + 7);
@@ -257,7 +262,9 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
     char inc[1200];
     snprintf(inc, sizeof inc, "-I%s", t->inc);
     add(&a, inc);
-    add(&a, "-DGAMELIB_ID=\"" GAMELIB_ID "\"");
+    char id[200];
+    snprintf(id, sizeof id, "-DGAMELIB_ID=\"%s\"", gamelib_id());
+    add(&a, id);
     add(&a, "-c");
     add(&a, u->src);
     add(&a, "-o");
@@ -298,6 +305,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     }
     LOG("[gamebuild] generator %s%s%s, compiler %s%s, %d jobs\n", t.gen, t.gen_script[0] ? " " : "", t.gen_script,
         t.cc, t.zig ? " cc" : "", o->jobs);
+    if (gamelib_old_cpu()) LOG("[gamebuild] CPU without AVX2 / FMA / BMI2: built for x86-64-v2\n");
 
     // 1. the generator, both modules at once; their finished files are compiled while it goes on
     Gen gens[2] = {{.name = "main"}, {.name = "sdk"}};
@@ -476,7 +484,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         char idp[1100];
         snprintf(idp, sizeof idp, "%s.id", lib);
         FILE *f = NULL;
-        if (rename(tmp, lib) != 0 || !(f = fopen(idp, "wb")) || fprintf(f, "%s\n", GAMELIB_ID) < 0) {
+        if (rename(tmp, lib) != 0 || !(f = fopen(idp, "wb")) || fprintf(f, "%s\n", gamelib_id()) < 0) {
             snprintf(why, why_size, "the game code couldn't be saved");
             ok = false;
         }

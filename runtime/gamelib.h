@@ -49,6 +49,10 @@ bool gamelib_load(const char *game_dir, char *why, size_t why_size);
 const GameLibTables *gamelib_tables(void);
 // True when a library usable with this build is in one of those places (without loading it).
 bool gamelib_present(const char *game_dir);
+// An x86-64 CPU without AVX2 / FMA / BMI2: the game code (x86-64-v3) is built for x86-64-v2 here instead
+// (runtime/gamebuild.c), under its own id. The id a library must have on this machine: GAMELIB_ID, + "-v2" then.
+bool gamelib_old_cpu(void);
+const char *gamelib_id(void);
 
 #ifdef __cplusplus
 }

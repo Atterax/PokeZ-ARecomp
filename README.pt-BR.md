@@ -45,7 +45,7 @@ Problemas conhecidos:
 
 ## Como jogar
 
-Requisitos: Windows 10/11 64 bits, um processador com AVX2, uma GPU com Vulkan 1.3 e driver atualizado, ~12 GB livres.
+Requisitos: Windows 10 (1903+) / 11 64 bits, um processador de 2013 ou mais novo com AVX2 (os mais antigos com SSE4.2, como Core i5 de 2ª/3ª geração, também funcionam, mas o jogo roda mais devagar), uma GPU com Vulkan 1.3 e driver atualizado, ~12 GB livres.
 
 O que você precisa do seu próprio console (nada disso vem incluído):
 - **O jogo**: o seu dump de Pokémon Legends: Z-A - o jogo base (`.xci` ou `.nsp`) e, se quiser, a **atualização 2.0.0**

@@ -16,6 +16,19 @@
 static const GameLibTables *g_tables;
 static char g_error[256];
 
+bool gamelib_old_cpu(void) {
+#if defined(__x86_64__)
+    const char *e = getenv("LARECOMP_OLD_CPU");  // (testing it on a newer CPU)
+    if (e && *e == '1') return true;
+    __builtin_cpu_init();
+    return !(__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi2"));
+#else
+    return false;
+#endif
+}
+
+const char *gamelib_id(void) { return gamelib_old_cpu() ? GAMELIB_ID "-v2" : GAMELIB_ID; }
+
 // The library's id file (<library>.id, written next to it by the build): its GAMELIB_ID, read without loading it.
 static bool id_matches(const char *lib) {
     char path[1100], id[128] = {0};
@@ -25,7 +38,7 @@ static bool id_matches(const char *lib) {
     size_t n = fread(id, 1, sizeof id - 1, f);
     fclose(f);
     while (n && (id[n - 1] == '\n' || id[n - 1] == '\r')) id[--n] = 0;
-    return !strcmp(id, GAMELIB_ID);
+    return !strcmp(id, gamelib_id());
 }
 
 static bool exists(const char *p) {
@@ -67,7 +80,7 @@ static const GameLibTables *open_lib(const char *path) {
 #endif
     if (!entry) { snprintf(g_error, sizeof g_error, "%s: not game code", path); return NULL; }
     const GameLibTables *t = entry();
-    if (!t || t->abi != GAMELIB_ABI || !t->id || strcmp(t->id, GAMELIB_ID)) {
+    if (!t || t->abi != GAMELIB_ABI || !t->id || strcmp(t->id, gamelib_id())) {
         snprintf(g_error, sizeof g_error, "%s was built for another version", path);
         return NULL;  // (left loaded: nothing of it runs)
     }

@@ -139,13 +139,14 @@ static void log_to_file_without_console(void) {
     _putenv("LASRECOMP_LOG_APPEND=1");
 }
 
-// The recompiled game code is built for x86-64-v3 (Makefile GENARCH: AVX2, FMA, BMI2): say so instead of crashing
-// with an illegal instruction on an older CPU.
+// The recompiled game code is built for x86-64-v3 (Makefile GENARCH: AVX2, FMA, BMI2), or on the player's machine for
+// x86-64-v2 when the CPU is older (gamelib_old_cpu): say so instead of crashing with an illegal instruction on a CPU
+// without even that.
 static void require_cpu(void) {
     __builtin_cpu_init();
-    if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi2")) return;
-    MessageBoxA(NULL, "ZA Recomp needs a CPU with AVX2 (Intel Haswell / 2013 or newer, AMD Excavator / Zen or newer).",
-                "ZA Recomp", MB_ICONERROR | MB_OK);
+    if (__builtin_cpu_supports("sse4.2") && __builtin_cpu_supports("popcnt")) return;
+    MessageBoxA(NULL, "ZA Recomp needs a CPU with SSE4.2 (Intel Core i3/i5/i7 / 2008 or newer, AMD Bulldozer / 2011 or "
+                "newer).", "ZA Recomp", MB_ICONERROR | MB_OK);
     ExitProcess(1);
 }
 

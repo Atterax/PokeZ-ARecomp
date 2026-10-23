@@ -44,7 +44,7 @@ Known issues:
 
 ## Playing
 
-Requirements: Windows 10/11 64-bit, a CPU with AVX2, a GPU with Vulkan 1.3 and an up-to-date driver, ~12 GB free.
+Requirements: Windows 10 (1903+) / 11 64-bit, a CPU from 2013 or newer with AVX2 (older ones with SSE4.2, e.g. 2nd/3rd gen Core i5, also work but run the game slower), a GPU with Vulkan 1.3 and an up-to-date driver, ~12 GB free.
 
 What you need from your own console (none of it is included):
 - **The game**: your dump of Pokémon Legends: Z-A - the base game (`.xci` or `.nsp`), optionally the **2.0.0 update**
