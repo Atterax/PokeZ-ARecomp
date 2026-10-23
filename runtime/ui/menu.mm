@@ -572,8 +572,8 @@ static void tab_quit(float scale, bool in_game) {
         ask = 0;
     const char *lost = in_game ? "\n\nProgress since your last save is lost." : "";
     char d1[200], d2[200];
-    snprintf(d1, sizeof d1, "Leaves the game and goes back to the LAS Recomp start screen.%s", lost);
-    snprintf(d2, sizeof d2, "Closes LAS Recomp.%s", lost);
+    snprintf(d1, sizeof d1, "Leaves the game and goes back to the ZA Recomp start screen.%s", lost);
+    snprintf(d2, sizeof d2, "Closes ZA Recomp.%s", lost);
     opt_begin("##quit", scale);
     opt_section("Quit");
     if (!ask) {

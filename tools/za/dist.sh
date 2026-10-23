@@ -4,7 +4,7 @@
 # machine (lasgen/ = tools/gen.py frozen by PyInstaller, zig/ = the compiler, gamelib-src/ = the headers it includes).
 # Run from Git Bash with MSYS2 (UCRT64) installed, Python 3.12 (py launcher) and the .NET 8 SDK. Downloads once: zig
 # (ziglang.org, hash checked), the generator's Python packages (PyPI), LibHac (NuGet).
-# The FFmpeg DLLs are MSYS2's (GPL build): for a public release build the LGPL one first (make deps-windows).
+# FFmpeg: the LGPL build from tools/build_deps_windows.sh (build/deps-win, made here once; MSYS2's is GPL).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"
@@ -27,8 +27,11 @@ fi
 USERPROFILE="$(cygpath -w ~)" build/gen-venv/Scripts/python.exe -m PyInstaller --noconfirm --clean --log-level WARN \
     --distpath build/helper --workpath build/pyinstaller tools/lasgen.spec
 build/gen-venv/Scripts/python.exe tools/pe_no_cfg.py build/helper/lasgen/lasgen.exe
-# 3. the exe (release: no console, log in lasrecomp.log) and zig with its runtime built ahead of time
-make -j"$(nproc)" B=$B RELEASE=1 GENARCH="$GENARCH" GENOPT="$GENOPT" $B/lasrecomp.exe
+# 3. the LGPL FFmpeg, the exe (release: no console, log in lasrecomp.log) and zig with its runtime built ahead of time
+SRC_FF=build/deps-win/src/ffmpeg-9.0.2.tar.xz
+[ -f $SRC_FF ] || { mkdir -p build/deps-win/src; /c/Windows/System32/curl.exe -fsSL -o $SRC_FF https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz; }
+bash tools/build_deps_windows.sh
+make -j"$(nproc)" B=$B DEPS="$PWD/build/deps-win" RELEASE=1 GENARCH="$GENARCH" GENOPT="$GENOPT" $B/lasrecomp.exe
 ! nm $B/lasrecomp.exe | grep -q ' f_70'  # (no game code inside)
 FLAGS=$(make -s --eval='pv: ; @echo $(strip $(filter-out -Iruntime,$(GENFLAGS)))' B=$B GENARCH="$GENARCH" GENOPT="$GENOPT" pv)
 bash tools/zig_slim.sh $FLAGS
@@ -48,8 +51,11 @@ cp docs/icon/icon_1024.png "$D/icon.png"
 cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$D/"
 cp third_party/fonts/Baloo2/OFL.txt "$D/Baloo2-OFL.txt"
 cp README.md LICENSE "$D/"
+[ -f README.pt-BR.md ] && cp README.pt-BR.md "$D/"
 cp tools/za/za-default.ini "$D/larecomp.ini"
-ldd $B/lasrecomp.exe | awk '/ucrt64/ && !/vulkan-1/ {print $3}' | sort -u | while read -r f; do cp "$f" "$D/"; done
+PATH="$PWD/build/deps-win/bin:$PATH" ldd $B/lasrecomp.exe | awk '(/ucrt64/ || /deps-win/) && !/vulkan-1/ {print $3}' | sort -u |
+    while read -r f; do cp "$f" "$D/"; done
+! ls "$D" | grep -iE 'x264|x265|xvid|postproc'  # (no GPL codec libraries in the release)
 du -sh "$D"
 if [ "${ZIP:-0}" = 1 ]; then
     (cd build/dist-za && /c/Windows/System32/tar.exe -a -cf ZA-Recomp-windows.zip "ZA Recomp")
