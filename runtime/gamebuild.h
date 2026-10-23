@@ -19,6 +19,11 @@ typedef struct {
 bool gamebuild_run(const char *game_dir, const GameBuildOpts *opts, char *why, size_t why_size);
 // The generator and the compiler are there (shipped builds; a source checkout with tools/venv and clang).
 bool gamebuild_available(void);
+// An x86-64 CPU without AVX2 / FMA / BMI2: the game code (x86-64-v3) is built for x86-64-v2 here instead, under its own
+// id. The id a library must have on this machine: GAMELIB_ID, + "-v2" then (runtime/gamelib.c; declared here, not in
+// gamelib.h - its contents are part of GAMELIB_ID, and a new id would rebuild every player's game code).
+bool gamelib_old_cpu(void);
+const char *gamelib_id(void);
 
 #ifdef __cplusplus
 }

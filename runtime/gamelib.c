@@ -10,6 +10,7 @@
 #include <dlfcn.h>
 #endif
 
+#include "gamebuild.h"
 #include "paths.h"
 #include "rt.h"
 
