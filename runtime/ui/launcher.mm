@@ -99,21 +99,21 @@ static const char *build_version(const uint8_t id[8]) {
 }
 static bool build_is_za(const uint8_t id[8]) { return build_version(id) && memcmp(id, BUILD_ID, 8); }
 // The release tag this build is (also names the release files; Makefile / tools/bundle_macos.sh / make_dmg.sh read
-// it): beta_<n> until 1.0, then v<major>.<minor>.<patch>.
-#define LARECOMP_VERSION "beta_4"
+// it): ZA Recomp's v<major>.<minor>.<patch> (Hexveil404/PokeZ-ARecomp releases).
+#define LARECOMP_VERSION "v0.1.1"
 
 // ------------------------------------------------------------------ update check
 // The start screen asks GitHub for the project's releases once per launch (a background curl, which macOS and
-// Windows 10+ ship) and offers the best one if it outranks this build: any v1.0.0+ above every beta, betas by
-// number; other tags (the alpha_* ones) are ignored. Offline / no curl / anything unexpected: nothing is shown.
-#define RELEASES_URL "https://api.github.com/repos/peiikai/LASRecomp/releases?per_page=100"
-#define RELEASE_PAGE "https://github.com/peiikai/LASRecomp/releases/tag/"
+// Windows 10+ ship) and offers the best one if it outranks this build: any v<x.y.z> above every beta, betas by
+// number; other tags are ignored. Offline / no curl / anything unexpected: nothing is shown.
+#define RELEASES_URL "https://api.github.com/repos/Hexveil404/PokeZ-ARecomp/releases?per_page=100"
+#define RELEASE_PAGE "https://github.com/Hexveil404/PokeZ-ARecomp/releases/tag/"
 
 static long long tag_rank(const std::string &t) {
     int n, a, b, c;
     char end;
     if (sscanf(t.c_str(), "beta_%d%c", &n, &end) == 1 && n > 0) return n;
-    if (sscanf(t.c_str(), "v%d.%d.%d%c", &a, &b, &c, &end) == 3 && a >= 1 && b >= 0 && c >= 0 && b < 4096 && c < 4096)
+    if (sscanf(t.c_str(), "v%d.%d.%d%c", &a, &b, &c, &end) == 3 && a >= 0 && b >= 0 && c >= 0 && b < 4096 && c < 4096)
         return (1LL << 48) + ((long long)a << 24) + ((long long)b << 12) + c;
     return -1;
 }
@@ -252,8 +252,9 @@ static void set_failure(int k, const std::string &detail = "") {
         "ZA Recomp runs versions 1.0.0 and 2.0.0 of the game (base game, or base game + the 2.0.0 update).",
         "Some files are missing. Choose the folder again; if it happens again, dump the game again.",
         "Make sure there's about 4 GB free and try again. If it keeps happening, report it on GitHub.",
-        "Put the prod.keys (and title.keys) dumped from your own Switch in the folder with the game files.",
-        "Check that prod.keys comes from a console with firmware as new as the update, then try again."};
+        "Put the prod.keys (and title.keys) dumped from your own Switch in the folder with the game files. If it's "
+        "there: turn on file name extensions in Explorer - it may really be named prod.keys.txt or similar.",
+        "The full reason is in lasrecomp.log next to the program."};
     if (k >= 1 && k <= 8) set_job(head[k], true, detail.empty() ? hint[k] : detail + "\n" + hint[k]);
 }
 
@@ -309,18 +310,24 @@ static void find_packages(const std::string &dir, int depth, std::vector<std::st
     for (auto &s : sub) find_packages(s, depth + 1, out);
 }
 
-// The player's prod.keys: in the picked folder (or below), next to the app (keys/), or where emulators keep them
+// The player's prod.keys: in the picked folder (or below), next to the app (keys/), or where emulators keep them.
+// Also under the names Windows' hidden file extensions lead to (prod.keys.txt: saved from a text editor) or that
+// guides use (keys.txt).
+static bool is_keys_name(std::string n) {
+    for (auto &ch : n) ch = (char)tolower((unsigned char)ch);
+    return n == "prod.keys" || n == "prod.keys.txt" || n == "keys.txt" || n == "prod.txt";
+}
 static std::string find_keys(const std::string &src) {
-    std::vector<std::string> cands = {src + "/prod.keys", src + "/keys/prod.keys", src + "/../prod.keys",
-                                      "keys/prod.keys", "prod.keys"};
+    std::vector<std::string> dirs = {src, src + "/keys", src + "/..", "keys", "."};
     if (const char *a = getenv("APPDATA")) {
-        cands.push_back(std::string(a) + "/Ryujinx/system/prod.keys");
-        cands.push_back(std::string(a) + "/yuzu/keys/prod.keys");
+        dirs.push_back(std::string(a) + "/Ryujinx/system");
+        dirs.push_back(std::string(a) + "/yuzu/keys");
     }
-    if (const char *h = getenv("USERPROFILE")) cands.push_back(std::string(h) + "/.switch/prod.keys");
-    if (const char *h = getenv("HOME")) cands.push_back(std::string(h) + "/.switch/prod.keys");
-    for (auto &c : cands)
-        if (file_exists(c)) return c;
+    if (const char *h = getenv("USERPROFILE")) dirs.push_back(std::string(h) + "/.switch");
+    if (const char *h = getenv("HOME")) dirs.push_back(std::string(h) + "/.switch");
+    for (auto &d : dirs)
+        for (const char *n : {"prod.keys", "prod.keys.txt", "keys.txt", "prod.txt"})
+            if (file_exists(d + "/" + n)) return d + "/" + n;
     std::vector<std::string> pk;  // (deeper in the picked folder)
     std::vector<std::string> stack = {src};
     for (int depth = 0; depth < 3 && pk.empty(); depth++) {
@@ -331,7 +338,7 @@ static std::string find_keys(const std::string &src) {
             while (struct dirent *e = readdir(d)) {
                 std::string n = e->d_name;
                 if (n[0] == '.') continue;
-                if (n == "prod.keys") pk.push_back(dir + "/" + n);
+                if (is_keys_name(n)) pk.push_back(dir + "/" + n);
                 else if (is_dir(dir + "/" + n)) next.push_back(dir + "/" + n);
             }
             closedir(d);

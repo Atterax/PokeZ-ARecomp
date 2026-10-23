@@ -1,7 +1,8 @@
 // zaimport <prod.keys> <out dir> <package>...: the game files ZA Recomp runs from, made from the player's own Switch
 // packages (.xci / .nsp: base game, update, DLC) and keys, as the console mounts them: <out>/exefs/ (the update's when
 // there is one), <out>/romfs.bin (the base RomFS with the update applied: BKTR) and <out>/aoc/<title id>.bin (each
-// DLC's RomFS). Title keys come from the packages' tickets, else title.keys next to prod.keys.
+// DLC's RomFS). Title keys come from the packages' tickets, else title.keys next to prod.keys (also title.keys.txt: a
+// name Windows' hidden extensions make easy to end up with).
 // Progress on stdout: "progress <bytes done> <bytes total>"; a failure: exit 1 and "error: <reason>" as the last line.
 // Published self-contained (runtime/ui/launcher.mm runs it from zaimport/ next to the exe).
 using LibHac;
@@ -23,6 +24,14 @@ try
 {
     return Run(args);
 }
+catch (MissingKeyException e)  // (which key, and what to do about it: the players' most common problem)
+{
+    if (e.Type == LibHac.Common.Keys.KeyType.Title)
+        return Fail("a title key is missing: put title.keys from your Switch in the folder with the game files " +
+                    "(packages without their ticket need it)");
+    return Fail($"your prod.keys has no {e.Name}: it comes from a Switch firmware older than the game or its " +
+                "update needs. Dump the keys again (Lockpick_RCM) on a Switch updated to the latest firmware");
+}
 catch (Exception e)
 {
     Console.WriteLine($"error: {e.Message}");
@@ -38,9 +47,12 @@ static int Fail(string why)
 static int Run(string[] args)
 {
     if (args.Length < 3) return Fail("usage: zaimport <prod.keys> <out dir> <package.xci|nsp>...");
-    string titleKeys = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(args[0]))!, "title.keys");
-    var ks = ExternalKeyReader.ReadKeyFile(args[0], File.Exists(titleKeys) ? titleKeys : null);
-    if (ks.HeaderKey.IsZeros()) return Fail("prod.keys has no header_key");
+    string keyDir = Path.GetDirectoryName(Path.GetFullPath(args[0]))!;
+    string? titleKeys = new[] { "title.keys", "title.keys.txt" }.Select(n => Path.Combine(keyDir, n)).FirstOrDefault(File.Exists);
+    var ks = ExternalKeyReader.ReadKeyFile(args[0], titleKeys);
+    if (ks.HeaderKey.IsZeros())
+        return Fail($"{Path.GetFileName(args[0])} has no header_key: it isn't a complete prod.keys. Dump the keys from " +
+                    "your Switch with Lockpick_RCM and use its prod.keys");
 
     // every NCA of every package (the files stay open: their storages read from them)
     var ncas = new List<(Nca nca, string name)>();
@@ -98,7 +110,8 @@ static int Run(string[] args)
         return Fail(ncas.Count == 0 ? "no game packages found" : "the base game of Pokémon Legends Z-A isn't among these files");
     foreach (var n in new[] { base_, upd }.Concat(dlcs))
         if (n != null && n.Header.HasRightsId && !ks.ExternalKeySet.Contains(new RightsId(n.Header.RightsId)))
-            return Fail($"no title key for {n.Header.TitleId:x16} (title.keys next to prod.keys, or a package with its ticket)");
+            return Fail($"no title key for {n.Header.TitleId:x16}: put title.keys from your Switch in the folder with " +
+                        "the game files (packages without their ticket need it)");
 
     string outDir = args[1];
     Directory.CreateDirectory(Path.Combine(outDir, "exefs"));
