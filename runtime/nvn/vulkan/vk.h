@@ -111,6 +111,8 @@ VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uin
 VkImageView vk_dummy_view(int textype);
 VkSampler vk_sampler(NvnSamplerDesc *d);
 VkSampler vk_default_sampler(bool linear);
+VkSampler vk_sampler_nearest(const NvnSamplerDesc *d);  // (integer formats: unfiltered)
+int vk_view_int_kind(NvnTexture *t, const NvnTextureView *v, bool has_view);  // 0 float, 1 uint, 2 sint
 void vk_image_init_layout(VkCommandBuffer cb, VkImage img, VkImageAspectFlags aspect);
 // Destruction once every submission that may use the object has completed.
 void vk_defer_image(VkImage img, VmaAllocation mem);

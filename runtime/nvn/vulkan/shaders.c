@@ -257,6 +257,18 @@ static const char *builtin_src(const char *name, int *stage) {
                "layout(location = 0) out vec4 o;\n"
                "void main() { o = texture(t, uv); }\n";
     }
+    if (!strcmp(name, "depthcopy.frag")) {  // (exec.c depth_blit_draw: a nearest depth blit as a draw)
+        *stage = STAGE_FRAGMENT;
+        // pc.src / pc.dst: x, y, width, height of the regions; the viewport is the destination region
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(push_constant) uniform P { vec4 src; vec4 dst; } pc;\n"
+               "void main() {\n"
+               "  vec2 p = pc.src.xy + (gl_FragCoord.xy - pc.dst.xy) * pc.src.zw / pc.dst.zw;\n"
+               "  ivec2 q = clamp(ivec2(p), ivec2(pc.src.xy), ivec2(pc.src.xy + pc.src.zw) - 1);\n"
+               "  gl_FragDepth = texelFetch(t, q, 0).r;\n"
+               "}\n";
+    }
     // ---- post passes before the present (Video tab "Anti-aliasing" / "Upscaler"): exec.c vk_present_draw.
     // Each draws a fullscreen triangle into an image the size of its output; push constants: two vec4.
     if (!strcmp(name, "post.vert")) {

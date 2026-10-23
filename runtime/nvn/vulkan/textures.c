@@ -7,6 +7,7 @@
 #include <float.h>
 #include <math.h>
 #include <pthread.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1183,6 +1184,54 @@ VkSampler vk_sampler(NvnSamplerDesc *d) {
     VK_CHECK(vkCreateSampler(g_vk.dev, &si, NULL, &s));
     d->backend = (void *)s;
     return s;
+}
+
+// The sampler for a texture with an integer format (exec.c texture_info): d with nearest filtering and no anisotropy -
+// Vulkan can't filter integer formats linearly (Maxwell fetches them unfiltered). Cached by contents.
+VkSampler vk_sampler_nearest(const NvnSamplerDesc *d) {
+    NvnSamplerDesc n = *d;
+    n.backend = NULL;
+    n.mag_filter = 0;
+    n.min_filter = d->min_filter <= 1 ? 0 : 2;  // (mipmapped: nearest level, as linear between levels is filtering too)
+    n.max_aniso = 0;
+    if (n.mag_filter == d->mag_filter && n.min_filter == d->min_filter && d->max_aniso <= 1) return vk_sampler((NvnSamplerDesc *)d);
+    static NvnSamplerDesc tab[256];
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (size_t i = 0; i < offsetof(NvnSamplerDesc, backend); i++) { h ^= ((const uint8_t *)&n)[i]; h *= 0x100000001B3ull; }
+    pthread_mutex_lock(&lock);
+    VkSampler s = VK_NULL_HANDLE;
+    for (uint32_t k = 0, i = (uint32_t)h & 255; k < 256; k++, i = (i + 1) & 255) {
+        if (!tab[i].backend) { tab[i] = n; s = vk_sampler(&tab[i]); break; }
+        NvnSamplerDesc t = tab[i];
+        t.backend = NULL;
+        if (!memcmp(&t, &n, sizeof n)) { s = (VkSampler)tab[i].backend; break; }
+    }
+    pthread_mutex_unlock(&lock);
+    return s ? s : vk_default_sampler(false);  // (table full: hundreds of integer samplers - not seen)
+}
+
+// The numeric type of a sampled view of t (the format vk_view picks): 0 float / normalized, 1 unsigned integer, 2
+// signed integer. The shader declares a usampler / isampler for those (exec.c, ShaderKey.stencil_slots / sint_slots).
+int vk_view_int_kind(NvnTexture *t, const NvnTextureView *v, bool has_view) {
+    VkFormat fmt = vk_format(t->format);
+    TexBackend *b = (TexBackend *)t->backend;
+    if (b && b->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) return 0;  // (stencil: ds_mode)
+    if (b && b->format != fmt) fmt = b->format;  // (fallback images keep their own format)
+    else if (has_view && v && (v->setmask & 4)) fmt = fmt_of(v->format).vf;
+    switch (fmt) {
+    case VK_FORMAT_R8_UINT: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_B8G8R8A8_UINT:
+    case VK_FORMAT_A8B8G8R8_UINT_PACK32: case VK_FORMAT_A2B10G10R10_UINT_PACK32: case VK_FORMAT_A2R10G10B10_UINT_PACK32:
+    case VK_FORMAT_R16_UINT: case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R16G16B16A16_UINT: case VK_FORMAT_R32_UINT:
+    case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32B32_UINT: case VK_FORMAT_R32G32B32A32_UINT: case VK_FORMAT_S8_UINT:
+        return 1;
+    case VK_FORMAT_R8_SINT: case VK_FORMAT_R8G8_SINT: case VK_FORMAT_R8G8B8A8_SINT: case VK_FORMAT_B8G8R8A8_SINT:
+    case VK_FORMAT_A8B8G8R8_SINT_PACK32: case VK_FORMAT_A2B10G10R10_SINT_PACK32: case VK_FORMAT_A2R10G10B10_SINT_PACK32:
+    case VK_FORMAT_R16_SINT: case VK_FORMAT_R16G16_SINT: case VK_FORMAT_R16G16B16A16_SINT: case VK_FORMAT_R32_SINT:
+    case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32B32_SINT: case VK_FORMAT_R32G32B32A32_SINT:
+        return 2;
+    default: return 0;
+    }
 }
 
 VkSampler vk_default_sampler(bool linear) {

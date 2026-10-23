@@ -1390,6 +1390,7 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= vb[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
     for (int k = 0; k < 4; k++) { h ^= (fkey->stencil_slots >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; }
+    for (int k = 0; k < 4; k++) { h ^= (fkey->sint_slots >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; }
     if (!h) h = 1;
     uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
     while (prog_tab[slot].key && prog_tab[slot].key != h) slot = (slot + 1) & (PROG_TAB - 1);
@@ -2629,7 +2630,10 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
                 }
         }
     }
-    if (h && st.spool && tsc < (uint32_t)st.spool->count) smp = vk_sampler(&((NvnSamplerDesc *)st.spool->entries)[tsc]);
+    if (h && st.spool && tsc < (uint32_t)st.spool->count) {
+        NvnSamplerDesc *sd = &((NvnSamplerDesc *)st.spool->entries)[tsc];
+        smp = st_->stencil || st_->sint ? vk_sampler_nearest(sd) : vk_sampler(sd);  // (integer texels: unfiltered)
+    }
     {   // (debug) LARECOMP_CS_DUMMY_TEX=<compute code hex>: that compute shader samples 1x1 black textures
         static uint64_t dummy_cs = ~0ull;
         if (dummy_cs == ~0ull) dummy_cs = getenv("LARECOMP_CS_DUMMY_TEX") ? strtoull(getenv("LARECOMP_CS_DUMMY_TEX"), NULL, 16) : 0;
@@ -2637,7 +2641,7 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
             view = VK_NULL_HANDLE;  // (1: every compute shader - code addresses change between runs)
     }
     if (!view) view = vk_dummy_view(st_->type);
-    if (!smp) smp = vk_default_sampler(true);
+    if (!smp) smp = vk_default_sampler(!st_->stencil && !st_->sint);
     *out = (VkDescriptorImageInfo){smp, view, VK_IMAGE_LAYOUT_GENERAL};
 }
 
@@ -2886,16 +2890,26 @@ static bool topology(uint32_t mode, VkPrimitiveTopology *t, uint8_t *cls) {
     }
 }
 
-// Texture handle slots of a stage bound in NVN depth/stencil mode STENCIL (ShaderKey.stencil_slots)
-static uint32_t stencil_slots(int stage) {
+// Texture handle slots of a stage bound in NVN depth/stencil mode STENCIL or with an unsigned integer format
+// (ShaderKey.stencil_slots: usamplers), and with a signed integer format (*sint: isamplers). Maxwell's fetches give
+// those formats' bits; a float sampler on them is invalid in Vulkan (VUID-vkCmdDraw-format-07753) - NVIDIA returned the
+// bits anyway, other drivers needn't.
+static uint32_t stencil_slots(int stage, uint32_t *sint) {
     uint32_t m = 0;
+    *sint = 0;
     if (!st.tpool) return 0;
     for (int s = 0; s < 32; s++) {
         uint64_t h = st.tex[stage][s];
         uint32_t tic = h & 0xFFFFF;
         if (!h || tic >= (uint32_t)st.tpool->count) continue;
         NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
-        if (!e->tex || !renderer_format_has_stencil(e->tex->format)) continue;
+        if (!e->tex) continue;
+        if (!renderer_format_has_stencil(e->tex->format)) {
+            int k = vk_view_int_kind(e->tex, &e->view, e->has_view);
+            if (k == 1) m |= 1u << s;
+            if (k == 2) *sint |= 1u << s;
+            continue;
+        }
         if ((e->has_view && (e->view.setmask & 16) ? e->view.ds_mode : e->tex->ds_mode) == 1) m |= 1u << s;
     }
     return m;
@@ -2968,8 +2982,8 @@ static void draw_(CmdRec *r, bool indexed) {
     vkey.depth_minus_one = nvn_depth_mode() == 0;
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
-    vkey.stencil_slots = stencil_slots(0);
-    fkey.stencil_slots = stencil_slots(1);
+    vkey.stencil_slots = stencil_slots(0, &vkey.sint_slots);
+    fkey.stencil_slots = stencil_slots(1, &fkey.sint_slots);
     if (xfb_on && st.program->stages[0].control) {  // the program's transform feedback layout (its control section)
         const uint8_t *ctl = st.program->stages[0].control;
         for (int b = 0; b < 4; b++) {
@@ -3709,6 +3723,10 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     if (small_mem) vmaDestroyImage(g_vk.vma, srcimg, small_mem);
 }
 
+static bool depth_blit_ok(VkFormat f);
+static void depth_blit_draw(VkCommandBuffer cb, TexBackend *s, uint32_t slv, uint32_t sly, const int sr[4], TexBackend *d,
+                            uint32_t dlv, uint32_t dly, const int dr[4]);
+
 static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t flags) {
     snap_reason = "tex2tex"; snapshots_invalidate(NULL);
     NvnTexture *st_ = (NvnTexture *)(uintptr_t)src->tex, *dt = (NvnTexture *)(uintptr_t)dst->tex;
@@ -3782,6 +3800,10 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     // scaled / converting copy: the game builds its depth pyramid this way (nearest), colour copies filter if asked
     bool depth = (sa | da) & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
     if (depth && s->format != d->format) return;
+    if (depth && !depth_blit_ok(s->format)) {  // (RADV: no blits of D32_SFLOAT_S8_UINT - the same with a draw)
+        depth_blit_draw(cb, s, slv, sly, (const int[4]){sx0, sy0, sw, sh}, d, dlv, dly, (const int[4]){dx0, dy0, dw, dh});
+        return;
+    }
     VkImageBlit bl = {.srcSubresource = {depth ? (sa & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : sa) : sa, slv, sly, 1},
                       .srcOffsets = {{sx0, sy0, 0}, {sx0 + sw, sy0 + sh, 1}},
                       .dstSubresource = {depth ? (da & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : da) : da, dlv, dly, 1},
@@ -3987,6 +4009,105 @@ static void post_pass(VkCommandBuffer cb, const char *fs, const VkImageView *src
     vkCmdSetViewport(cb, 0, 1, &vp);
     vkCmdSetScissor(cb, 0, 1, &sc);
     vkCmdPushConstants(cb, post_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
+    vkCmdDraw(cb, 3, 1, 0, 0);
+    vkCmdEndRendering(cb);
+}
+
+// ---- depth blits without vkCmdBlitImage: a format without BLIT_SRC / BLIT_DST (Mesa RADV's D32_SFLOAT_S8_UINT, which
+// AMD gets instead of D24S8 - textures.c depth24_stencil8) is scaled by a draw: depthcopy.frag reads the source level
+// (nearest, as the blit) and writes gl_FragDepth into the destination level; its stencil is kept.
+// LARECOMP_VK_DEPTH_BLIT=shader: always (testing it on a GPU that can blit).
+static bool depth_blit_ok(VkFormat f) {
+    static struct { VkFormat f; bool ok; } cache[4];
+    static int forced = -1;
+    if (forced < 0) { const char *e = getenv("LARECOMP_VK_DEPTH_BLIT"); forced = e && !strcmp(e, "shader"); }
+    if (forced) return false;
+    for (int i = 0; i < 4; i++)
+        if (cache[i].f == f) return cache[i].ok;
+    VkFormatProperties p;
+    vkGetPhysicalDeviceFormatProperties(g_vk.phys, f, &p);
+    VkFormatFeatureFlags want = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+    bool ok = (p.optimalTilingFeatures & want) == want;
+    for (int i = 0; i < 4; i++)
+        if (!cache[i].f) { cache[i].f = f; cache[i].ok = ok; break; }
+    if (!ok) LOG("[vk] format %d can't be blitted: depth copies drawn instead\n", (int)f);
+    return ok;
+}
+
+static VkPipelineLayout depth_blit_layout;
+static VkDescriptorSetLayout depth_blit_set_layout;
+
+static VkPipeline depth_blit_pipeline(VkFormat fmt, bool stencil) {
+    static struct { VkFormat f; VkPipeline p; } cache[4];
+    for (int i = 0; i < 4; i++) if (cache[i].p && cache[i].f == fmt) return cache[i].p;
+    if (!depth_blit_layout) {
+        VkDescriptorSetLayoutBinding b = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+        VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b};
+        VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &depth_blit_set_layout));
+        VkPushConstantRange r = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32};
+        VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
+                                         .pSetLayouts = &depth_blit_set_layout, .pushConstantRangeCount = 1, .pPushConstantRanges = &r};
+        VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &ci, NULL, &depth_blit_layout));
+    }
+    VkPipelineShaderStageCreateInfo stages[2] = {
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,
+         .module = vk_builtin_shader("post.vert"), .pName = "main"},
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+         .module = vk_builtin_shader("depthcopy.frag"), .pName = "main"}};
+    VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+                                                 .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+    VkPipelineViewportStateCreateInfo vs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
+    VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+                                                 .polygonMode = VK_POLYGON_MODE_FILL, .lineWidth = 1};
+    VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+                                               .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+    VkPipelineColorBlendStateCreateInfo cb = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dyn};
+    VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .depthAttachmentFormat = fmt,
+                                        .stencilAttachmentFormat = stencil ? fmt : VK_FORMAT_UNDEFINED};
+    VkPipelineDepthStencilStateCreateInfo ds = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+                                                .depthTestEnable = VK_TRUE, .depthWriteEnable = VK_TRUE,
+                                                .depthCompareOp = VK_COMPARE_OP_ALWAYS};
+    VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = 2,
+                                       .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vs,
+                                       .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
+                                       .pColorBlendState = &cb, .pDynamicState = &dy, .layout = depth_blit_layout};
+    VkPipeline p;
+    VK_CHECK(vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p));
+    for (int i = 0; i < 4; i++) if (!cache[i].p) { cache[i].f = fmt; cache[i].p = p; break; }
+    return p;
+}
+
+// sr / dr: x, y, width, height in their levels (copy_texture: inside them, not empty)
+static void depth_blit_draw(VkCommandBuffer cb, TexBackend *s, uint32_t slv, uint32_t sly, const int sr[4], TexBackend *d,
+                            uint32_t dlv, uint32_t dly, const int dr[4]) {
+    static const VkComponentMapping id = {0};
+    bool stencil = d->aspect & VK_IMAGE_ASPECT_STENCIL_BIT;
+    VkPipeline pipe = depth_blit_pipeline(d->format, stencil);  // (before the rendering begins, as post_pass)
+    VkImageView src = vk_image_view(s, VK_IMAGE_VIEW_TYPE_2D, s->format, slv, 1, sly, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
+    VkImageView dst = vk_image_view(d, VK_IMAGE_VIEW_TYPE_2D, d->format, dlv, 1, dly, 1, id, d->aspect);
+    VkRenderingAttachmentInfo da = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = dst,
+                                    .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+                                    .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+    uint32_t lw = level_extent(d->width, dlv), lh = level_extent(d->height, dlv);
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {lw, lh}}, .layerCount = 1,
+                          .pDepthAttachment = &da, .pStencilAttachment = stencil ? &da : NULL};
+    vkCmdBeginRendering(cb, &ri);
+    VkDescriptorSet set = vk_alloc_set(depth_blit_set_layout);
+    VkDescriptorImageInfo ii = {vk_default_sampler(false), src, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0, .descriptorCount = 1,
+                              .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
+    vkUpdateDescriptorSets(g_vk.dev, 1, &w, 0, NULL);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, depth_blit_layout, 0, 1, &set, 0, NULL);
+    VkViewport vp = {(float)dr[0], (float)dr[1], (float)dr[2], (float)dr[3], 0, 1};
+    VkRect2D sc = {{dr[0], dr[1]}, {(uint32_t)dr[2], (uint32_t)dr[3]}};
+    vkCmdSetViewport(cb, 0, 1, &vp);
+    vkCmdSetScissor(cb, 0, 1, &sc);
+    float pc[8] = {(float)sr[0], (float)sr[1], (float)sr[2], (float)sr[3], (float)dr[0], (float)dr[1], (float)dr[2], (float)dr[3]};
+    vkCmdPushConstants(cb, depth_blit_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
     vkCmdDraw(cb, 3, 1, 0, 0);
     vkCmdEndRendering(cb);
 }

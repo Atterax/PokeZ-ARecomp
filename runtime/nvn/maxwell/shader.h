@@ -47,19 +47,22 @@ typedef struct {
     uint32_t vs_out_mask;   // fragment: varyings the vertex shader provides
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
     uint32_t stencil_slots; // (GLSL) texture handle slots ((handle_offset - 0x20) / 8) bound in stencil mode
-                            // (NVN depth/stencil mode STENCIL): a usampler, results read as uint bits
+                            // (NVN depth/stencil mode STENCIL) or with an unsigned integer format: a usampler,
+                            // results read as uint bits (what Maxwell's texture fetches give for those)
     // (GLSL vertex) transform feedback: buffer b takes xfb_count[b] 32-bit output components, xfb_stride[b] bytes per
     // vertex. The written varying components go to the buffers in order (location, then x..w). Where (and whether)
     // per draw: rscale[66 + b] = (word offset of buffer b in global memory, -, on, -) as uint bits (binding 18).
     uint8_t xfb_count[4];
     uint16_t xfb_stride[4];
+    uint32_t sint_slots;    // (GLSL) the slots with a signed integer format: an isampler, results read as int bits
 } ShaderKey;
 
 typedef struct {
     uint32_t handle_offset;  // byte offset of the texture handle in the bound texture cbuf
     uint8_t type;            // TEXTYPE_*
     bool shadow, is_array, is_image, bindless;
-    bool stencil;            // (GLSL) a stencil view: usampler (ShaderKey.stencil_slots)
+    bool stencil;            // (GLSL) a stencil view or unsigned integer format: usampler (ShaderKey.stencil_slots)
+    bool sint;               // (GLSL) a signed integer format: isampler (ShaderKey.sint_slots)
     uint32_t bindless_cbuf, bindless_offset;
 } ShaderTexture;
 
