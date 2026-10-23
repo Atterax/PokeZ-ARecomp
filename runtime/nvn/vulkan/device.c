@@ -17,8 +17,11 @@
 
 VkG g_vk;
 #define VK_DEFINE_COMMAND(f) PFN_##f vkp_##f;
-VK_DEVICE_COMMANDS(VK_DEFINE_COMMAND)
+#define VK_DEFINE_COMMAND_13(f, ext) PFN_##f vkp_##f;
+VK_DEVICE_COMMANDS_12(VK_DEFINE_COMMAND)
+VK_DEVICE_COMMANDS_13(VK_DEFINE_COMMAND_13)
 #undef VK_DEFINE_COMMAND
+#undef VK_DEFINE_COMMAND_13
 static SDL_Window *window;
 static atomic_bool ui_ready;
 static VkDebugUtilsMessengerEXT messenger;
@@ -74,7 +77,8 @@ static bool has_ext(VkExtensionProperties *e, uint32_t n, const char *name) {
     return false;
 }
 
-// Discrete GPU first (LARECOMP_GPU=<index> picks one), needs Vulkan 1.3 and a queue that can present.
+// Discrete GPU first, Vulkan 1.3 before 1.2 (LARECOMP_GPU=<index> picks one); needs Vulkan 1.2 and a queue that can
+// present. A Vulkan 1.2 GPU does without the 1.3 features (compat.c).
 static void pick_device(void) {
     uint32_t n = 0;
     vkEnumeratePhysicalDevices(g_vk.inst, &n, NULL);
@@ -87,15 +91,17 @@ static void pick_device(void) {
         vkGetPhysicalDeviceProperties(pd[i], &p);
         LOG("[vk] gpu %u: %s (api %u.%u.%u)\n", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
             VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion));
-        if (p.apiVersion < VK_API_VERSION_1_3) continue;
-        int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 3 : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2 : 1;
+        if (p.apiVersion < VK_API_VERSION_1_2) continue;
+        int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 6 : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 4 : 2;
+        if (p.apiVersion >= VK_API_VERSION_1_3) score++;
         if ((int)i == want) score = 100;
         if (score > best_score) { best_score = score; best = (int)i; }
     }
-    if (best < 0) FATAL("no Vulkan 1.3 device\n");
+    if (best < 0) FATAL("no Vulkan 1.2 device: the GPU driver is too old, or the GPU has no Vulkan 1.2 driver\n");
     g_vk.phys = pd[best];
     free(pd);
     vkGetPhysicalDeviceProperties(g_vk.phys, &g_vk.props);
+    g_vkc.api = g_vk.props.apiVersion >= VK_API_VERSION_1_3 && !ENV("LARECOMP_VK_COMPAT") ? VK_API_VERSION_1_3 : VK_API_VERSION_1_2;
     uint32_t nq = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, NULL);
     VkQueueFamilyProperties *qp = calloc(nq, sizeof *qp);
@@ -164,8 +170,22 @@ static void create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    const char *ext[8];
+    const char *ext[16];
     uint32_t n_ext = 0;
+    // Vulkan 1.2: the 1.3 features the driver has as extensions. LARECOMP_VK_COMPAT=1 takes none of them (the compat.c
+    // ways), =<names> only leaves out those: rendering, sync, eds, eds2 (e.g. =sync)
+    const char *cm = ENV("LARECOMP_VK_COMPAT");
+#define VK_OFF(name) (cm && (!strcmp(cm, "1") || strstr(cm, name)))
+    bool v13 = g_vkc.api >= VK_API_VERSION_1_3;
+    bool x_dr = !v13 && !VK_OFF("rendering") && has_ext(ep, ne, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+    bool x_s2 = !v13 && !VK_OFF("sync") && has_ext(ep, ne, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+    bool x_ds = !v13 && !(VK_OFF("eds") && !strstr(cm, "eds2")) && has_ext(ep, ne, VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
+    bool x_ds2 = !v13 && !VK_OFF("eds2") && has_ext(ep, ne, VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME);
+#undef VK_OFF
+    if (x_dr) ext[n_ext++] = VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME;
+    if (x_s2) ext[n_ext++] = VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME;
+    if (x_ds) ext[n_ext++] = VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME;
+    if (x_ds2) ext[n_ext++] = VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME;
     ext[n_ext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     g_vk.custom_border = has_ext(ep, ne, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
     if (g_vk.custom_border) ext[n_ext++] = VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME;
@@ -192,17 +212,36 @@ static void create_device(void) {
     VkPhysicalDeviceCustomBorderColorFeaturesEXT cbc = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT, .customBorderColors = VK_TRUE,
         .customBorderColorWithoutFormat = VK_TRUE, .pNext = g_vk.divisor ? &div : NULL};
+    void *tail = g_vk.custom_border ? (void *)&cbc : g_vk.divisor ? (void *)&div : NULL;
     VkPhysicalDeviceVulkan13Features f13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
                                             .dynamicRendering = VK_TRUE, .synchronization2 = VK_TRUE,
                                             .shaderDemoteToHelperInvocation = VK_TRUE, .shaderTerminateInvocation = VK_TRUE,
-                                            .maintenance4 = VK_TRUE,
-                                            .pNext = g_vk.custom_border ? (void *)&cbc : g_vk.divisor ? (void *)&div : NULL};
+                                            .maintenance4 = VK_TRUE, .pNext = tail};
+    // (Vulkan 1.2: the extensions' feature structures instead)
+    VkPhysicalDeviceExtendedDynamicState2FeaturesEXT fds2 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT, .extendedDynamicState2 = VK_TRUE, .pNext = tail};
+    if (x_ds2) tail = &fds2;
+    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT fds = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT, .extendedDynamicState = VK_TRUE, .pNext = tail};
+    if (x_ds) tail = &fds;
+    VkPhysicalDeviceSynchronization2FeaturesKHR fs2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR,
+                                                       .synchronization2 = VK_TRUE, .pNext = tail};
+    if (x_s2) tail = &fs2;
+    VkPhysicalDeviceDynamicRenderingFeaturesKHR fdr = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR,
+                                                       .dynamicRendering = VK_TRUE, .pNext = tail};
+    if (x_dr) tail = &fdr;
     VkPhysicalDeviceVulkan12Features f12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
                                             .timelineSemaphore = VK_TRUE, .shaderInt8 = VK_TRUE, .samplerMirrorClampToEdge = VK_TRUE,
                                             .uniformAndStorageBuffer8BitAccess = VK_TRUE, .storageBuffer8BitAccess = VK_TRUE,
                                             .scalarBlockLayout = VK_TRUE, .shaderOutputLayer = have12.shaderOutputLayer,
                                             .samplerFilterMinmax = have12.samplerFilterMinmax,
-                                            .shaderOutputViewportIndex = have12.shaderOutputViewportIndex, .pNext = &f13};
+                                            .shaderOutputViewportIndex = have12.shaderOutputViewportIndex, .pNext = v13 ? (void *)&f13 : tail};
+    if (!v13) {  // (an older driver may lack some: say which, and ask only for what it has)
+#define VK_WANT12(x) if (f12.x && !have12.x) { LOG("[vk] warning: the GPU driver has no " #x "\n"); f12.x = VK_FALSE; }
+        VK_WANT12(timelineSemaphore) VK_WANT12(shaderInt8) VK_WANT12(samplerMirrorClampToEdge)
+        VK_WANT12(uniformAndStorageBuffer8BitAccess) VK_WANT12(storageBuffer8BitAccess) VK_WANT12(scalarBlockLayout)
+#undef VK_WANT12
+    }
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
                                             .storageBuffer16BitAccess = VK_TRUE, .pNext = &f12};
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
@@ -236,14 +275,32 @@ static void create_device(void) {
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
 #define VK_LOAD_COMMAND(f)                                                                                            \
     if (!(vkp_##f = (PFN_##f)vkGetDeviceProcAddr(g_vk.dev, #f)))                                                     \
-        FATAL("the GPU driver has no %s: update it (Vulkan 1.3 is needed)\n", #f);
-    VK_DEVICE_COMMANDS(VK_LOAD_COMMAND)
+        FATAL("the GPU driver has no %s: update it (Vulkan 1.2 is needed)\n", #f);
+    VK_DEVICE_COMMANDS_12(VK_LOAD_COMMAND)
 #undef VK_LOAD_COMMAND
+    // the 1.3 ones: core, or by the extension's name when it was enabled above (NULL otherwise)
+#define VK_LOAD_COMMAND_13(f, ext)                                                                                    \
+    vkp_##f = v13 ? (PFN_##f)vkGetDeviceProcAddr(g_vk.dev, #f) : (PFN_##f)vkGetDeviceProcAddr(g_vk.dev, #f #ext);
+    VK_DEVICE_COMMANDS_13(VK_LOAD_COMMAND_13)
+#undef VK_LOAD_COMMAND_13
+    if (!v13) {  // (an extension's command is only usable if that extension is enabled)
+        if (!x_dr) vkp_vkCmdBeginRendering = NULL, vkp_vkCmdEndRendering = NULL;
+        if (!x_s2) vkp_vkCmdPipelineBarrier2 = NULL, vkp_vkQueueSubmit2 = NULL, vkp_vkCmdWriteTimestamp2 = NULL;
+        if (!x_ds) vkp_vkCmdSetCullMode = NULL;
+        if (!x_ds2) vkp_vkCmdSetDepthBiasEnable = NULL, vkp_vkCmdSetPrimitiveRestartEnable = NULL;
+    }
+    g_vkc.sync1 = !vkp_vkCmdPipelineBarrier2 || !vkp_vkQueueSubmit2 || !vkp_vkCmdWriteTimestamp2;
+    LOG("[vk] Vulkan %u.%u%s: dynamic rendering %s, synchronization2 %s, extended dynamic state %s / %s\n",
+        VK_API_VERSION_MAJOR(g_vkc.api), VK_API_VERSION_MINOR(g_vkc.api), ENV("LARECOMP_VK_COMPAT") ? " (LARECOMP_VK_COMPAT)" : "",
+        vkp_vkCmdBeginRendering ? "yes" : "no", g_vkc.sync1 ? "no (Vulkan 1.0 barriers)" : "yes",
+        vkp_vkCmdSetCullMode ? "yes" : "no", vkp_vkCmdSetPrimitiveRestartEnable ? "yes" : "no");
+    if (!vkp_vkCmdBeginRendering || !vkp_vkCmdSetCullMode || !vkp_vkCmdSetPrimitiveRestartEnable)
+        FATAL("this GPU's driver has no dynamic rendering / extended dynamic state, which ZA Recomp can't do without yet\n");
 
     // (VMA's commands from the driver too, as above)
     VmaVulkanFunctions vf = {.vkGetInstanceProcAddr = vkGetInstanceProcAddr, .vkGetDeviceProcAddr = vkGetDeviceProcAddr};
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.dev, .instance = g_vk.inst,
-                                 .pVulkanFunctions = &vf, .vulkanApiVersion = VK_API_VERSION_1_3};
+                                 .pVulkanFunctions = &vf, .vulkanApiVersion = g_vkc.api};
     VK_CHECK(vmaCreateAllocator(&ai, &g_vk.vma));
 
     VkSemaphoreTypeCreateInfo st = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,

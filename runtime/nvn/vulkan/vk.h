@@ -16,23 +16,28 @@
 #include <vk_mem_alloc.h>  // (Debian / Ubuntu libvulkan-memory-allocator-dev)
 #endif
 
-// The Vulkan 1.2 / 1.3 commands come from the driver (vk_load_device_commands, after vkCreateDevice), not from the
-// loader's exports: a vulkan-1.dll older than 1.3 doesn't have them, and Windows then refuses to start the program
-// ("The procedure entry point vkCmdBeginRendering could not be located") before it can say what is missing.
-#define VK_DEVICE_COMMANDS(X)                                                                                         \
-    X(vkCmdBeginRendering) X(vkCmdEndRendering) X(vkCmdPipelineBarrier2) X(vkCmdWriteTimestamp2) X(vkQueueSubmit2)     \
-    X(vkCmdSetCullMode) X(vkCmdSetDepthBiasEnable) X(vkCmdSetDepthCompareOp) X(vkCmdSetDepthTestEnable)               \
-    X(vkCmdSetDepthWriteEnable) X(vkCmdSetFrontFace) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdSetPrimitiveTopology)   \
-    X(vkCmdSetStencilOp) X(vkCmdSetStencilTestEnable) X(vkGetDeviceBufferMemoryRequirements)                          \
-    X(vkGetDeviceImageMemoryRequirements) X(vkGetSemaphoreCounterValue) X(vkWaitSemaphores)
+// The Vulkan 1.2 / 1.3 commands come from the driver (device.c, after vkCreateDevice), not from the loader's exports:
+// a vulkan-1.dll older than 1.3 doesn't have them, and Windows then refuses to start the program ("The procedure entry
+// point vkCmdBeginRendering could not be located") before it can say what is missing.
+#define VK_DEVICE_COMMANDS_12(X) X(vkGetSemaphoreCounterValue) X(vkWaitSemaphores)
+// Vulkan 1.3 commands: core, or the same command from its KHR / EXT extension on a Vulkan 1.2 driver; NULL when the
+// driver has neither, and compat.c does without (g_vkc)
+#define VK_DEVICE_COMMANDS_13(X)                                                                                      \
+    X(vkCmdBeginRendering, KHR) X(vkCmdEndRendering, KHR) X(vkCmdPipelineBarrier2, KHR) X(vkCmdWriteTimestamp2, KHR)  \
+    X(vkQueueSubmit2, KHR) X(vkCmdSetCullMode, EXT) X(vkCmdSetDepthCompareOp, EXT) X(vkCmdSetDepthTestEnable, EXT)    \
+    X(vkCmdSetDepthWriteEnable, EXT) X(vkCmdSetFrontFace, EXT) X(vkCmdSetPrimitiveTopology, EXT)                      \
+    X(vkCmdSetStencilOp, EXT) X(vkCmdSetStencilTestEnable, EXT) X(vkCmdSetDepthBiasEnable, EXT)                       \
+    X(vkCmdSetPrimitiveRestartEnable, EXT)
 #define VK_DECLARE_COMMAND(f) extern PFN_##f vkp_##f;
-VK_DEVICE_COMMANDS(VK_DECLARE_COMMAND)
+#define VK_DECLARE_COMMAND_13(f, ext) extern PFN_##f vkp_##f;
+VK_DEVICE_COMMANDS_12(VK_DECLARE_COMMAND)
+VK_DEVICE_COMMANDS_13(VK_DECLARE_COMMAND_13)
 #undef VK_DECLARE_COMMAND
+#undef VK_DECLARE_COMMAND_13
+#define vkGetSemaphoreCounterValue vkp_vkGetSemaphoreCounterValue
+#define vkWaitSemaphores vkp_vkWaitSemaphores
 #define vkCmdBeginRendering vkp_vkCmdBeginRendering
 #define vkCmdEndRendering vkp_vkCmdEndRendering
-#define vkCmdPipelineBarrier2 vkp_vkCmdPipelineBarrier2
-#define vkCmdWriteTimestamp2 vkp_vkCmdWriteTimestamp2
-#define vkQueueSubmit2 vkp_vkQueueSubmit2
 #define vkCmdSetCullMode vkp_vkCmdSetCullMode
 #define vkCmdSetDepthBiasEnable vkp_vkCmdSetDepthBiasEnable
 #define vkCmdSetDepthCompareOp vkp_vkCmdSetDepthCompareOp
@@ -43,10 +48,20 @@ VK_DEVICE_COMMANDS(VK_DECLARE_COMMAND)
 #define vkCmdSetPrimitiveTopology vkp_vkCmdSetPrimitiveTopology
 #define vkCmdSetStencilOp vkp_vkCmdSetStencilOp
 #define vkCmdSetStencilTestEnable vkp_vkCmdSetStencilTestEnable
-#define vkGetDeviceBufferMemoryRequirements vkp_vkGetDeviceBufferMemoryRequirements
-#define vkGetDeviceImageMemoryRequirements vkp_vkGetDeviceImageMemoryRequirements
-#define vkGetSemaphoreCounterValue vkp_vkGetSemaphoreCounterValue
-#define vkWaitSemaphores vkp_vkWaitSemaphores
+
+// ---- Vulkan 1.2 GPUs (compat.c): what the driver lacks of Vulkan 1.3 is done another way. LARECOMP_VK_COMPAT=1 takes
+// those ways on a Vulkan 1.3 GPU too (testing them).
+typedef struct {
+    uint32_t api;  // the Vulkan version used: the device's, at most 1.3
+    bool sync1;    // no synchronization2: barriers, submits and timestamps through the Vulkan 1.0 commands
+} VkCompat;
+extern VkCompat g_vkc;
+void vkc_CmdPipelineBarrier2(VkCommandBuffer cb, const VkDependencyInfo *d);
+VkResult vkc_QueueSubmit2(VkQueue q, uint32_t n, const VkSubmitInfo2 *si, VkFence fence);
+void vkc_CmdWriteTimestamp2(VkCommandBuffer cb, VkPipelineStageFlags2 stage, VkQueryPool pool, uint32_t query);
+#define vkCmdPipelineBarrier2 vkc_CmdPipelineBarrier2
+#define vkQueueSubmit2 vkc_QueueSubmit2
+#define vkCmdWriteTimestamp2 vkc_CmdWriteTimestamp2
 
 #include "../nvn.h"
 #include "../maxwell/shader.h"
