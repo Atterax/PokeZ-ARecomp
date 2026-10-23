@@ -36,14 +36,6 @@ VK_DEVICE_COMMANDS_13(VK_DECLARE_COMMAND_13)
 #undef VK_DECLARE_COMMAND_13
 #define vkGetSemaphoreCounterValue vkp_vkGetSemaphoreCounterValue
 #define vkWaitSemaphores vkp_vkWaitSemaphores
-#define vkCmdSetCullMode vkp_vkCmdSetCullMode
-#define vkCmdSetDepthCompareOp vkp_vkCmdSetDepthCompareOp
-#define vkCmdSetDepthTestEnable vkp_vkCmdSetDepthTestEnable
-#define vkCmdSetDepthWriteEnable vkp_vkCmdSetDepthWriteEnable
-#define vkCmdSetFrontFace vkp_vkCmdSetFrontFace
-#define vkCmdSetPrimitiveTopology vkp_vkCmdSetPrimitiveTopology
-#define vkCmdSetStencilOp vkp_vkCmdSetStencilOp
-#define vkCmdSetStencilTestEnable vkp_vkCmdSetStencilTestEnable
 
 // ---- Vulkan 1.2 GPUs (compat.c): what the driver lacks of Vulkan 1.3 is done another way. LARECOMP_VK_COMPAT=1 takes
 // those ways on a Vulkan 1.3 GPU too (testing them).
@@ -51,6 +43,8 @@ typedef struct {
     uint32_t api;  // the Vulkan version used: the device's, at most 1.3
     bool sync1;    // no synchronization2: barriers, submits and timestamps through the Vulkan 1.0 commands
     bool render_pass;  // no dynamic rendering: render passes and framebuffers (compat_rp.c)
+    bool no_eds1;      // no extended dynamic state: cull mode, front face, topology, depth and stencil test state in
+                       // the pipeline key (exec.c FixedState)
     bool no_eds2;      // no extended dynamic state 2: primitive restart in the pipeline key, depth bias always on in
                        // the pipeline (its values are dynamic and zero while the game has it off: the same)
 } VkCompat;
@@ -69,7 +63,40 @@ VkResult vkc_vmaCreateImage(VmaAllocator a, const VkImageCreateInfo *ci, const V
                             VmaAllocation *mem, VmaAllocationInfo *info);
 VkRenderPass vkc_render_pass_for(uint32_t ncolor, const VkFormat *color, VkFormat depth, VkFormat stencil,
                                  VkSampleCountFlagBits samples, VkImageLayout layout);
-// (no extended dynamic state 2: exec.c bakes these into the pipeline instead)
+// (no extended dynamic state 1 / 2: exec.c bakes these into the pipeline instead)
+static inline void vkc_CmdSetCullMode(VkCommandBuffer cb, VkCullModeFlags m) {
+    if (vkp_vkCmdSetCullMode) vkp_vkCmdSetCullMode(cb, m);
+}
+static inline void vkc_CmdSetFrontFace(VkCommandBuffer cb, VkFrontFace f) {
+    if (vkp_vkCmdSetFrontFace) vkp_vkCmdSetFrontFace(cb, f);
+}
+static inline void vkc_CmdSetPrimitiveTopology(VkCommandBuffer cb, VkPrimitiveTopology t) {
+    if (vkp_vkCmdSetPrimitiveTopology) vkp_vkCmdSetPrimitiveTopology(cb, t);
+}
+static inline void vkc_CmdSetDepthTestEnable(VkCommandBuffer cb, VkBool32 on) {
+    if (vkp_vkCmdSetDepthTestEnable) vkp_vkCmdSetDepthTestEnable(cb, on);
+}
+static inline void vkc_CmdSetDepthWriteEnable(VkCommandBuffer cb, VkBool32 on) {
+    if (vkp_vkCmdSetDepthWriteEnable) vkp_vkCmdSetDepthWriteEnable(cb, on);
+}
+static inline void vkc_CmdSetDepthCompareOp(VkCommandBuffer cb, VkCompareOp op) {
+    if (vkp_vkCmdSetDepthCompareOp) vkp_vkCmdSetDepthCompareOp(cb, op);
+}
+static inline void vkc_CmdSetStencilTestEnable(VkCommandBuffer cb, VkBool32 on) {
+    if (vkp_vkCmdSetStencilTestEnable) vkp_vkCmdSetStencilTestEnable(cb, on);
+}
+static inline void vkc_CmdSetStencilOp(VkCommandBuffer cb, VkStencilFaceFlags face, VkStencilOp fail, VkStencilOp pass, VkStencilOp dfail,
+                                      VkCompareOp cmp) {
+    if (vkp_vkCmdSetStencilOp) vkp_vkCmdSetStencilOp(cb, face, fail, pass, dfail, cmp);
+}
+#define vkCmdSetCullMode vkc_CmdSetCullMode
+#define vkCmdSetFrontFace vkc_CmdSetFrontFace
+#define vkCmdSetPrimitiveTopology vkc_CmdSetPrimitiveTopology
+#define vkCmdSetDepthTestEnable vkc_CmdSetDepthTestEnable
+#define vkCmdSetDepthWriteEnable vkc_CmdSetDepthWriteEnable
+#define vkCmdSetDepthCompareOp vkc_CmdSetDepthCompareOp
+#define vkCmdSetStencilTestEnable vkc_CmdSetStencilTestEnable
+#define vkCmdSetStencilOp vkc_CmdSetStencilOp
 static inline void vkc_CmdSetDepthBiasEnable(VkCommandBuffer cb, VkBool32 on) {
     if (vkp_vkCmdSetDepthBiasEnable) vkp_vkCmdSetDepthBiasEnable(cb, on);
 }

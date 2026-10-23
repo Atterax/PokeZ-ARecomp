@@ -286,19 +286,27 @@ static void create_device(void) {
     if (!v13) {  // (an extension's command is only usable if that extension is enabled)
         if (!x_dr) vkp_vkCmdBeginRendering = NULL, vkp_vkCmdEndRendering = NULL;
         if (!x_s2) vkp_vkCmdPipelineBarrier2 = NULL, vkp_vkQueueSubmit2 = NULL, vkp_vkCmdWriteTimestamp2 = NULL;
-        if (!x_ds) vkp_vkCmdSetCullMode = NULL;
+        if (!x_ds)
+            vkp_vkCmdSetCullMode = NULL, vkp_vkCmdSetFrontFace = NULL, vkp_vkCmdSetPrimitiveTopology = NULL,
+            vkp_vkCmdSetDepthTestEnable = NULL, vkp_vkCmdSetDepthWriteEnable = NULL, vkp_vkCmdSetDepthCompareOp = NULL,
+            vkp_vkCmdSetStencilTestEnable = NULL, vkp_vkCmdSetStencilOp = NULL;
         if (!x_ds2) vkp_vkCmdSetDepthBiasEnable = NULL, vkp_vkCmdSetPrimitiveRestartEnable = NULL;
     }
     g_vkc.sync1 = !vkp_vkCmdPipelineBarrier2 || !vkp_vkQueueSubmit2 || !vkp_vkCmdWriteTimestamp2;
     g_vkc.render_pass = !vkp_vkCmdBeginRendering || !vkp_vkCmdEndRendering;
+    g_vkc.no_eds1 = !vkp_vkCmdSetCullMode || !vkp_vkCmdSetFrontFace || !vkp_vkCmdSetPrimitiveTopology ||
+                    !vkp_vkCmdSetDepthTestEnable || !vkp_vkCmdSetDepthWriteEnable || !vkp_vkCmdSetDepthCompareOp ||
+                    !vkp_vkCmdSetStencilTestEnable || !vkp_vkCmdSetStencilOp;
+    if (g_vkc.no_eds1)
+        vkp_vkCmdSetCullMode = NULL, vkp_vkCmdSetFrontFace = NULL, vkp_vkCmdSetPrimitiveTopology = NULL,
+        vkp_vkCmdSetDepthTestEnable = NULL, vkp_vkCmdSetDepthWriteEnable = NULL, vkp_vkCmdSetDepthCompareOp = NULL,
+        vkp_vkCmdSetStencilTestEnable = NULL, vkp_vkCmdSetStencilOp = NULL;
     g_vkc.no_eds2 = !vkp_vkCmdSetDepthBiasEnable || !vkp_vkCmdSetPrimitiveRestartEnable;
     if (g_vkc.no_eds2) vkp_vkCmdSetDepthBiasEnable = NULL, vkp_vkCmdSetPrimitiveRestartEnable = NULL;
     LOG("[vk] Vulkan %u.%u%s: dynamic rendering %s, synchronization2 %s, extended dynamic state %s / %s\n",
         VK_API_VERSION_MAJOR(g_vkc.api), VK_API_VERSION_MINOR(g_vkc.api), ENV("LARECOMP_VK_COMPAT") ? " (LARECOMP_VK_COMPAT)" : "",
         g_vkc.render_pass ? "no (render passes)" : "yes", g_vkc.sync1 ? "no (Vulkan 1.0 barriers)" : "yes",
-        vkp_vkCmdSetCullMode ? "yes" : "no", g_vkc.no_eds2 ? "no (in the pipelines)" : "yes");
-    if (!vkp_vkCmdSetCullMode)
-        FATAL("this GPU's driver has no extended dynamic state, which ZA Recomp can't do without yet\n");
+        g_vkc.no_eds1 ? "no (in the pipelines)" : "yes", g_vkc.no_eds2 ? "no (in the pipelines)" : "yes");
 
     // (VMA's commands from the driver too, as above)
     VmaVulkanFunctions vf = {.vkGetInstanceProcAddr = vkGetInstanceProcAddr, .vkGetDeviceProcAddr = vkGetDeviceProcAddr};
