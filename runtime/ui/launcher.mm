@@ -15,6 +15,7 @@
 #include <pthread.h>
 #include <string>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include <vector>
 #include <algorithm>
@@ -83,6 +84,20 @@ static void save_png(id<MTLTexture> tex, const char *path) {
 #endif
 
 static const uint8_t BUILD_ID[8] = {0xae, 0x16, 0xf7, 0x1e, 0x00, 0x2a, 0xf8, 0xcb};  // Link's Awakening v1.0.0 main
+// Pokémon Legends Z-A's main builds (tools/patches.py ZA_BUILDS): set up from the player's .xci / .nsp and keys by the
+// bundled tools/zaimport (no extracted folder), no romfs/ copy - the game reads romfs.bin (+ aoc/ for the DLC)
+static const struct { uint8_t id[8]; const char *version; } ZA_BUILDS[] = {
+    {{0x72, 0x22, 0xe1, 0x3e, 0xcf, 0x6a, 0xdb, 0x32}, "1.0.0"},
+    {{0x8a, 0x1c, 0x86, 0xc4, 0x37, 0x39, 0x4b, 0x69}, "2.0.0"},
+};
+// the version of a main module's build id: NULL = not one we know
+static const char *build_version(const uint8_t id[8]) {
+    if (!memcmp(id, BUILD_ID, 8)) return "1.0.0";
+    for (auto &b : ZA_BUILDS)
+        if (!memcmp(id, b.id, 8)) return b.version;
+    return NULL;
+}
+static bool build_is_za(const uint8_t id[8]) { return build_version(id) && memcmp(id, BUILD_ID, 8); }
 // The release tag this build is (also names the release files; Makefile / tools/bundle_macos.sh / make_dmg.sh read
 // it): beta_<n> until 1.0, then v<major>.<minor>.<patch>.
 #define LARECOMP_VERSION "beta_4"
@@ -168,17 +183,32 @@ static bool file_exists(const std::string &p) {
     return stat(p.c_str(), &st) == 0;
 }
 
-// The copied game files alone ("" = there), without the game code built from them
-static std::string check_copied_files(const std::string &root) {
-    FILE *f = fopen((root + "/exefs/main").c_str(), "rb");
-    if (!f) return "No game files";
-    uint8_t id[8] = {0};
+// The main module's build id (false: no such file)
+static bool read_build_id(const std::string &main_path, uint8_t id[8]) {
+    FILE *f = fopen(main_path.c_str(), "rb");
+    if (!f) return false;
+    memset(id, 0, 8);
     fseek(f, 0x40, SEEK_SET);
     size_t n = fread(id, 1, 8, f);
     fclose(f);
-    if (n != 8 || memcmp(id, BUILD_ID, 8)) return "Wrong game version (needs v1.0.0)";
-    if (!file_exists(root + "/romfs/region_common") || !file_exists(root + "/romfs.bin")) return "Game data missing";
+    return n == 8;
+}
+
+// The copied game files alone ("" = there), without the game code built from them
+static std::string check_copied_files(const std::string &root) {
+    uint8_t id[8];
+    if (!read_build_id(root + "/exefs/main", id)) return "No game files";
+    if (!build_version(id)) return "Wrong game version";
+    if (!file_exists(root + "/romfs.bin") || (!build_is_za(id) && !file_exists(root + "/romfs/region_common")))
+        return "Game data missing";
     return "";
+}
+
+// "Nintendo Switch · v2.0.0" under the status line: the set-up files' version
+static std::string game_version(const std::string &root) {
+    uint8_t id[8];
+    const char *v = read_build_id(root + "/exefs/main", id) ? build_version(id) : NULL;
+    return v ? v : "?";
 }
 
 // "" = ready to play, else what is wrong
@@ -208,20 +238,23 @@ static void set_job(const std::string &s, bool failed = false, const std::string
 }
 
 // Setup failures: a short headline and what to do next (also LARECOMP_LAUNCHER_SHOT=<f>:fail<1-6>, screenshots)
-enum { FAIL_NOT_FOUND = 1, FAIL_UNUSABLE, FAIL_COPY, FAIL_VERSION, FAIL_MISSING, FAIL_BUILD };
-static void set_failure(int k) {
+enum { FAIL_NOT_FOUND = 1, FAIL_UNUSABLE, FAIL_COPY, FAIL_VERSION, FAIL_MISSING, FAIL_BUILD, FAIL_KEYS, FAIL_IMPORT };
+static void set_failure(int k, const std::string &detail = "") {
     static const char *const head[] = {"", "No game files found in that folder", "Those files can't be used",
                                        "Setup didn't finish", "Wrong version of the game", "Game files incomplete",
-                                       "The game code didn't build"};
+                                       "The game code didn't build", "prod.keys not found",
+                                       "The game couldn't be read from your files"};
     static const char *const hint[] = {
         "",
-        "Choose the folder that holds the game files.",
-        "Choose the folder that holds the game files.",
+        "Choose the folder that holds your Pok\xc3\xa9mon Legends Z-A dump (.xci / .nsp) and your prod.keys.",
+        "Pok\xc3\xa9mon Legends Z-A's base game isn't among those files. Choose the folder with your own dump.",
         "Make sure there's about 12 GB free and try again.",
-        "LAS Recomp needs version 1.0.0 of the game, without updates.",
-        "Some files are missing. Choose the folder again; if it happens again, copy your extracted game files again.",
-        "Make sure there's about 2 GB free and try again. If it keeps happening, report it on GitHub."};
-    if (k >= 1 && k <= 6) set_job(head[k], true, hint[k]);
+        "ZA Recomp runs versions 1.0.0 and 2.0.0 of the game (base game, or base game + the 2.0.0 update).",
+        "Some files are missing. Choose the folder again; if it happens again, dump the game again.",
+        "Make sure there's about 4 GB free and try again. If it keeps happening, report it on GitHub.",
+        "Put the prod.keys (and title.keys) dumped from your own Switch in the folder with the game files.",
+        "Check that prod.keys comes from a console with firmware as new as the update, then try again."};
+    if (k >= 1 && k <= 8) set_job(head[k], true, detail.empty() ? hint[k] : detail + "\n" + hint[k]);
 }
 
 static bool is_dir(const std::string &p) {
@@ -252,17 +285,114 @@ static void find_game(const std::string &dir, int depth, std::string &exefs, std
 }
 
 static bool build_id_ok(const std::string &main_path) {
-    FILE *f = fopen(main_path.c_str(), "rb");
-    if (!f) return false;
-    uint8_t id[8] = {0};
-    fseek(f, 0x40, SEEK_SET);
-    size_t n = fread(id, 1, 8, f);
-    fclose(f);
-    return n == 8 && !memcmp(id, BUILD_ID, 8);
+    uint8_t id[8];
+    return read_build_id(main_path, id) && build_version(id);
 }
 
-// progress (the overlay's bar): the romfs copy, then the image build - each about the size of romfs/
-static std::atomic<unsigned long long> g_done, g_total;
+// ------------------------------------------------------------------ Z-A: the player's packages -> game files
+// Game packages (.xci / .nsp) in the picked folder or a few levels below it
+static void find_packages(const std::string &dir, int depth, std::vector<std::string> &out) {
+    if (depth > 3) return;
+    DIR *d = opendir(dir.c_str());
+    if (!d) return;
+    std::vector<std::string> sub;
+    while (struct dirent *e = readdir(d)) {
+        std::string n = e->d_name;
+        if (n[0] == '.') continue;
+        std::string ext = n.size() > 4 ? n.substr(n.size() - 4) : "";
+        for (auto &ch : ext) ch = (char)tolower((unsigned char)ch);
+        if (is_dir(dir + "/" + n)) sub.push_back(dir + "/" + n);
+        else if (ext == ".xci" || ext == ".nsp") out.push_back(dir + "/" + n);
+    }
+    closedir(d);
+    std::sort(sub.begin(), sub.end());
+    for (auto &s : sub) find_packages(s, depth + 1, out);
+}
+
+// The player's prod.keys: in the picked folder (or below), next to the app (keys/), or where emulators keep them
+static std::string find_keys(const std::string &src) {
+    std::vector<std::string> cands = {src + "/prod.keys", src + "/keys/prod.keys", src + "/../prod.keys",
+                                      "keys/prod.keys", "prod.keys"};
+    if (const char *a = getenv("APPDATA")) {
+        cands.push_back(std::string(a) + "/Ryujinx/system/prod.keys");
+        cands.push_back(std::string(a) + "/yuzu/keys/prod.keys");
+    }
+    if (const char *h = getenv("USERPROFILE")) cands.push_back(std::string(h) + "/.switch/prod.keys");
+    if (const char *h = getenv("HOME")) cands.push_back(std::string(h) + "/.switch/prod.keys");
+    for (auto &c : cands)
+        if (file_exists(c)) return c;
+    std::vector<std::string> pk;  // (deeper in the picked folder)
+    std::vector<std::string> stack = {src};
+    for (int depth = 0; depth < 3 && pk.empty(); depth++) {
+        std::vector<std::string> next;
+        for (auto &dir : stack) {
+            DIR *d = opendir(dir.c_str());
+            if (!d) continue;
+            while (struct dirent *e = readdir(d)) {
+                std::string n = e->d_name;
+                if (n[0] == '.') continue;
+                if (n == "prod.keys") pk.push_back(dir + "/" + n);
+                else if (is_dir(dir + "/" + n)) next.push_back(dir + "/" + n);
+            }
+            closedir(d);
+        }
+        stack.swap(next);
+    }
+    return pk.empty() ? "" : pk[0];
+}
+
+static std::atomic<unsigned long long> g_done, g_total;  // (progress: below)
+static bool g_import_mode;                               // Z-A packages: the bar is the import, then the build
+
+// zaimport (tools/zaimport, shipped as zaimport/zaimport.exe) writes <root>/exefs, romfs.bin, aoc/; its progress
+// lines ("progress <done> <total>") go to the bar, its last line is the reason when it fails
+static bool import_packages(const std::vector<std::string> &pkgs, const std::string &keys, std::string &err) {
+    char tool[1100];
+    if (!rt_resource("zaimport/zaimport" PLAT_EXE_SUFFIX, "build/zaimport/zaimport" PLAT_EXE_SUFFIX,
+                     tool, sizeof tool)) {
+        err = "the game file importer is missing from this copy of ZA Recomp";
+        return false;
+    }
+    std::string log = g_root + "/import.log";
+    std::vector<const char *> argv = {tool, keys.c_str(), g_root.c_str()};
+    for (auto &p : pkgs) argv.push_back(p.c_str());
+    argv.push_back(NULL);
+    PlatProc p = plat_spawn(argv.data(), log.c_str(), false);
+    if (!p) { err = "the game file importer didn't start"; return false; }
+    int r;
+    char last[512] = "";
+    for (;;) {
+        r = plat_proc_wait(p, false);
+        FILE *f = fopen(log.c_str(), "rb");
+        if (f) {  // the newest progress line
+            char buf[4096];
+            fseek(f, 0, SEEK_END);
+            long size = ftell(f);
+            fseek(f, size > (long)sizeof buf - 1 ? size - (long)sizeof buf + 1 : 0, SEEK_SET);
+            size_t k = fread(buf, 1, sizeof buf - 1, f);
+            fclose(f);
+            buf[k] = 0;
+            while (k && (buf[k - 1] == '\n' || buf[k - 1] == '\r')) buf[--k] = 0;
+            char *nl = strrchr(buf, '\n');
+            snprintf(last, sizeof last, "%s", nl ? nl + 1 : buf);
+            unsigned long long d, t;
+            const char *pl = NULL;
+            for (const char *q = strstr(buf, "progress "); q; q = strstr(q + 1, "progress ")) pl = q;
+            if (pl && sscanf(pl, "progress %llu %llu", &d, &t) == 2) g_total = t, g_done = d;
+        }
+        if (r >= 0) break;
+        SDL_Delay(100);
+    }
+    fprintf(stderr, "[launcher] zaimport: exit %d, %s\n", r, last);
+    if (r != 0) {
+        err = !strncmp(last, "error: ", 7) ? last + 7 : last;
+        return false;
+    }
+    remove(log.c_str());
+    return true;
+}
+
+// progress (the overlay's bar): the romfs copy, then the image build - each about the size of romfs/ (g_done, g_total)
 // The bar: copying and the data image are the first tenth, building the game code (runtime/gamebuild.c) the rest
 static unsigned long long g_phase_base;
 static std::atomic<float> g_build_frac{-1};  // -1: not building
@@ -275,7 +405,8 @@ static void build_progress(double f, const char *step) {
 }
 static float extract_progress(void) {
     unsigned long long t = g_total, d = g_done;
-    float b = g_build_frac, f = b >= 0 ? (g_copy_skipped ? b : 0.1f + 0.9f * b) : t ? 0.1f * (float)((double)d / (double)t) : 0;
+    float pre = g_import_mode ? 0.25f : 0.1f;  // (Z-A: reading the packages is a quarter of it)
+    float b = g_build_frac, f = b >= 0 ? (g_copy_skipped ? b : pre + (1 - pre) * b) : t ? pre * (float)((double)d / (double)t) : 0;
     return f < 0 ? 0 : f > 0.99f ? 0.99f : f;
 }
 
@@ -298,8 +429,9 @@ static void *extract_thread(void *) {
     pthread_mutex_lock(&g_lock);
     src = g_src;
     pthread_mutex_unlock(&g_lock);
-    g_done = 0, g_total = 0, g_phase_base = 0, g_build_frac = -1, g_copy_skipped = false;
+    g_done = 0, g_total = 0, g_phase_base = 0, g_build_frac = -1, g_copy_skipped = false, g_import_mode = false;
     std::string exefs, romfs;
+    std::vector<std::string> pkgs;
     bool unusable = false;  // (game packages rather than its files)
     if (src.empty() && check_copied_files(g_root).empty()) {  // copied already (an update needs new game code)
         g_copy_skipped = true;
@@ -308,6 +440,24 @@ static void *extract_thread(void *) {
     }
     set_job("Looking for the game files...");
     find_game(src, 0, exefs, romfs, unusable);
+    if ((exefs.empty() || romfs.empty()) && unusable) {  // packages: Pokémon Legends Z-A's (zaimport reads them)
+        find_packages(src, 0, pkgs);
+        std::string keys = find_keys(src), err;
+        if (keys.empty()) { set_failure(FAIL_KEYS); goto done; }
+        fprintf(stderr, "[launcher] %zu package(s), keys %s\n", pkgs.size(), keys.c_str());
+        rt_remove_game_files(g_root.c_str());
+        mkdir(g_root.c_str(), 0755);
+        g_import_mode = true;
+        set_job("Reading your game files...");
+        if (!import_packages(pkgs, keys, err)) {
+            set_failure(err.find("base game") != std::string::npos || err.find("no game packages") != std::string::npos
+                            ? FAIL_UNUSABLE : FAIL_IMPORT, err);
+            goto done;
+        }
+        if (!build_id_ok(g_root + "/exefs/main")) { set_failure(FAIL_VERSION); goto done; }
+        if (!build_game_code()) goto done;
+        goto check;
+    }
     if (exefs.empty() || romfs.empty()) { set_failure(unusable ? FAIL_UNUSABLE : FAIL_NOT_FOUND); goto done; }
     if (!build_id_ok(exefs + "/main")) { set_failure(FAIL_VERSION); goto done; }
     {
@@ -358,6 +508,96 @@ static void SDLCALL picked(void *, const char *const *files, int) {
     pthread_mutex_lock(&g_lock);
     g_src = files[0];
     pthread_mutex_unlock(&g_lock);
+}
+
+// ------------------------------------------------------------------ a save from the player's Switch (or another copy)
+// The game's save is its own files, as JKSV backs them up on a modded Switch (SD card: JKSV/<game>/<user - date>/,
+// holding "main") and as save/save_0/ holds them here (runtime/services/fs.c): copied over as they are. The picked
+// folder may be that backup, or one above it (the game's JKSV folder: its newest backup). The current save is moved
+// to save/backup-<date>/ first.
+static std::string g_save_pick, g_save_msg;
+static bool g_save_failed;
+
+static void SDLCALL picked_save(void *, const char *const *files, int) {
+    if (!files || !files[0]) return;
+    pthread_mutex_lock(&g_lock);
+    g_save_pick = files[0];
+    pthread_mutex_unlock(&g_lock);
+}
+
+// the folder holding "main" (the newest one, a few levels down)
+static void find_save(const std::string &dir, int depth, std::string &best, time_t &best_t) {
+    struct stat st;
+    if (stat((dir + "/main").c_str(), &st) == 0 && S_ISREG(st.st_mode) && (best.empty() || st.st_mtime > best_t))
+        best = dir, best_t = st.st_mtime;
+    if (depth >= 3) return;
+    DIR *d = opendir(dir.c_str());
+    if (!d) return;
+    std::vector<std::string> sub;
+    while (struct dirent *e = readdir(d)) {
+        std::string n = e->d_name;
+        if (n[0] != '.' && is_dir(dir + "/" + n)) sub.push_back(dir + "/" + n);
+    }
+    closedir(d);
+    for (auto &s : sub) find_save(s, depth + 1, best, best_t);
+}
+
+// plain copies (never links: the game writes its save in place, the backup it came from stays as it was)
+static bool copy_save_tree(const std::string &src, const std::string &dst) {
+    mkdir(dst.c_str(), 0755);
+    DIR *d = opendir(src.c_str());
+    if (!d) return false;
+    bool ok = true;
+    while (struct dirent *e = readdir(d)) {
+        std::string n = e->d_name;
+        if (n == "." || n == "..") continue;
+        std::string a = src + "/" + n, b = dst + "/" + n;
+        if (is_dir(a)) { ok &= copy_save_tree(a, b); continue; }
+        FILE *in = fopen(a.c_str(), "rb"), *out = in ? fopen(b.c_str(), "wb") : NULL;
+        if (in && out) {
+            char buf[65536];
+            size_t k;
+            while ((k = fread(buf, 1, sizeof buf, in)) > 0) ok &= fwrite(buf, 1, k, out) == k;
+        } else {
+            ok = false;
+        }
+        if (in) fclose(in);
+        if (out && fclose(out) != 0) ok = false;
+    }
+    closedir(d);
+    return ok;
+}
+
+static void import_save() {
+    pthread_mutex_lock(&g_lock);
+    std::string pick;
+    pick.swap(g_save_pick);
+    pthread_mutex_unlock(&g_lock);
+    if (pick.empty()) return;
+    std::string from;
+    time_t t = 0;
+    find_save(pick, 0, from, t);
+    g_save_failed = true;
+    if (from.empty()) {
+        g_save_msg = "No save found there (a folder with the file \"main\"). A JKSV backup saved as a .zip needs unzipping first.";
+        return;
+    }
+    mkdir("save", 0755);
+    std::string backup;
+    if (is_dir("save/save_0")) {
+        char name[64];
+        time_t now = time(NULL);
+        strftime(name, sizeof name, "save/backup-%Y%m%d-%H%M%S", localtime(&now));
+        backup = name;
+        if (rename("save/save_0", backup.c_str()) != 0) { g_save_msg = "The current save couldn't be moved aside: nothing changed."; return; }
+    }
+    if (!copy_save_tree(from, "save/save_0")) {
+        g_save_msg = "The save couldn't be copied." + (backup.empty() ? std::string() : " Your previous save is in " + backup + ".");
+        return;
+    }
+    fprintf(stderr, "[launcher] save imported from %s%s%s\n", from.c_str(), backup.empty() ? "" : ", previous one in ", backup.c_str());
+    g_save_failed = false;
+    g_save_msg = "Save imported from " + from + "." + (backup.empty() ? "" : "\nYour previous save was kept in " + backup + ".");
 }
 
 // ------------------------------------------------------------------ the user's own Nintendo fonts (not shipped)
@@ -942,6 +1182,11 @@ extern "C" void launcher_run(const char *root) {
         pthread_create(&th, NULL, extract_thread, NULL);
         pthread_detach(th);
     }
+    if (const char *t = getenv("LARECOMP_LAUNCHER_IMPORT_SAVE")) {  // (test) <folder>: Import save, logged
+        g_save_pick = t;
+        import_save();
+        fprintf(stderr, "[launcher] import save: %s\n", g_save_msg.c_str());
+    }
     if (getenv("LARECOMP_LAUNCHER_DELETE")) {  // (test) what DELETE GAME FILES does, logged; then the start screen
         double gb = rt_game_files_size(g_root.c_str()) / 1e9;
         bool ok = rt_remove_game_files(g_root.c_str());
@@ -1062,7 +1307,7 @@ extern "C" void launcher_run(const char *root) {
             ImGui::SetCursorPos(ImVec2(x0, 120 * s));
             ImGui::PushFont(g_font_title);
             if (page == MAIN) {  // gold to orange, shadowed (not behind the Settings / Game Files windows)
-                const char *t = "LAS Recompiled";
+                const char *t = "ZA Recomp";
                 ImVec2 p = ImGui::GetCursorScreenPos();
                 text_fx(ImGui::GetWindowDrawList(), ImGui::GetFont(), ImGui::GetFontSize(), p, IM_COL32(255, 232, 120, 255),
                         IM_COL32(255, 138, 48, 255), t, 3 * s);
@@ -1283,13 +1528,15 @@ extern "C" void launcher_run(const char *root) {
                     dl->AddLine(ImVec2(x, cy), ImVec2(x + u * 0.35f, cy + u * 0.35f), g, fs * 0.11f);
                     dl->AddLine(ImVec2(x + u * 0.35f, cy + u * 0.35f), ImVec2(x + u, cy - u * 0.4f), g, fs * 0.11f);
                 };
-                std::string src_d = "The folder with your own game folders (exefs/romfs) of The Legend of Zelda: Link's "
-                                    "Awakening for Nintendo Switch, version 1.0.0. The game isn't included with LAS Recomp.";
+                std::string src_d = "The folder with your own dump of Pok\xc3\xa9mon Legends Z-A for Nintendo Switch: the "
+                                    "base game (.xci or .nsp), optionally the 2.0.0 update and the DLC (.nsp), and the "
+                                    "prod.keys from your console. The game isn't included with ZA Recomp.";
                 if (!src.empty()) src_d += "\n\nChosen: " + src;
                 // the step that's running / its result, under the rows and in the Set up row's explanation
                 const std::string &job_line = job;
-                std::string ex_d = "Copies the game files LAS Recomp needs and recompiles the game from them. This only "
-                                   "needs to be done once and may take a while. Your own files aren't changed.";
+                std::string ex_d = "Reads the game files ZA Recomp needs from your dump and recompiles the game into a "
+                                   "native PC program. This only needs to be done once and takes a while (about 6 GB of "
+                                   "space). Your own files aren't changed.";
                 if (!job.empty()) ex_d += "\n\n" + job + (job_hint.empty() ? "" : ".\n" + job_hint);
 
                 // the controller's cursor starts on the first row (not the X), a few frames while the window lays out
@@ -1344,6 +1591,25 @@ extern "C" void launcher_run(const char *root) {
                         if (opt_action("Cancel", "", "Keeps the game files.", true)) g_confirm_delete = false;
                     }
                 }
+                import_save();  // (a folder picked in the dialog: runs here, on the UI thread)
+                opt_section("Save");
+                {
+                    std::string d = "Use a save from your Switch: back it up with JKSV on a modded console, copy the backup "
+                                    "folder from the SD card (JKSV/Pok\xc3\xa9mon Legends Z-A/...) and choose it here. The "
+                                    "save must be from the same game version or older (2.0.0 converts older saves; they "
+                                    "don't go back). Your current save is kept in a backup folder.";
+                    if (!g_save_msg.empty()) d += "\n\n" + g_save_msg;
+                    if (busy) opt_disable_next();
+                    if (opt_action("Import save", "Choose...", d.c_str(), true))
+                        SDL_ShowOpenFolderDialog(picked_save, NULL, win, NULL, false);
+                }
+                if (!g_save_msg.empty()) {
+                    ImGui::Dummy(ImVec2(0, 8 * sc));
+                    ImGui::PushTextWrapPos(0);
+                    ImGui::TextColored(g_save_failed ? ImVec4(1, 0.5f, 0.4f, 1) : ImVec4(0.45f, 0.95f, 0.55f, 1), "%s",
+                                       g_save_msg.c_str());
+                    ImGui::PopTextWrapPos();
+                }
                 if (!job_line.empty()) {  // the current step / result
                     ImGui::Dummy(ImVec2(0, 14 * sc));
                     ImGui::PushTextWrapPos(0);
@@ -1375,7 +1641,7 @@ extern "C" void launcher_run(const char *root) {
                     float f = test_busy ? 0.42f : extract_progress();
                     // (while the game code is built: what's happening, on whose files - runtime/gamebuild.c)
                     bool recompiling = g_build_frac >= 0;
-                    const char *title = recompiling ? "Recompiling the game" : "Setting up the game files";
+                    const char *title = recompiling ? "Recompiling the game for your PC" : "Setting up the game files";
                     static const char *const notes[] = {"This only needs to be done once and may take a while."};
                     int nnotes = recompiling ? 1 : 0;
                     float tfs = g_font_menu->FontSize * 0.75f, sfs = g_font_small->FontSize * 0.85f;
@@ -1421,7 +1687,7 @@ extern "C" void launcher_run(const char *root) {
                 }
                 ImGui::TextColored(ImVec4(0.45f, 0.95f, 0.55f, 1), "Game files ready.");
                 ImGui::SetCursorPosX(x0);
-                ImGui::TextColored(ImVec4(0.66f, 0.76f, 0.98f, 1), "Nintendo Switch  \xc2\xb7  v1.0.0");
+                ImGui::TextColored(ImVec4(0.66f, 0.76f, 0.98f, 1), "Nintendo Switch  \xc2\xb7  v%s", game_version(g_root).c_str());
             } else {
                 ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "!  %s", busy ? "Setting up the game files..." : status.c_str());
                 ImGui::SetCursorPosX(x0);

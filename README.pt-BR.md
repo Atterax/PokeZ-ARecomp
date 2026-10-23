@@ -45,15 +45,40 @@ Problemas conhecidos:
 
 ## Como jogar
 
-Requisitos: Windows 10/11 64 bits, uma GPU com Vulkan 1.3 e driver atualizado.
+Requisitos: Windows 10/11 64 bits, um processador com AVX2, uma GPU com Vulkan 1.3 e driver atualizado, ~12 GB livres.
 
-1. Compile (abaixo) ou pegue uma build pronta, e coloque os arquivos do jogo em `extracted/`:
-   - `extracted/exefs/` (`main`, `main.npdm`, `rtld`, `sdk`) e `extracted/romfs/` + `extracted/romfs.bin`,
-     extraídos da sua própria cópia do jogo.
-2. Opcional: as fontes do sistema do seu console em `fonts/` (`tools/za/nca_font.py` as extrai de um dump do firmware
-   com as suas próprias chaves), depois `python tools/za/xbox_font.py` e `python tools/za/keyboard_font.py` para os
-   ícones de botão.
-3. Rode o `lasrecomp.exe` (ele entra direto no jogo). O log vai para `logs/play.log`.
+O que você precisa do seu próprio console (nada disso vem incluído):
+- **O jogo**: o seu dump de Pokémon Legends: Z-A - o jogo base (`.xci` ou `.nsp`) e, se quiser, a **atualização 2.0.0**
+  e a DLC (`.nsp`). As versões 1.0.0 e 2.0.0 são suportadas.
+- **`prod.keys`** (e `title.keys`) tiradas do seu Switch (Lockpick_RCM).
+
+1. Baixe o zip da release e extraia onde quiser (ex.: `C:\Jogos\ZA Recomp`).
+2. Coloque os seus arquivos `.xci` / `.nsp` e o `prod.keys` / `title.keys` juntos numa pasta.
+3. Abra o `lasrecomp.exe`. Na tela inicial: **Game files folder** -> escolha essa pasta -> **Set up game files**.
+   - Ele lê o jogo dos seus arquivos (cerca de um minuto) e depois **recompila o jogo como um programa nativo de PC
+     na sua máquina** (10 a 30 minutos, dependendo do processador). Isso acontece **uma vez só**: nas próximas vezes o
+     jogo abre direto. Os seus arquivos não são alterados.
+   - Uma versão nova do ZA Recomp que mude o recompilador recompila a partir dos arquivos já preparados (sem precisar
+     escolher a pasta de novo).
+4. Jogue. O log fica em `lasrecomp.log`, ao lado do exe.
+
+Opcional: as fontes do sistema do seu console em `fonts/` (`tools/za/nca_font.py` as extrai de um dump do firmware
+com as suas próprias chaves), depois `python tools/za/xbox_font.py` e `python tools/za/keyboard_font.py` para os
+ícones de botão. Sem elas o texto do jogo usa uma fonte do Windows e os ícones de botão não aparecem.
+
+### Saves
+
+Um jogo novo começa com o save vazio. Os saves ficam em `save/save_0/`, ao lado do exe - são os próprios arquivos de
+save do jogo, iguais aos do Switch, então passam de um para o outro sem conversão:
+
+- **Switch -> PC**: num Switch desbloqueado, faça backup do save com o **JKSV** (o jogo, depois o seu usuário). Copie a
+  pasta do backup do cartão SD (`JKSV/Pokémon Legends Z-A/<usuário - data>/`, com o arquivo `main` dentro) para o PC
+  e, na tela inicial: **Game files** -> **Import save** -> escolha essa pasta (ou a pasta do jogo no JKSV: o backup
+  mais novo é usado). O save atual é movido antes para `save/backup-<data>/`.
+- **PC -> Switch**: copie os arquivos de `save/save_0/` para uma pasta de backup do JKSV no cartão SD e restaure pelo
+  JKSV.
+- **Versões**: um save da 2.0.0 precisa do jogo preparado com a atualização 2.0.0. A 2.0.0 converte um save da 1.0.0
+  na primeira vez que salva, e esse save não abre mais na 1.0.0 - guarde um backup.
 
 Controles (teclado): WASD anda, setas = direcional, Enter = A, Backspace = B, L = X, I = Y, Q / E = L / R,
 1 / 3 = ZL / ZR, P = +, M = -, botão direito do mouse + mouse = câmera. F1 abre o menu do port (taxa de quadros,
@@ -90,7 +115,10 @@ make -j16 B=build/o1 GENARCH=-march=x86-64-v3 GENOPT="-O1 -DGUEST_VOLATILE"
 ```
 
 Saem `build/o1/lasrecomp.exe` + `build/o1/lasgame.dll` (defina `LARECOMP_GAME_LIB` com o caminho da dll ao rodar da
-pasta de build). `tools/za/` tem os scripts usados no desenvolvimento: `build-win.sh`, `play-win.sh`, `auto-win.sh`
+pasta de build). `bash tools/za/dist.sh` monta a pasta da release (`build/dist-za/ZA Recomp/`, `ZIP=1` para o zip): o
+exe sem nenhum código do jogo, o importador dos arquivos do jogo (`tools/zaimport`, .NET 8 + LibHac), o gerador
+empacotado e o compilador zig com que a tela inicial recompila o jogo. `tools/za/` também tem os scripts usados no
+desenvolvimento: `build-win.sh`, `play-win.sh`, `auto-win.sh`
 (testes automáticos numa cópia descartável do save) e ajudantes de log / perfil.
 
 Os patches específicos do jogo no código convertido (o gancho da taxa de quadros) ficam em `tools/patches.py`

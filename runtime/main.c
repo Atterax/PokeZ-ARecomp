@@ -198,7 +198,8 @@ int main(int argc, char **argv) {
         FILE *f = fopen(mp, "rb");
         if (f) { fseek(f, 0x40, SEEK_SET); if (fread(id, 1, 8, f) != 8) memset(id, 0, 8); fclose(f); }
         if (!memcmp(id, za_build[0], 8) || !memcmp(id, za_build[1], 8)) {
-            skip_launcher = true;
+            // (no game code built for it yet - a release set up from the player's packages: the start screen builds it)
+            if (gamelib_present(root)) skip_launcher = true;
 #ifdef _WIN32
             extern int rt_stderr_is_console(void);
             if (rt_stderr_is_console()) {

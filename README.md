@@ -44,14 +44,39 @@ Known issues:
 
 ## Playing
 
-Requirements: Windows 10/11 64-bit, a GPU with Vulkan 1.3 and an up-to-date driver.
+Requirements: Windows 10/11 64-bit, a CPU with AVX2, a GPU with Vulkan 1.3 and an up-to-date driver, ~12 GB free.
 
-1. Build (below) or get a build, and put your game files in `extracted/`:
-   - `extracted/exefs/` (`main`, `main.npdm`, `rtld`, `sdk`) and `extracted/romfs/` + `extracted/romfs.bin`,
-     extracted from your own copy of the game.
-2. Optional: your console's system fonts in `fonts/` (`tools/za/nca_font.py` extracts them from a firmware dump with
-   your own keys), then `python tools/za/xbox_font.py` and `python tools/za/keyboard_font.py` for the button glyphs.
-3. Run `lasrecomp.exe` (it boots straight into the game). The log goes to `logs/play.log`.
+What you need from your own console (none of it is included):
+- **The game**: your dump of Pokémon Legends: Z-A - the base game (`.xci` or `.nsp`), optionally the **2.0.0 update**
+  and the DLC (`.nsp`). Versions 1.0.0 and 2.0.0 are supported.
+- **`prod.keys`** (and `title.keys`) dumped from your Switch (Lockpick_RCM).
+
+1. Download the release zip and extract it anywhere (e.g. `C:\Games\ZA Recomp`).
+2. Put your `.xci` / `.nsp` files and your `prod.keys` / `title.keys` together in one folder.
+3. Run `lasrecomp.exe`. On the start screen: **Game files folder** -> choose that folder -> **Set up game files**.
+   - It reads the game from your files (about a minute) and then **recompiles the game into a native PC program on
+     your machine** (10-30 minutes, depending on your CPU). This happens **only once**: the next time the game starts
+     straight away. Your own files aren't changed.
+   - A new ZA Recomp version that changes the recompiler rebuilds it from the files already set up (no need to pick
+     the folder again).
+4. Play. The log goes to `lasrecomp.log` next to the exe.
+
+Optional: your console's system fonts in `fonts/` (`tools/za/nca_font.py` extracts them from a firmware dump with your
+own keys), then `python tools/za/xbox_font.py` and `python tools/za/keyboard_font.py` for the button glyphs. Without
+them the game's text uses a Windows font and the button icons are missing.
+
+### Saves
+
+New games start with an empty save. Saves are kept in `save/save_0/` next to the exe - the game's own save files,
+the same as on the Switch, so they move between the two without converting anything:
+
+- **Switch -> PC**: on a modded Switch, back the save up with **JKSV** (the game, then your user). Copy the backup
+  folder from the SD card (`JKSV/Pokémon Legends Z-A/<user - date>/`, it holds the file `main`) to the PC, then on the
+  start screen: **Game files** -> **Import save** -> choose that folder (or the game's JKSV folder: its newest backup
+  is used). Your current save is moved to `save/backup-<date>/` first.
+- **PC -> Switch**: copy the files in `save/save_0/` into a JKSV backup folder on the SD card and restore it with JKSV.
+- **Versions**: a save from 2.0.0 needs the game set up with the 2.0.0 update. 2.0.0 converts a 1.0.0 save the first
+  time it saves, and that save no longer loads on 1.0.0 - keep a backup.
 
 Controls (keyboard): WASD move, arrows d-pad, Enter = A, Backspace = B, L = X, I = Y, Q / E = L / R, 1 / 3 = ZL / ZR,
 P = +, M = -, right mouse button + mouse = camera. F1 opens the port's menu (frame rate, FPS counter, resolution,
@@ -88,7 +113,9 @@ make -j16 B=build/o1 GENARCH=-march=x86-64-v3 GENOPT="-O1 -DGUEST_VOLATILE"
 ```
 
 `build/o1/lasrecomp.exe` + `build/o1/lasgame.dll` (set `LARECOMP_GAME_LIB` to the dll when running from the build
-folder). `tools/za/` has the scripts used during development: `build-win.sh`, `play-win.sh`, `auto-win.sh`
+folder). `bash tools/za/dist.sh` builds the release folder (`build/dist-za/ZA Recomp/`, `ZIP=1` for the zip): the exe
+without any game code, the game file importer (`tools/zaimport`, .NET 8 + LibHac), the frozen generator and the zig
+compiler the start screen recompiles the game with. `tools/za/` also has the scripts used during development: `build-win.sh`, `play-win.sh`, `auto-win.sh`
 (scripted test runs on a scratch save copy), log / profile helpers.
 
 Game-specific patches to the lifted code (the frame-rate hook) are in `tools/patches.py` (`ZA_PATCHES`, keyed by the

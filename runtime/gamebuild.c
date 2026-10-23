@@ -386,6 +386,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
             int r = finished(run[k].p);
             if (r < 0) continue;
             Unit *u = &units.u[run[k].unit];
+            if (r != 0 && g_quitting) { ok = false; break; }  // (quitting mid-build ended the compilers: not a failure)
             if (r != 0) {
                 char last[300];
                 log_tail(u->log, last, sizeof last);

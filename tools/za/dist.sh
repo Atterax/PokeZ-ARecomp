@@ -1,0 +1,57 @@
+#!/bin/bash
+# ZA Recomp release for Windows: build/dist-za/ZA Recomp/ (ZIP=1: + ZA-Recomp-windows.zip). No game code or game files:
+# the start screen reads the player's own .xci / .nsp with their prod.keys (zaimport/) and recompiles the game on their
+# machine (lasgen/ = tools/gen.py frozen by PyInstaller, zig/ = the compiler, gamelib-src/ = the headers it includes).
+# Run from Git Bash with MSYS2 (UCRT64) installed, Python 3.12 (py launcher) and the .NET 8 SDK. Downloads once: zig
+# (ziglang.org, hash checked), the generator's Python packages (PyPI), LibHac (NuGet).
+# The FFmpeg DLLs are MSYS2's (GPL build): for a public release build the LGPL one first (make deps-windows).
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"
+GENOPT="-O1 -DGUEST_VOLATILE" GENARCH=-march=x86-64-v3  # (the game code's flags: part of the library id)
+B=build/za-dist D="build/dist-za/ZA Recomp"
+
+# 1. the compiler (Windows' curl: MSYS2's one rejects TLS-inspecting proxies' certificates)
+ZIP_ZIG=build/zig-dl/zig-x86_64-windows-0.17.0.zip
+if [ ! -x build/zig/zig.exe ]; then
+    mkdir -p build/zig-dl
+    [ -f $ZIP_ZIG ] || /c/Windows/System32/curl.exe -fsSL -o $ZIP_ZIG https://ziglang.org/download/0.17.0/zig-x86_64-windows-0.17.0.zip
+    bash tools/fetch_zig.sh
+fi
+# 2. the generator helper (its own venv: only what gen.py needs, not the randomizer's packages)
+if [ ! -f build/gen-venv/.ok ]; then
+    py -3.12 -m venv build/gen-venv
+    build/gen-venv/Scripts/python.exe -m pip install -q capstone==5.0.9 unicorn==2.1.4 lz4==4.4.5 pyinstaller==6.22.3
+    touch build/gen-venv/.ok
+fi
+USERPROFILE="$(cygpath -w ~)" build/gen-venv/Scripts/python.exe -m PyInstaller --noconfirm --clean --log-level WARN \
+    --distpath build/helper --workpath build/pyinstaller tools/lasgen.spec
+build/gen-venv/Scripts/python.exe tools/pe_no_cfg.py build/helper/lasgen/lasgen.exe
+# 3. the exe (release: no console, log in lasrecomp.log) and zig with its runtime built ahead of time
+make -j"$(nproc)" B=$B RELEASE=1 GENARCH="$GENARCH" GENOPT="$GENOPT" $B/lasrecomp.exe
+! nm $B/lasrecomp.exe | grep -q ' f_70'  # (no game code inside)
+FLAGS=$(make -s --eval='pv: ; @echo $(strip $(filter-out -Iruntime,$(GENFLAGS)))' B=$B GENARCH="$GENARCH" GENOPT="$GENOPT" pv)
+bash tools/zig_slim.sh $FLAGS
+# 4. the game file importer (self-contained: no .NET needed on the player's machine)
+dotnet publish tools/zaimport -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true \
+    -p:EnableCompressionInSingleFile=true -p:DebugType=none -o build/zaimport > /dev/null
+
+# 5. the folder
+rm -rf build/dist-za && mkdir -p "$D/gamelib-src" "$D/zaimport"
+cp $B/lasrecomp.exe $B/lasrecomp.dll.a "$D/"
+cp -R build/helper/lasgen "$D/"
+cp -R build/zig-slim "$D/zig"
+cp build/zaimport/zaimport.exe "$D/zaimport/"
+cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
+    "$D/gamelib-src/"
+cp docs/icon/icon_1024.png "$D/icon.png"
+cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$D/"
+cp third_party/fonts/Baloo2/OFL.txt "$D/Baloo2-OFL.txt"
+cp README.md LICENSE "$D/"
+cp tools/za/za-default.ini "$D/larecomp.ini"
+ldd $B/lasrecomp.exe | awk '/ucrt64/ && !/vulkan-1/ {print $3}' | sort -u | while read -r f; do cp "$f" "$D/"; done
+du -sh "$D"
+if [ "${ZIP:-0}" = 1 ]; then
+    (cd build/dist-za && /c/Windows/System32/tar.exe -a -cf ZA-Recomp-windows.zip "ZA Recomp")
+    ls -la build/dist-za/ZA-Recomp-windows.zip
+fi

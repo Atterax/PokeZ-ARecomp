@@ -3,6 +3,7 @@ input/
 extracted/
 generated/
 generated-*/
+generated[0-9]*/
 /rando/
 # Nintendo fonts (users import their own; only the README ships)
 /fonts/*
