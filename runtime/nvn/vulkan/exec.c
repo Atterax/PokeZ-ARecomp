@@ -3124,7 +3124,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (ss_need(SS_DOP, ss.dop == dop)) { ss.dop = dop; vkCmdSetDepthCompareOp(cb, dop); }
     bool sten = st.ds[3] && pass_stencil;
     if (ss_need(SS_STEN, ss.sten == (VkBool32)sten)) { ss.sten = sten; vkCmdSetStencilTestEnable(cb, sten); }
-    if (sten) {
+    {  // (stencil off too: the pipelines take the op as dynamic state, so each command buffer must set it before its first draw)
         uint32_t ops = st.ds[5] | st.ds[6] << 8 | st.ds[7] << 16;
         for (int f = 0; f < 2; f++) {
             uint32_t o = f ? ops >> 12 : ops;
@@ -3132,6 +3132,7 @@ static void draw_(CmdRec *r, bool indexed) {
             uint32_t v[7] = {stencil_op(o & 0xF), stencil_op((o >> 8) & 0xF), stencil_op((o >> 4) & 0xF),
                              compare_fn(f ? st.ds[4] >> 4 : st.ds[4] & 0xF), st.stencil_vmask[f] & 0xFF, st.stencil_mask[f] & 0xFF,
                              st.stencil_ref[f]};
+            if (!sten) memcpy(v, (uint32_t[7]){VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS, 0xFF, 0xFF, 0}, sizeof v);
             if (!ss_need(f ? SS_SFACE1 : SS_SFACE0, !memcmp(v, ss.sface[f], sizeof v))) continue;
             memcpy(ss.sface[f], v, sizeof v);
             vkCmdSetStencilOp(cb, face, (VkStencilOp)v[0], (VkStencilOp)v[1], (VkStencilOp)v[2], (VkCompareOp)v[3]);
