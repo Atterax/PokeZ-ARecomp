@@ -32,6 +32,7 @@ typedef struct NvnTexture {
     void *backend;  // renderer-side texture
     uint64_t debug_id;
     char label[64];
+    bool in_pool;  // registered in a texture pool once (its entries are cleared when it's finalized: objects.c)
 } NvnTexture;
 
 // Also kept inside the guest's NVNsamplerBuilder (at +8, runtime/nvn/objects.c), which is 64 bytes: Pokémon Legends

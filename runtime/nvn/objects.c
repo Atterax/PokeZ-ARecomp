@@ -382,10 +382,20 @@ NVN(nvnTextureInitialize) {
     SET_HOST(A(0), t);
     RET(1);
 }
+extern NvnDescPool *g_texture_pools[64];
 NVN(nvnTextureFinalize) {
     NvnTexture *t = HOST(NvnTexture, A(0));
     if (t) {
         exec_lock_take();  // (not while a submitted list may be reading it: nvnQueueSubmitCommands)
+        // The game finalizes textures still registered in a pool (slots it no longer reads, but the draw state
+        // still binds them: exec.c's stencil_slots looked at the freed texture - a crash in vk_view_int_kind).
+        // Those entries are emptied, as a texture never registered there.
+        if (t->in_pool)
+            for (int i = 0; i < 64 && g_texture_pools[i]; i++) {
+                NvnTexEntry *e = (NvnTexEntry *)g_texture_pools[i]->entries;
+                for (int k = 0; k < g_texture_pools[i]->count; k++)
+                    if (e[k].tex == t) e[k].tex = NULL;
+            }
         backend_texture_destroyed(t);
         free(t);
         exec_lock_give();
@@ -551,6 +561,7 @@ static void register_texture(Cpu *c) {
     if (id < 0 || id >= d->count) return;
     NvnTexEntry *e = &((NvnTexEntry *)d->entries)[id];
     e->tex = HOST(NvnTexture, A(2));
+    if (e->tex) e->tex->in_pool = true;
     e->has_view = A(3) != 0;
     if (e->has_view) memcpy(&e->view, AP(3), sizeof e->view);
 }
