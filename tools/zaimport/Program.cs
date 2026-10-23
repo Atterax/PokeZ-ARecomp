@@ -1,8 +1,8 @@
-// zaimport <prod.keys> <out dir> <package>...: the game files ZA Recomp runs from, made from the player's own Switch
+// zaimport [--title-keys <file>] <prod.keys> <out dir> <package>...: the game files ZA Recomp runs from, made from the player's own Switch
 // packages (.xci / .nsp: base game, update, DLC) and keys, as the console mounts them: <out>/exefs/ (the update's when
 // there is one), <out>/romfs.bin (the base RomFS with the update applied: BKTR) and <out>/aoc/<title id>.bin (each
-// DLC's RomFS). Title keys come from the packages' tickets, else title.keys next to prod.keys (also title.keys.txt: a
-// name Windows' hidden extensions make easy to end up with).
+// DLC's RomFS). Title keys come from the packages' tickets, else --title-keys or title.keys next to prod.keys (also
+// title.keys.txt: a name Windows' hidden extensions make easy to end up with).
 // Progress on stdout: "progress <bytes done> <bytes total>"; a failure: exit 1 and "error: <reason>" as the last line.
 // Published self-contained (runtime/ui/launcher.mm runs it from zaimport/ next to the exe).
 using LibHac;
@@ -46,9 +46,11 @@ static int Fail(string why)
 
 static int Run(string[] args)
 {
-    if (args.Length < 3) return Fail("usage: zaimport <prod.keys> <out dir> <package.xci|nsp>...");
+    string? titleKeys = null;  // (--title-keys: the launcher found it by its contents, whatever its name)
+    if (args.Length >= 2 && args[0] == "--title-keys") (titleKeys, args) = (args[1], args[2..]);
+    if (args.Length < 3) return Fail("usage: zaimport [--title-keys <title.keys>] <prod.keys> <out dir> <package.xci|nsp>...");
     string keyDir = Path.GetDirectoryName(Path.GetFullPath(args[0]))!;
-    string? titleKeys = new[] { "title.keys", "title.keys.txt" }.Select(n => Path.Combine(keyDir, n)).FirstOrDefault(File.Exists);
+    titleKeys ??= new[] { "title.keys", "title.keys.txt" }.Select(n => Path.Combine(keyDir, n)).FirstOrDefault(File.Exists);
     var ks = ExternalKeyReader.ReadKeyFile(args[0], titleKeys);
     if (ks.HeaderKey.IsZeros())
         return Fail($"{Path.GetFileName(args[0])} has no header_key: it isn't a complete prod.keys. Dump the keys from " +

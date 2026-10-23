@@ -252,8 +252,8 @@ static void set_failure(int k, const std::string &detail = "") {
         "ZA Recomp runs versions 1.0.0 and 2.0.0 of the game (base game, or base game + the 2.0.0 update).",
         "Some files are missing. Choose the folder again; if it happens again, dump the game again.",
         "Make sure there's about 4 GB free and try again. If it keeps happening, report it on GitHub.",
-        "Put the prod.keys (and title.keys) dumped from your own Switch in the folder with the game files. If it's "
-        "there: turn on file name extensions in Explorer - it may really be named prod.keys.txt or similar.",
+        "Put the prod.keys (and title.keys) dumped from your own Switch in the folder with the game files. Any file "
+        "name works (prod.keys.txt, keys.txt...): it is recognized by what is inside it.",
         "The full reason is in lasrecomp.log next to the program."};
     if (k >= 1 && k <= 8) set_job(head[k], true, detail.empty() ? hint[k] : detail + "\n" + hint[k]);
 }
@@ -292,7 +292,8 @@ static bool build_id_ok(const std::string &main_path) {
 
 // ------------------------------------------------------------------ Z-A: the player's packages -> game files
 // Game packages (.xci / .nsp) in the picked folder or a few levels below it
-static void find_packages(const std::string &dir, int depth, std::vector<std::string> &out) {
+// (compressed: .nsz / .xcz seen - NSZ's compressed packages, not readable here)
+static void find_packages(const std::string &dir, int depth, std::vector<std::string> &out, int &compressed) {
     if (depth > 3) return;
     DIR *d = opendir(dir.c_str());
     if (!d) return;
@@ -304,48 +305,112 @@ static void find_packages(const std::string &dir, int depth, std::vector<std::st
         for (auto &ch : ext) ch = (char)tolower((unsigned char)ch);
         if (is_dir(dir + "/" + n)) sub.push_back(dir + "/" + n);
         else if (ext == ".xci" || ext == ".nsp") out.push_back(dir + "/" + n);
+        else if (ext == ".nsz" || ext == ".xcz") compressed++;
     }
     closedir(d);
     std::sort(sub.begin(), sub.end());
-    for (auto &s : sub) find_packages(s, depth + 1, out);
+    for (auto &s : sub) find_packages(s, depth + 1, out, compressed);
 }
 
-// The player's prod.keys: in the picked folder (or below), next to the app (keys/), or where emulators keep them.
-// Also under the names Windows' hidden file extensions lead to (prod.keys.txt: saved from a text editor) or that
-// guides use (keys.txt).
-static bool is_keys_name(std::string n) {
+// The player's keys files, told apart by what is in them, whatever they are named (prod.keys, prod.keys.txt - Windows'
+// hidden extensions -, "prod (1).keys", keys.txt...): a file named *.keys / *.key / *.txt (under 1 MB) is
+// KEYS_PROD with a header_key line, KEYS_TITLE when its lines are "<rights id> = <title key>" (32 hex digits each).
+enum { KEYS_NONE, KEYS_PROD, KEYS_TITLE };
+static bool keys_file_name(std::string n) {
     for (auto &ch : n) ch = (char)tolower((unsigned char)ch);
-    return n == "prod.keys" || n == "prod.keys.txt" || n == "keys.txt" || n == "prod.txt";
+    auto ends = [&](const char *x) { size_t k = strlen(x); return n.size() > k && !n.compare(n.size() - k, k, x); };
+    return ends(".keys") || ends(".key") || ends(".txt");
 }
-static std::string find_keys(const std::string &src) {
-    std::vector<std::string> dirs = {src, src + "/keys", src + "/..", "keys", "."};
+static bool hex32(const std::string &s) {
+    if (s.size() != 32) return false;
+    for (char c : s)
+        if (!isxdigit((unsigned char)c)) return false;
+    return true;
+}
+static int keys_kind(const std::string &path) {
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 || st.st_size > (1 << 20)) return KEYS_NONE;
+    FILE *f = fopen(path.c_str(), "rb");
+    if (!f) return KEYS_NONE;
+    std::string s((size_t)st.st_size, 0);
+    s.resize(fread(&s[0], 1, s.size(), f));
+    fclose(f);
+    for (auto &ch : s) ch = (char)tolower((unsigned char)ch);
+    if (s.find("header_key") != std::string::npos) return KEYS_PROD;
+    int title = 0;
+    size_t at = 0;
+    while (at < s.size()) {
+        size_t end = s.find('\n', at);
+        if (end == std::string::npos) end = s.size();
+        std::string line;
+        for (size_t i = at; i < end; i++)
+            if (!isspace((unsigned char)s[i])) line += s[i];
+        size_t eq = line.find('=');
+        if (eq != std::string::npos && hex32(line.substr(0, eq)) && hex32(line.substr(eq + 1))) title++;
+        at = end + 1;
+    }
+    return title ? KEYS_TITLE : KEYS_NONE;
+}
+
+// A keys file of that kind in dir (prod.keys / title.keys first), "" if none. bad: a keys-named file that is neither
+// (for the error: the player sees which file was looked at).
+static std::string keys_in_dir(const std::string &dir, int kind, std::string *bad) {
+    std::string named = dir + (kind == KEYS_PROD ? "/prod.keys" : "/title.keys");
+    if (keys_kind(named) == kind) return named;
+    DIR *d = opendir(dir.c_str());
+    if (!d) return "";
+    std::vector<std::string> names;
+    while (struct dirent *e = readdir(d))
+        if (e->d_name[0] != '.' && keys_file_name(e->d_name)) names.push_back(e->d_name);
+    closedir(d);
+    std::sort(names.begin(), names.end());
+    for (auto &n : names) {
+        int k = keys_kind(dir + "/" + n);
+        if (k == kind) return dir + "/" + n;
+        if (k == KEYS_NONE && bad && bad->empty()) *bad = n;
+    }
+    return "";
+}
+
+// The player's prod.keys: in the picked folder (or a few levels below it), next to the app (keys/), or where emulators
+// keep them
+static std::string find_keys(const std::string &src, std::string *bad) {
+    std::vector<std::string> stack = {src, src + "/keys"};
+    for (int depth = 0; depth < 3; depth++) {
+        std::vector<std::string> next;
+        for (auto &dir : stack) {
+            std::string k = keys_in_dir(dir, KEYS_PROD, bad);
+            if (!k.empty()) return k;
+            DIR *d = opendir(dir.c_str());
+            if (!d) continue;
+            while (struct dirent *e = readdir(d)) {
+                std::string n = e->d_name;
+                if (n[0] != '.' && is_dir(dir + "/" + n)) next.push_back(dir + "/" + n);
+            }
+            closedir(d);
+        }
+        std::sort(next.begin(), next.end());
+        stack.swap(next);
+    }
+    std::vector<std::string> dirs = {src + "/..", "keys", "."};
     if (const char *a = getenv("APPDATA")) {
         dirs.push_back(std::string(a) + "/Ryujinx/system");
         dirs.push_back(std::string(a) + "/yuzu/keys");
     }
     if (const char *h = getenv("USERPROFILE")) dirs.push_back(std::string(h) + "/.switch");
     if (const char *h = getenv("HOME")) dirs.push_back(std::string(h) + "/.switch");
-    for (auto &d : dirs)
-        for (const char *n : {"prod.keys", "prod.keys.txt", "keys.txt", "prod.txt"})
-            if (file_exists(d + "/" + n)) return d + "/" + n;
-    std::vector<std::string> pk;  // (deeper in the picked folder)
-    std::vector<std::string> stack = {src};
-    for (int depth = 0; depth < 3 && pk.empty(); depth++) {
-        std::vector<std::string> next;
-        for (auto &dir : stack) {
-            DIR *d = opendir(dir.c_str());
-            if (!d) continue;
-            while (struct dirent *e = readdir(d)) {
-                std::string n = e->d_name;
-                if (n[0] == '.') continue;
-                if (is_keys_name(n)) pk.push_back(dir + "/" + n);
-                else if (is_dir(dir + "/" + n)) next.push_back(dir + "/" + n);
-            }
-            closedir(d);
-        }
-        stack.swap(next);
+    for (auto &d : dirs) {
+        std::string k = keys_in_dir(d, KEYS_PROD, NULL);
+        if (!k.empty()) return k;
     }
-    return pk.empty() ? "" : pk[0];
+    return "";
+}
+
+// title.keys (only needed for packages without their tickets): next to prod.keys or in the picked folder
+static std::string find_title_keys(const std::string &src, const std::string &prod) {
+    std::string dir = prod.substr(0, prod.find_last_of("/\\"));
+    std::string k = keys_in_dir(dir, KEYS_TITLE, NULL);
+    return k.empty() ? keys_in_dir(src, KEYS_TITLE, NULL) : k;
 }
 
 static std::atomic<unsigned long long> g_done, g_total;  // (progress: below)
@@ -353,7 +418,8 @@ static bool g_import_mode;                               // Z-A packages: the ba
 
 // zaimport (tools/zaimport, shipped as zaimport/zaimport.exe) writes <root>/exefs, romfs.bin, aoc/; its progress
 // lines ("progress <done> <total>") go to the bar, its last line is the reason when it fails
-static bool import_packages(const std::vector<std::string> &pkgs, const std::string &keys, std::string &err) {
+static bool import_packages(const std::vector<std::string> &pkgs, const std::string &keys, const std::string &title_keys,
+                            std::string &err) {
     char tool[1100];
     if (!rt_resource("zaimport/zaimport" PLAT_EXE_SUFFIX, "build/zaimport/zaimport" PLAT_EXE_SUFFIX,
                      tool, sizeof tool)) {
@@ -361,7 +427,10 @@ static bool import_packages(const std::vector<std::string> &pkgs, const std::str
         return false;
     }
     std::string log = g_root + "/import.log";
-    std::vector<const char *> argv = {tool, keys.c_str(), g_root.c_str()};
+    std::vector<const char *> argv = {tool};
+    if (!title_keys.empty()) argv.push_back("--title-keys"), argv.push_back(title_keys.c_str());
+    argv.push_back(keys.c_str());
+    argv.push_back(g_root.c_str());
     for (auto &p : pkgs) argv.push_back(p.c_str());
     argv.push_back(NULL);
     PlatProc p = plat_spawn(argv.data(), log.c_str(), false);
@@ -448,15 +517,26 @@ static void *extract_thread(void *) {
     set_job("Looking for the game files...");
     find_game(src, 0, exefs, romfs, unusable);
     if ((exefs.empty() || romfs.empty()) && unusable) {  // packages: Pokémon Legends Z-A's (zaimport reads them)
-        find_packages(src, 0, pkgs);
-        std::string keys = find_keys(src), err;
-        if (keys.empty()) { set_failure(FAIL_KEYS); goto done; }
-        fprintf(stderr, "[launcher] %zu package(s), keys %s\n", pkgs.size(), keys.c_str());
+        int compressed = 0;
+        find_packages(src, 0, pkgs, compressed);
+        if (pkgs.empty() && compressed) {
+            set_failure(FAIL_UNUSABLE, "Your dump is compressed (.nsz / .xcz): decompress it to .nsp / .xci with NSZ "
+                                       "first.");
+            goto done;
+        }
+        std::string bad, keys = find_keys(src, &bad), err;
+        if (keys.empty()) {
+            set_failure(FAIL_KEYS, bad.empty() ? "" : "\"" + bad + "\" isn't a prod.keys: it has no header_key line.");
+            goto done;
+        }
+        std::string title_keys = find_title_keys(src, keys);
+        fprintf(stderr, "[launcher] %zu package(s), keys %s, title keys %s\n", pkgs.size(), keys.c_str(),
+                title_keys.empty() ? "-" : title_keys.c_str());
         rt_remove_game_files(g_root.c_str());
         mkdir(g_root.c_str(), 0755);
         g_import_mode = true;
         set_job("Reading your game files...");
-        if (!import_packages(pkgs, keys, err)) {
+        if (!import_packages(pkgs, keys, title_keys, err)) {
             set_failure(err.find("base game") != std::string::npos || err.find("no game packages") != std::string::npos
                             ? FAIL_UNUSABLE : FAIL_IMPORT, err);
             goto done;
@@ -1178,7 +1258,8 @@ extern "C" void launcher_run(const char *root) {
         g_src = t;
         g_busy = true;
         extract_thread(NULL);
-        fprintf(stderr, "[launcher] setup: %s -> %s\n", g_job.c_str(), check_game_files(g_root).empty() ? "READY" : "NOT READY");
+        fprintf(stderr, "[launcher] setup: %s -> %s\n%s\n", g_job.c_str(),
+                check_game_files(g_root).empty() ? "READY" : "NOT READY", g_job_hint.c_str());
         exit(0);
     }
     if (const char *t = getenv("LARECOMP_LAUNCHER_SETUP")) {  // (test) <folder>: Set up started on the start screen
