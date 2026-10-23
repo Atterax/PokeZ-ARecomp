@@ -40,8 +40,8 @@ NVN(nvnDeviceInitialize) {
     LOG("[nvn] device initialized\n");
     RET(1);
 }
-NVN(nvnDeviceFinalize) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnDeviceFinalize\n"); }
-NVN(nvnDeviceSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnDeviceSetDebugLabel\n"); }
+NVN(nvnDeviceFinalize) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnDeviceFinalize\n"); }
+NVN(nvnDeviceSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnDeviceSetDebugLabel\n"); }
 NVN(nvnDeviceGetInteger) { *(int32_t *)AP(2) = (int32_t)device_integer((uint32_t)A(1)); }
 NVN(nvnDeviceGetCurrentTimestampInNanoseconds) {
     RET(plat_now_ns());
@@ -49,13 +49,13 @@ NVN(nvnDeviceGetCurrentTimestampInNanoseconds) {
 NVN(nvnDeviceGetTimestampInNanoseconds) {  // counter.timestamp: Switch GPU ticks (614.4 MHz, as the counters are written)
     RET((uint64_t)((unsigned __int128)G(uint64_t, A(1), 8) * 625 / 384));
 }
-NVN(nvnDeviceSetIntermediateShaderCache) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnDeviceSetIntermediateShaderCache\n"); }
+NVN(nvnDeviceSetIntermediateShaderCache) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnDeviceSetIntermediateShaderCache\n"); }
 NVN(nvnDeviceGetTextureHandle) { RET((A(1) & 0xFFFFF) | ((A(2) & 0xFFF) << 20)); }
 NVN(nvnDeviceGetTexelFetchHandle) { RET(A(1) & 0xFFFFF); }
 NVN(nvnDeviceGetImageHandle) { RET(A(1) & 0xFFFFF); }
 NVN(nvnDeviceGetSeparateTextureHandle) { RET(A(1) & 0xFFFFF); }
 NVN(nvnDeviceGetSeparateSamplerHandle) { RET((A(1) & 0xFFF) << 20); }
-NVN(nvnDeviceInstallDebugCallback) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnDeviceInstallDebugCallback\n"); }
+NVN(nvnDeviceInstallDebugCallback) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnDeviceInstallDebugCallback\n"); }
 NVN(nvnDeviceGenerateDebugDomainId) { RET(1); }
 static uint32_t window_origin, depth_mode;
 RT_ON_RESET(nvn_device_reset) { window_origin = depth_mode = 0; }  // (the next boot sets its own)
@@ -69,10 +69,10 @@ NVN(nvnDeviceRegisterFastClearColor) { RET(1); }
 NVN(nvnDeviceRegisterFastClearColori) { RET(1); }
 NVN(nvnDeviceRegisterFastClearColorui) { RET(1); }
 NVN(nvnDeviceRegisterFastClearDepth) { RET(1); }
-NVN(nvnDeviceApplyDeferredFinalizes) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnDeviceApplyDeferredFinalizes\n"); }
-NVN(nvnDeviceFinalizeCommandHandle) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnDeviceFinalizeCommandHandle\n"); }
+NVN(nvnDeviceApplyDeferredFinalizes) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnDeviceApplyDeferredFinalizes\n"); }
+NVN(nvnDeviceFinalizeCommandHandle) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnDeviceFinalizeCommandHandle\n"); }
 NVN(nvnDeviceIsExternalDebuggerAttached) { RET(0); }
-NVN(nvnDeviceWalkDebugDatabase) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnDeviceWalkDebugDatabase\n"); }
+NVN(nvnDeviceWalkDebugDatabase) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnDeviceWalkDebugDatabase\n"); }
 
 // ================================================================== queue
 // QueueBuilder layout: device@0 flags@8 cmd@0xC compute@0x10 control@0x14 mem@0x18 memsize@0x20
@@ -105,19 +105,19 @@ NVN(nvnQueueBuilderGetQueueMemorySize) { RET(G(uint64_t, A(0), 0x20)); }
 NVN(nvnQueueBuilderGetMemory) { RET(G(uint64_t, A(0), 0x18)); }
 
 NVN(nvnQueueInitialize) { RET(1); }
-NVN(nvnQueueFinalize) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnQueueFinalize\n"); }
-NVN(nvnQueueSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnQueueSetDebugLabel\n"); }
+NVN(nvnQueueFinalize) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnQueueFinalize\n"); }
+NVN(nvnQueueSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnQueueSetDebugLabel\n"); }
 NVN(nvnQueueGetError) { RET(0); }
 NVN(nvnQueueGetTotalCommandMemoryUsed) { RET(0); }
 NVN(nvnQueueGetTotalControlMemoryUsed) { RET(0); }
 NVN(nvnQueueGetTotalComputeMemoryUsed) { RET(0); }
-NVN(nvnQueueResetMemoryUsageCounts) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnQueueResetMemoryUsageCounts\n"); }
+NVN(nvnQueueResetMemoryUsageCounts) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnQueueResetMemoryUsageCounts\n"); }
 NVN(nvnQueueSubmitCommands) {
     int n = (int)A(1);
     const uint64_t *handles = AP(2);
     for (int i = 0; i < n; i++) backend_execute(handles[i]);
 }
-NVN(nvnQueueFlush) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnQueueFlush\n"); }
+NVN(nvnQueueFlush) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnQueueFlush\n"); }
 NVN(nvnQueueFinish) { (void)c; renderer_sync(); }
 
 static NvnSync *sync_of(uint64_t guest) {
@@ -134,15 +134,15 @@ NVN(nvnQueueWaitSync) { RET(1); }
 // ================================================================== sync / event
 NVN(nvnSyncInitialize) { SET_HOST(A(0), calloc(1, sizeof(NvnSync))); RET(1); }
 NVN(nvnSyncFinalize) { free(HOST(NvnSync, A(0))); SET_HOST(A(0), 0); }
-NVN(nvnSyncSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnSyncSetDebugLabel\n"); }
+NVN(nvnSyncSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnSyncSetDebugLabel\n"); }
 void renderer_flush(void);
 NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     static int flush = -1;
     static uint64_t n;
-    if (flush < 0) flush = getenv("LARECOMP_SYNC_FLUSH") ? 1 : 0;
-    if (getenv("LARECOMP_LOG_SYNC") && n++ % 60 == 0) LOG("[nvn] SyncWait #%llu (lr %llx)\n", (unsigned long long)n, c->x[30]);
+    if (flush < 0) flush = ENV("LARECOMP_SYNC_FLUSH") ? 1 : 0;
+    if (ENV("LARECOMP_LOG_SYNC") && n++ % 60 == 0) LOG("[nvn] SyncWait #%llu (lr %llx)\n", (unsigned long long)n, c->x[30]);
     static int whole = -1;  // LARECOMP_SYNC_ALL=1: old behaviour, wait for all submitted work
-    if (whole < 0) whole = getenv("LARECOMP_SYNC_ALL") ? 1 : 0;
+    if (whole < 0) whole = ENV("LARECOMP_SYNC_ALL") ? 1 : 0;
     if (flush) renderer_flush();
     else if (whole) renderer_sync();
     else renderer_wait_seq(sync_of(A(0))->seq);  // only the submission that holds this fence
@@ -165,7 +165,7 @@ NVN(nvnEventInitialize) {
     G(uint64_t, A(0), 16) = off;
     RET(1);
 }
-NVN(nvnEventFinalize) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnEventFinalize\n"); }
+NVN(nvnEventFinalize) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnEventFinalize\n"); }
 NVN(nvnEventGetValue) { RET(*(uint32_t *)(uintptr_t)event_addr(A(0))); }
 NVN(nvnEventSignal) { *(uint32_t *)(uintptr_t)event_addr(A(0)) = (uint32_t)A(2); }
 NVN(nvnEventGetMemoryPool) { RET(G(uint64_t, A(0), 8)); }
@@ -191,7 +191,7 @@ NVN(nvnMemoryPoolInitialize) {
     RET(1);
 }
 NVN(nvnMemoryPoolFinalize) { free(HOST(NvnPool, A(0))); SET_HOST(A(0), 0); }
-NVN(nvnMemoryPoolSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnMemoryPoolSetDebugLabel\n"); }
+NVN(nvnMemoryPoolSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnMemoryPoolSetDebugLabel\n"); }
 NVN(nvnMemoryPoolMap) { RET(HOST(NvnPool, A(0))->storage); }
 NVN(nvnMemoryPoolGetBufferAddress) { RET(HOST(NvnPool, A(0))->storage); }  // GPU address == CPU address
 NVN(nvnMemoryPoolGetSize) { RET(HOST(NvnPool, A(0))->size); }
@@ -200,7 +200,7 @@ NVN(nvnMemoryPoolFlushMappedRange) {
     NvnPool *p = HOST(NvnPool, A(0));
     backend_pool_written(p->storage + A(1), A(2));
 }
-NVN(nvnMemoryPoolInvalidateMappedRange) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnMemoryPoolInvalidateMappedRange\n"); }
+NVN(nvnMemoryPoolInvalidateMappedRange) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnMemoryPoolInvalidateMappedRange\n"); }
 NVN(nvnMemoryPoolMapVirtual) { RET(1); }
 
 // ================================================================== buffers
@@ -223,8 +223,8 @@ NVN(nvnBufferInitialize) {
     G(uint64_t, A(0), 0x20) = next_debug_id++;
     RET(1);
 }
-NVN(nvnBufferFinalize) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnBufferFinalize\n"); }
-NVN(nvnBufferSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnBufferSetDebugLabel\n"); }
+NVN(nvnBufferFinalize) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnBufferFinalize\n"); }
+NVN(nvnBufferSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnBufferSetDebugLabel\n"); }
 NVN(nvnBufferMap) { RET(G(uint64_t, A(0), 0)); }
 NVN(nvnBufferGetAddress) { RET(G(uint64_t, A(0), 0)); }
 NVN(nvnBufferGetMemoryPool) { RET(G(uint64_t, A(0), 8)); }
@@ -232,7 +232,7 @@ NVN(nvnBufferGetMemoryOffset) { RET(G(uint64_t, A(0), 0x10)); }
 NVN(nvnBufferGetSize) { RET(G(uint64_t, A(0), 0x18)); }
 NVN(nvnBufferGetDebugID) { RET(G(uint64_t, A(0), 0x20)); }
 NVN(nvnBufferFlushMappedRange) { backend_pool_written(G(uint64_t, A(0), 0) + A(1), A(2)); }
-NVN(nvnBufferInvalidateMappedRange) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnBufferInvalidateMappedRange\n"); }
+NVN(nvnBufferInvalidateMappedRange) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnBufferInvalidateMappedRange\n"); }
 
 // ================================================================== textures
 // TextureBuilder: device@0 flags@8 target@0xC width@0x10 height@0x14 depth@0x18 levels@0x1C
@@ -314,7 +314,7 @@ static void builder_layout(uint64_t b, TexLayout *t) {
     // from the driver default: NVNpackagedTextureLayout's low word is log2(GOBs per block).
     uint64_t pl = G(uint64_t, b, 0x50);
     if (pl && (uint32_t)pl <= 5) t->block_height_log2 = (uint32_t)pl;
-    if (pl && getenv("LARECOMP_LOG_PACKAGED")) {
+    if (pl && ENV("LARECOMP_LOG_PACKAGED")) {
         static int n;
         if (n++ < 4000) LOG("[nvn] packaged layout %016llx fmt %#x %ux%u lv %u -> default bh %u\n", pl, G(uint32_t, b, 0x20), t->width, t->height, t->levels, t->block_height_log2);
     }
@@ -396,8 +396,8 @@ NVN(nvnTextureGetRawStorageClass) { RET(0); }
 NVN(nvnTextureGetSparseTileLayout) { RET(0); }
 NVN(nvnTextureGetZCullStorageSize) { RET(0); }
 NVN(nvnTextureCompare) { RET(A(0) == A(1)); }
-NVN(nvnTextureFlushTexels) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnTextureFlushTexels\n"); }
-NVN(nvnTextureInvalidateTexels) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnTextureInvalidateTexels\n"); }
+NVN(nvnTextureFlushTexels) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnTextureFlushTexels\n"); }
+NVN(nvnTextureInvalidateTexels) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnTextureInvalidateTexels\n"); }
 
 // Texture views (our layout inside the guest struct: only our fields are written - Pokémon Legends Z-A keeps
 // views in 32-byte pool slots, and clearing 0x28 bytes broke the next slot's free-list link)
@@ -436,7 +436,7 @@ NVN(nvnTextureWriteTexels) {
 }
 NVN(nvnTextureWriteTexelsStrided) { LOG("[nvn] WriteTexelsStrided not implemented\n"); (void)c; }
 NVN(nvnTextureReadTexels) { LOG("[nvn] ReadTexels not implemented\n"); (void)c; }
-NVN(nvnTextureReadTexelsStrided) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnTextureReadTexelsStrided\n"); }
+NVN(nvnTextureReadTexelsStrided) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnTextureReadTexelsStrided\n"); }
 
 // ================================================================== samplers
 // SamplerBuilder: device@0 then an NvnSamplerDesc at 8
@@ -460,7 +460,7 @@ NVN(nvnSamplerBuilderSetBorderColori) { memcpy(SD->border, AP(1), 16); }
 NVN(nvnSamplerBuilderSetBorderColorui) { memcpy(SD->border, AP(1), 16); }
 NVN(nvnSamplerBuilderSetMaxAnisotropy) { SD->max_aniso = AF(0); }
 NVN(nvnSamplerBuilderSetReductionFilter) { SD->reduction = (uint32_t)A(1); }
-NVN(nvnSamplerBuilderSetLodSnap) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnSamplerBuilderSetLodSnap\n"); }
+NVN(nvnSamplerBuilderSetLodSnap) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnSamplerBuilderSetLodSnap\n"); }
 NVN(nvnSamplerBuilderGetDevice) { RET(G(uint64_t, A(0), 0)); }
 NVN(nvnSamplerBuilderGetMinMagFilter) { *(uint32_t *)AP(1) = SD->min_filter; *(uint32_t *)AP(2) = SD->mag_filter; }
 NVN(nvnSamplerBuilderGetWrapMode) { for (int i = 0; i < 3; i++) *(uint32_t *)AP(1 + i) = SD->wrap[i]; }
@@ -481,7 +481,7 @@ NVN(nvnSamplerInitialize) {
     RET(1);
 }
 NVN(nvnSamplerFinalize) { free(HOST(NvnSamplerDesc, A(0))); SET_HOST(A(0), 0); }
-NVN(nvnSamplerSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnSamplerSetDebugLabel\n"); }
+NVN(nvnSamplerSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnSamplerSetDebugLabel\n"); }
 #define SMP HOST(NvnSamplerDesc, A(0))
 NVN(nvnSamplerGetMinMagFilter) { *(uint32_t *)AP(1) = SMP->min_filter; *(uint32_t *)AP(2) = SMP->mag_filter; }
 NVN(nvnSamplerGetWrapMode) { for (int i = 0; i < 3; i++) *(uint32_t *)AP(1 + i) = SMP->wrap[i]; }
@@ -517,8 +517,8 @@ NVN(nvnTexturePoolInitialize) {
     desc_pool_init(A(0), A(1), A(2), (int)A(3), sizeof(NvnTexEntry), g_texture_pools);
     RET(1);
 }
-NVN(nvnTexturePoolFinalize) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnTexturePoolFinalize\n"); }
-NVN(nvnTexturePoolSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnTexturePoolSetDebugLabel\n"); }
+NVN(nvnTexturePoolFinalize) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnTexturePoolFinalize\n"); }
+NVN(nvnTexturePoolSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnTexturePoolSetDebugLabel\n"); }
 NVN(nvnTexturePoolGetMemoryPool) { RET(G(uint64_t, A(0), 8)); }
 NVN(nvnTexturePoolGetMemoryOffset) { RET(G(uint64_t, A(0), 16)); }
 NVN(nvnTexturePoolGetSize) { RET(G(uint32_t, A(0), 24)); }
@@ -538,8 +538,8 @@ NVN(nvnSamplerPoolInitialize) {
     desc_pool_init(A(0), A(1), A(2), (int)A(3), sizeof(NvnSamplerDesc), g_sampler_pools);
     RET(1);
 }
-NVN(nvnSamplerPoolFinalize) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnSamplerPoolFinalize\n"); }
-NVN(nvnSamplerPoolSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnSamplerPoolSetDebugLabel\n"); }
+NVN(nvnSamplerPoolFinalize) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnSamplerPoolFinalize\n"); }
+NVN(nvnSamplerPoolSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnSamplerPoolSetDebugLabel\n"); }
 NVN(nvnSamplerPoolGetMemoryPool) { RET(G(uint64_t, A(0), 8)); }
 NVN(nvnSamplerPoolGetMemoryOffset) { RET(G(uint64_t, A(0), 16)); }
 NVN(nvnSamplerPoolGetSize) { RET(G(uint32_t, A(0), 24)); }
@@ -561,8 +561,8 @@ NvnDescPool *nvn_find_pool(NvnDescPool **reg, uint64_t guest_pool) {
 // ================================================================== programs
 NVN(nvnProgramInitialize) { SET_HOST(A(0), calloc(1, sizeof(NvnProgram))); RET(1); }
 NVN(nvnProgramFinalize) { free(HOST(NvnProgram, A(0))); SET_HOST(A(0), 0); }
-NVN(nvnProgramSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnProgramSetDebugLabel\n"); }
-NVN(nvnProgramSetSampleShading) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnProgramSetSampleShading\n"); }
+NVN(nvnProgramSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnProgramSetDebugLabel\n"); }
+NVN(nvnProgramSetSampleShading) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnProgramSetSampleShading\n"); }
 NVN(nvnProgramSetSubroutineLinkage) { RET(1); }
 static void set_shaders(Cpu *c, int stride) {
     NvnProgram *p = HOST(NvnProgram, A(0));
@@ -628,8 +628,8 @@ NVN(nvnWindowInitialize) {
     LOG("[nvn] window with %d textures\n", w->num);
     RET(1);
 }
-NVN(nvnWindowFinalize) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnWindowFinalize\n"); }
-NVN(nvnWindowSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnWindowSetDebugLabel\n"); }
+NVN(nvnWindowFinalize) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnWindowFinalize\n"); }
+NVN(nvnWindowSetDebugLabel) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnWindowSetDebugLabel\n"); }
 #define WIN HOST(NvnWindow, A(0))
 NVN(nvnWindowGetNativeWindow) { RET(0); }
 NVN(nvnWindowGetNumTextures) { RET(WIN->num); }
@@ -665,7 +665,7 @@ NVN(nvnQueueAcquireTexture) {
 static void present_pace(int interval) {
     static int forced = -2;
     static uint64_t next;
-    if (forced == -2) forced = getenv("LARECOMP_PRESENT_INTERVAL") ? atoi(getenv("LARECOMP_PRESENT_INTERVAL")) : -1;
+    if (forced == -2) forced = ENV("LARECOMP_PRESENT_INTERVAL") ? atoi(ENV("LARECOMP_PRESENT_INTERVAL")) : -1;
     if (forced >= 0) interval = forced;
     static int logged = -12345;
     if (interval != logged) { logged = interval; LOG("[nvn] present interval %d\n", interval); }
@@ -700,9 +700,9 @@ NVN(nvnBlendStateSetBlendFunc) {
 }
 NVN(nvnBlendStateSetBlendEquation) { G(uint8_t, A(0), 5) = (uint8_t)A(1); G(uint8_t, A(0), 6) = (uint8_t)A(2); }
 NVN(nvnBlendStateSetAdvancedMode) { G(uint8_t, A(0), 7) = (uint8_t)A(1); }
-NVN(nvnBlendStateSetAdvancedOverlap) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnBlendStateSetAdvancedOverlap\n"); }
-NVN(nvnBlendStateSetAdvancedPremultipliedSrc) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnBlendStateSetAdvancedPremultipliedSrc\n"); }
-NVN(nvnBlendStateSetAdvancedNormalizedDst) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnBlendStateSetAdvancedNormalizedDst\n"); }
+NVN(nvnBlendStateSetAdvancedOverlap) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnBlendStateSetAdvancedOverlap\n"); }
+NVN(nvnBlendStateSetAdvancedPremultipliedSrc) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnBlendStateSetAdvancedPremultipliedSrc\n"); }
+NVN(nvnBlendStateSetAdvancedNormalizedDst) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnBlendStateSetAdvancedNormalizedDst\n"); }
 NVN(nvnBlendStateGetBlendTarget) { RET(G(uint8_t, A(0), 0)); }
 NVN(nvnBlendStateGetBlendFunc) {
     uint8_t *b = AP(0);
@@ -786,9 +786,9 @@ NVN(nvnMultisampleStateSetAlphaToCoverageDither) { G(uint8_t, A(0), 0xD) = (uint
 NVN(nvnMultisampleStateSetCoverageToColorEnable) { G(uint8_t, A(0), 0xE) = (uint8_t)A(1); }
 NVN(nvnMultisampleStateSetCoverageToColorOutput) { G(uint8_t, A(0), 0xF) = (uint8_t)A(1); }
 NVN(nvnMultisampleStateSetCoverageModulationMode) { G(uint8_t, A(0), 0x10) = (uint8_t)A(1); }
-NVN(nvnMultisampleStateSetSampleLocations) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnMultisampleStateSetSampleLocations\n"); }
-NVN(nvnMultisampleStateSetSampleLocationsEnable) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnMultisampleStateSetSampleLocationsEnable\n"); }
-NVN(nvnMultisampleStateSetSampleLocationsGridEnable) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnMultisampleStateSetSampleLocationsGridEnable\n"); }
+NVN(nvnMultisampleStateSetSampleLocations) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnMultisampleStateSetSampleLocations\n"); }
+NVN(nvnMultisampleStateSetSampleLocationsEnable) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnMultisampleStateSetSampleLocationsEnable\n"); }
+NVN(nvnMultisampleStateSetSampleLocationsGridEnable) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnMultisampleStateSetSampleLocationsGridEnable\n"); }
 NVN(nvnMultisampleStateGetMultisampleEnable) { RET(G(uint8_t, A(0), 0)); }
 NVN(nvnMultisampleStateGetSamples) { RET(G(uint32_t, A(0), 4)); }
 NVN(nvnMultisampleStateGetRasterSamples) { RET(G(uint32_t, A(0), 8)); }
@@ -798,7 +798,7 @@ NVN(nvnMultisampleStateGetCoverageToColorEnable) { RET(G(uint8_t, A(0), 0xE)); }
 NVN(nvnMultisampleStateGetCoverageToColorOutput) { RET(G(uint8_t, A(0), 0xF)); }
 NVN(nvnMultisampleStateGetCoverageModulationMode) { RET(G(uint8_t, A(0), 0x10)); }
 NVN(nvnMultisampleStateGetSampleLocationsEnable) { RET(0); }
-NVN(nvnMultisampleStateGetSampleLocationsGrid) { (void)c; static int seen_; if (!seen_++ && getenv("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnMultisampleStateGetSampleLocationsGrid\n"); }
+NVN(nvnMultisampleStateGetSampleLocationsGrid) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnMultisampleStateGetSampleLocationsGrid\n"); }
 NVN(nvnMultisampleStateGetSampleLocationsGridEnable) { RET(0); }
 
 // PolygonState (4): cull, front face, polygon mode, offset enables

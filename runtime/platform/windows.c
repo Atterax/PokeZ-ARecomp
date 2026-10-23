@@ -186,14 +186,26 @@ void plat_fatal_notice(void) {
 // (profiling) LARECOMP_SAMPLE=<delay s>,<duration s>: after the delay, a thread samples the instruction pointer of
 // every other thread of the process each ~1 ms (suspend, read the context, resume) for the duration, then writes
 // build/samples.txt: "<thread id> <rip> <count>" lines (map the addresses with tools/za/samples.py and nm).
+// LARECOMP_SAMPLE_CALLER=<lo hex>,<hi hex>: samples inside that range (a leaf function such as memcmp) also count the
+// return address on top of the stack, under thread id | 0x80000000 - who calls it.
 #include <tlhelp32.h>
 #define SAMP_TAB (1u << 20)
 static struct { uint64_t rip; uint32_t tid, n; } *samp;
+static void samp_add(uint64_t rip, uint32_t tid) {
+    uint64_t k = (rip * 0x9E3779B97F4A7C15ull) ^ tid;
+    uint32_t slot = (uint32_t)(k >> 40) & (SAMP_TAB - 1);
+    for (int probe = 0; probe < 64; probe++, slot = (slot + 1) & (SAMP_TAB - 1)) {
+        if (!samp[slot].n) { samp[slot].rip = rip; samp[slot].tid = tid; samp[slot].n = 1; return; }
+        if (samp[slot].rip == rip && samp[slot].tid == tid) { samp[slot].n++; return; }
+    }
+}
 static DWORD WINAPI sampler_main(void *arg) {
     double delay = 0, dur = 10;
     sscanf((const char *)arg, "%lf,%lf", &delay, &dur);
     Sleep((DWORD)(delay * 1000));
     samp = calloc(SAMP_TAB, sizeof *samp);
+    unsigned long long caller_lo = 0, caller_hi = 0;
+    if (getenv("LARECOMP_SAMPLE_CALLER")) sscanf(getenv("LARECOMP_SAMPLE_CALLER"), "%llx,%llx", &caller_lo, &caller_hi);
     DWORD me = GetCurrentThreadId(), pid = GetCurrentProcessId();
     ULONGLONG end = GetTickCount64() + (ULONGLONG)(dur * 1000);
     uint64_t total = 0;
@@ -207,12 +219,9 @@ static DWORD WINAPI sampler_main(void *arg) {
             CONTEXT ctx = {.ContextFlags = CONTEXT_CONTROL};
             if (SuspendThread(h) != (DWORD)-1) {
                 if (GetThreadContext(h, &ctx)) {
-                    uint64_t k = (ctx.Rip * 0x9E3779B97F4A7C15ull) ^ te.th32ThreadID;
-                    uint32_t slot = (uint32_t)(k >> 40) & (SAMP_TAB - 1);
-                    for (int probe = 0; probe < 64; probe++, slot = (slot + 1) & (SAMP_TAB - 1)) {
-                        if (!samp[slot].n) { samp[slot].rip = ctx.Rip; samp[slot].tid = te.th32ThreadID; samp[slot].n = 1; break; }
-                        if (samp[slot].rip == ctx.Rip && samp[slot].tid == te.th32ThreadID) { samp[slot].n++; break; }
-                    }
+                    samp_add(ctx.Rip, te.th32ThreadID);
+                    if (ctx.Rip >= caller_lo && ctx.Rip < caller_hi)  // (the thread is suspended: its stack can be read)
+                        samp_add(*(const uint64_t *)(uintptr_t)ctx.Rsp, te.th32ThreadID | 0x80000000u);
                     total++;
                 }
                 ResumeThread(h);

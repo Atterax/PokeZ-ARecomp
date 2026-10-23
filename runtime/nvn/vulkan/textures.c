@@ -26,7 +26,7 @@ typedef struct { VkFormat vf; uint8_t expand_rgb, alpha_one; } VkFmt;
 static VkFormat depth24_stencil8(void) {
     static VkFormat f;
     if (!f) {
-        const char *e = getenv("LARECOMP_VK_D24");
+        const char *e = ENV("LARECOMP_VK_D24");
         VkFormatProperties p;
         vkGetPhysicalDeviceFormatProperties(g_vk.phys, VK_FORMAT_D24_UNORM_S8_UINT, &p);
         VkFormatFeatureFlags want = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
@@ -104,7 +104,7 @@ static VkFmt fmt_of(uint32_t f) {
     case 0x4A: return (VkFmt){VK_FORMAT_BC4_SNORM_BLOCK};
     case 0x4B: return (VkFmt){VK_FORMAT_BC5_UNORM_BLOCK};
     // 0x4C = signed RGTC2; LARECOMP_BC5_UNORM=1 decodes it unsigned (see metal.m / notes/PLAN.md)
-    case 0x4C: return (VkFmt){getenv("LARECOMP_BC5_UNORM") ? VK_FORMAT_BC5_UNORM_BLOCK : VK_FORMAT_BC5_SNORM_BLOCK};
+    case 0x4C: return (VkFmt){ENV("LARECOMP_BC5_UNORM") ? VK_FORMAT_BC5_UNORM_BLOCK : VK_FORMAT_BC5_SNORM_BLOCK};
     case 0x4D: return (VkFmt){VK_FORMAT_BC7_UNORM_BLOCK};
     case 0x4E: return (VkFmt){VK_FORMAT_BC7_SRGB_BLOCK};
     case 0x4F: return (VkFmt){VK_FORMAT_BC6H_SFLOAT_BLOCK};
@@ -176,7 +176,7 @@ void renderer_set_scale(float sx, float sy) { g_rs_x = sx; g_rs_y = sy; }
 uint64_t renderer_present_count(void);
 
 static bool tex_scalable(const NvnTexture *t) {
-    if (getenv("LARECOMP_NO_SCALE")) return false;
+    if (ENV("LARECOMP_NO_SCALE")) return false;
     if (t->target != 1 || t->samples > 1 || !(t->flags & 8) || t->width < 32 || t->height < 16) return false;
     float a = (float)t->width / (float)t->height;
     return a > 1.74f && a < 1.81f;
@@ -197,13 +197,13 @@ void vk_level_change_check(void) {
     const char *lv = game_level_name();
     if (strncmp(lv, last, sizeof last - 1) != 0) {
         strlcpy(last, lv, sizeof last);
-        if (!strncmp(lv, "TelephoneBox", 12) || getenv("LARECOMP_CLEAR_ALL_LEVELS")) g_level_gen++;
+        if (!strncmp(lv, "TelephoneBox", 12) || ENV("LARECOMP_CLEAR_ALL_LEVELS")) g_level_gen++;
     }
 }
 
 bool renderer_texture_frame_fresh(NvnTexture *t) {
     static int on = -1;
-    if (on < 0) on = getenv("LARECOMP_NO_FRAME_CLEAR") == NULL;
+    if (on < 0) on = ENV("LARECOMP_NO_FRAME_CLEAR") == NULL;
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;
     uint64_t total_frames = renderer_present_count();
     if (!on || !b || !b->scalable || b->frame_cleared == total_frames + 1) return false;
@@ -214,7 +214,7 @@ bool renderer_texture_frame_fresh(NvnTexture *t) {
 bool renderer_texture_level_fresh(NvnTexture *t) {
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;
     static int keep = -1;
-    if (keep < 0) keep = getenv("LARECOMP_KEEP_TARGETS") != NULL;
+    if (keep < 0) keep = ENV("LARECOMP_KEEP_TARGETS") != NULL;
     if (!b || keep || b->level_gen == g_level_gen) return false;
     if (!b->scalable) { b->level_gen = g_level_gen; return false; }
     bool fresh = b->level_gen != 0;
@@ -360,7 +360,7 @@ static void create_image(NvnTexture *t, TexBackend *b) {
             // levels of its scene depth - a hierarchical-Z pyramid nothing here fills in): its depth is reversed, so
             // 0 is far and hides nothing (1.0 culled the gate, lamp posts and planters). LARECOMP_HIZ_FAR=<value>.
             static float far = -1;
-            if (far < 0) far = getenv("LARECOMP_HIZ_FAR") ? (float)atof(getenv("LARECOMP_HIZ_FAR")) : 0.0f;
+            if (far < 0) far = ENV("LARECOMP_HIZ_FAR") ? (float)atof(ENV("LARECOMP_HIZ_FAR")) : 0.0f;
             VkClearDepthStencilValue fv = {far, 0};
             VkImageSubresourceRange r1 = {VK_IMAGE_ASPECT_DEPTH_BIT, 1, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
             vkCmdClearDepthStencilImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, &fv, 1, &r1);
@@ -494,9 +494,9 @@ static void hd_scan(HdSet *s, const char *dir) {
 
 static void hd_init(void) {
     if (hd_on >= 0) return;
-    const char *e = getenv("LARECOMP_TEX_HD");
+    const char *e = ENV("LARECOMP_TEX_HD");
     hd_on = e ? atoi(e) != 0 : g_settings.tex_hd;
-    e = getenv("LARECOMP_TEX_DUMP");
+    e = ENV("LARECOMP_TEX_DUMP");
     hd_dump = e ? atoi(e) != 0 : g_settings.tex_dump;
     if (hd_dump) { SDL_CreateDirectory("textures"); SDL_CreateDirectory("textures/dump"); }
     extern const char *pl_prompt_set(void);
@@ -656,7 +656,7 @@ static bool hd_load_dds(NvnTexture *t, TexBackend *b, uint64_t h, const char *pa
 static void hd_switch(void) {
     static int last = -1;
     static long flip_at = -2;  // (tests: LARECOMP_TEX_HD_FLIP=<frame> switches the setting at that frame, as F1 would)
-    if (flip_at == -2) { const char *e = getenv("LARECOMP_TEX_HD_FLIP"); flip_at = e ? atol(e) : -1; }
+    if (flip_at == -2) { const char *e = ENV("LARECOMP_TEX_HD_FLIP"); flip_at = e ? atol(e) : -1; }
     if (flip_at >= 0 && vk_frame_counter() == (uint64_t)flip_at) g_settings.tex_hd = !g_settings.tex_hd;
     hd_init();
     if (last < 0) { last = g_settings.tex_hd; return; }
@@ -787,7 +787,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (full_hash_budget_frame != frame) { full_hash_budget_frame = frame; full_hash_budget = 4 << 20; }
     const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
     static int always_full = -1;
-    if (always_full < 0) always_full = getenv("LARECOMP_TEX_FULLHASH") ? 1 : 0;
+    if (always_full < 0) always_full = ENV("LARECOMP_TEX_FULLHASH") ? 1 : 0;
     bool full = b->dynamic || !b->uploaded || always_full;
     bool periodic = frame - b->full_frame >= 120 && full_hash_budget >= total;  // (safety net: a full hash now and then)
     if (!full && periodic) { full = true; full_hash_budget -= total; }
@@ -797,7 +797,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     // hasn't written since the last check is not hashed at all (dynamic textures were fully hashed every frame,
     // ~2.4 MB a frame in the overworld). The periodic full hash stays as a safety net. LARECOMP_VK_TEX_WATCH=0: off.
     static int watch = -1;
-    if (watch < 0) { const char *e = getenv("LARECOMP_VK_TEX_WATCH"); watch = !e || atoi(e) != 0; }
+    if (watch < 0) { const char *e = ENV("LARECOMP_VK_TEX_WATCH"); watch = !e || atoi(e) != 0; }
     if (watch && !always_full) {
         extern int vk_pages_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now);
         uint32_t now = 0;
@@ -1090,7 +1090,7 @@ VkImageView vk_dummy_view(int textype) {
     VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL));
     VkCommandBuffer cb = vk_upload_cmd();
     vk_image_init_layout(cb, b->image, VK_IMAGE_ASPECT_COLOR_BIT);
-    float dv = getenv("LARECOMP_DUMMY_WHITE") ? 1.0f : 0.0f;  // (debug: white dummies)
+    float dv = ENV("LARECOMP_DUMMY_WHITE") ? 1.0f : 0.0f;  // (debug: white dummies)
     VkClearColorValue zero = {{dv, dv, dv, dv}};
     VkImageSubresourceRange all = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, cube ? 6 : 1};
     vkCmdClearColorImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &all);
@@ -1148,14 +1148,14 @@ VkSampler vk_sampler(NvnSamplerDesc *d) {
         si.maxAnisotropy = 16;
     }
     static float lodmin = -1;
-    if (lodmin < 0) lodmin = getenv("LARECOMP_LOD_MIN") ? (float)atof(getenv("LARECOMP_LOD_MIN")) : 0;
+    if (lodmin < 0) lodmin = ENV("LARECOMP_LOD_MIN") ? (float)atof(ENV("LARECOMP_LOD_MIN")) : 0;
     if (lodmin > 0 && mf > 1) si.minLod = fmaxf(si.minLod, lodmin);
     static int stest = -1;
-    if (stest < 0) stest = getenv("LARECOMP_SAMPLER_TEST") != NULL;
+    if (stest < 0) stest = ENV("LARECOMP_SAMPLER_TEST") != NULL;
     if (stest && mf > 1) { si.minLod = 0; si.maxLod = VK_LOD_CLAMP_NONE; si.anisotropyEnable = VK_TRUE; si.maxAnisotropy = 16; }
     if (d->compare_mode) {
         si.compareEnable = VK_TRUE;
-        si.compareOp = getenv("LARECOMP_NO_SHADOW") ? VK_COMPARE_OP_ALWAYS : compare_op(d->compare_func);
+        si.compareOp = ENV("LARECOMP_NO_SHADOW") ? VK_COMPARE_OP_ALWAYS : compare_op(d->compare_func);
     }
     VkSamplerCustomBorderColorCreateInfoEXT cb = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_CREATE_INFO_EXT};
     if (border) {

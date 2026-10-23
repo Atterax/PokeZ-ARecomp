@@ -16,6 +16,38 @@
 #include <vk_mem_alloc.h>  // (Debian / Ubuntu libvulkan-memory-allocator-dev)
 #endif
 
+// The Vulkan 1.2 / 1.3 commands come from the driver (vk_load_device_commands, after vkCreateDevice), not from the
+// loader's exports: a vulkan-1.dll older than 1.3 doesn't have them, and Windows then refuses to start the program
+// ("The procedure entry point vkCmdBeginRendering could not be located") before it can say what is missing.
+#define VK_DEVICE_COMMANDS(X)                                                                                         \
+    X(vkCmdBeginRendering) X(vkCmdEndRendering) X(vkCmdPipelineBarrier2) X(vkCmdWriteTimestamp2) X(vkQueueSubmit2)     \
+    X(vkCmdSetCullMode) X(vkCmdSetDepthBiasEnable) X(vkCmdSetDepthCompareOp) X(vkCmdSetDepthTestEnable)               \
+    X(vkCmdSetDepthWriteEnable) X(vkCmdSetFrontFace) X(vkCmdSetPrimitiveRestartEnable) X(vkCmdSetPrimitiveTopology)   \
+    X(vkCmdSetStencilOp) X(vkCmdSetStencilTestEnable) X(vkGetDeviceBufferMemoryRequirements)                          \
+    X(vkGetDeviceImageMemoryRequirements) X(vkGetSemaphoreCounterValue) X(vkWaitSemaphores)
+#define VK_DECLARE_COMMAND(f) extern PFN_##f vkp_##f;
+VK_DEVICE_COMMANDS(VK_DECLARE_COMMAND)
+#undef VK_DECLARE_COMMAND
+#define vkCmdBeginRendering vkp_vkCmdBeginRendering
+#define vkCmdEndRendering vkp_vkCmdEndRendering
+#define vkCmdPipelineBarrier2 vkp_vkCmdPipelineBarrier2
+#define vkCmdWriteTimestamp2 vkp_vkCmdWriteTimestamp2
+#define vkQueueSubmit2 vkp_vkQueueSubmit2
+#define vkCmdSetCullMode vkp_vkCmdSetCullMode
+#define vkCmdSetDepthBiasEnable vkp_vkCmdSetDepthBiasEnable
+#define vkCmdSetDepthCompareOp vkp_vkCmdSetDepthCompareOp
+#define vkCmdSetDepthTestEnable vkp_vkCmdSetDepthTestEnable
+#define vkCmdSetDepthWriteEnable vkp_vkCmdSetDepthWriteEnable
+#define vkCmdSetFrontFace vkp_vkCmdSetFrontFace
+#define vkCmdSetPrimitiveRestartEnable vkp_vkCmdSetPrimitiveRestartEnable
+#define vkCmdSetPrimitiveTopology vkp_vkCmdSetPrimitiveTopology
+#define vkCmdSetStencilOp vkp_vkCmdSetStencilOp
+#define vkCmdSetStencilTestEnable vkp_vkCmdSetStencilTestEnable
+#define vkGetDeviceBufferMemoryRequirements vkp_vkGetDeviceBufferMemoryRequirements
+#define vkGetDeviceImageMemoryRequirements vkp_vkGetDeviceImageMemoryRequirements
+#define vkGetSemaphoreCounterValue vkp_vkGetSemaphoreCounterValue
+#define vkWaitSemaphores vkp_vkWaitSemaphores
+
 #include "../nvn.h"
 #include "../maxwell/shader.h"
 

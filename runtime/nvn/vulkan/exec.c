@@ -126,7 +126,7 @@ static uint64_t stat_counters_gpu;
 static int vk_counter_mode(void) {
     static bool env;
     if (counter_mode < 0) {
-        const char *e = getenv("LARECOMP_VK_COUNTER");
+        const char *e = ENV("LARECOMP_VK_COUNTER");
         env = e != NULL;
         counter_mode = e && !strcmp(e, "cpu") ? 0 : e && !strcmp(e, "frozen") ? 1 : e && !strcmp(e, "legacy") ? 3 : 2;
         if (counter_mode == 2 && !g_vk.props.limits.timestampComputeAndGraphics) counter_mode = 0;
@@ -157,8 +157,8 @@ void vk_pace_frame(void) {
     // (off for Pokémon Z-A - its frame mode is its own (rt_za_frame_cfg), and it sizes its dynamic resolution from
     // these counters: slow-looking frames made it drop the resolution, pixelated while moving)
     extern bool g_za_frame_hook;
-    if (on < 0) { const char *e = getenv("LARECOMP_PACE"); on = !e || atoi(e) != 0; }
-    if (g_za_frame_hook && !getenv("LARECOMP_PACE")) on = 0;
+    if (on < 0) { const char *e = ENV("LARECOMP_PACE"); on = !e || atoi(e) != 0; }
+    if (g_za_frame_hook && !ENV("LARECOMP_PACE")) on = 0;
     static uint64_t last, last_wait;
     static uint8_t over[60];
     static int idx, nover, calm;
@@ -171,7 +171,7 @@ void vk_pace_frame(void) {
     double busy = (p > wt ? p - wt : 0) / 1e6;
     avg = avg ? avg + (busy - avg) * 0.05 : busy;
     static int log = -1;  // LARECOMP_LOG_PACE=1: each frame's period, vsync wait and busy time
-    if (log < 0) log = getenv("LARECOMP_LOG_PACE") != NULL;
+    if (log < 0) log = ENV("LARECOMP_LOG_PACE") != NULL;
     if (log) LOG("[pace] period %.2f blocked %.2f busy %.2f ms\n", p / 1e6, wt / 1e6, busy);
     int o = busy > 16.2;
     stat_pace_over += o;
@@ -209,7 +209,7 @@ static void cq_resolve(int i) {  // (cq_lock held) submission slot i is done: it
         int64_t cand = (int64_t)plat_now_ns() - (int64_t)((double)t[q->n - 1] * per);
         if (!cq_calibrated || cand < cq_offset) cq_offset = cand, cq_calibrated = true;
         static int log = -1;  // LARECOMP_LOG_COUNTER=1: the host (provisional) and GPU times of each counter
-        if (log < 0) log = getenv("LARECOMP_LOG_COUNTER") != NULL;
+        if (log < 0) log = ENV("LARECOMP_LOG_COUNTER") != NULL;
         for (uint32_t k = 0; k < q->n; k++) {
             uint64_t gpu = ns_to_gpu_ticks((uint64_t)((int64_t)((double)t[k] * per) + cq_offset));
             if (log) LOG("[counter] seq %llu #%u at %llx host %.3f gpu %.3f ms\n", (unsigned long long)q->seq, k,
@@ -327,7 +327,7 @@ static uint32_t dl_snap[DL_N][5];  // (those parameters when the draw was record
 static unsigned dl_n;
 static int dl_on = -1;
 static void dl_note(const char *fmt, ...) {
-    if (dl_on < 0) dl_on = getenv("LARECOMP_VK_DEVLOST_TRACE") ? atoi(getenv("LARECOMP_VK_DEVLOST_TRACE")) : 0;
+    if (dl_on < 0) dl_on = ENV("LARECOMP_VK_DEVLOST_TRACE") ? atoi(ENV("LARECOMP_VK_DEVLOST_TRACE")) : 0;
     if (!dl_on) return;
     va_list ap;
     va_start(ap, fmt);
@@ -515,7 +515,7 @@ static int new_chunk(uint64_t size) {
                                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO,
                                   .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
-    if (getenv("LARECOMP_VK_RING_SYSMEM")) ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;  // (test: a GPU without resizable BAR)
+    if (ENV("LARECOMP_VK_RING_SYSMEM")) ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;  // (test: a GPU without resizable BAR)
     VmaAllocationInfo info;
     VK_CHECK(vmaCreateBuffer(g_vk.vma, &bi, &ai, &c->buf, &c->mem, &info));
     c->ptr = info.pMappedData;
@@ -585,7 +585,7 @@ VkSpan vk_transient_copy(const void *data, uint64_t size, uint64_t align) {
 
 // Per-draw constants that usually repeat the previous draw's (scale table, tint, driver constants): reuse that copy
 // while it's identical, within one submission. slot: one per kind of data.
-enum { DEDUPE_RSCALE_V, DEDUPE_RSCALE_F, DEDUPE_TINT, DEDUPE_DRV_V, DEDUPE_DRV_F, DEDUPE_DRV_C, DEDUPE_SLOTS };
+enum { DEDUPE_RSCALE_V, DEDUPE_RSCALE_F, DEDUPE_TINT, DEDUPE_SLOTS };  // (the driver constants: cbuf_info)
 static VkSpan copy_dedupe(int slot, const void *data, uint64_t size, uint64_t align) {
     static struct { uint64_t seq, size; uint8_t data[0x800]; VkSpan span; } last[DEDUPE_SLOTS];
     uint64_t seq = vk_pending_seq();
@@ -617,9 +617,13 @@ typedef struct Job { void (*fn)(void *); void *arg; struct Job *next; } Job;
 static Job *jobs_head, *jobs_tail;
 static pthread_mutex_t jobs_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t jobs_cond = PTHREAD_COND_INITIALIZER;
+// when each thread's current job started (0: idle) - wait_built says which one a stalled draw is stuck behind
+#define MAX_WORKERS 16
+static _Atomic uint64_t worker_t0[MAX_WORKERS], translator_t0;
+static _Atomic int nworkers;
 
 static void *worker(void *a) {
-    (void)a;
+    int me = (int)(intptr_t)a;
     for (;;) {
         pthread_mutex_lock(&jobs_lock);
         while (!jobs_head) pthread_cond_wait(&jobs_cond, &jobs_lock);
@@ -627,7 +631,9 @@ static void *worker(void *a) {
         jobs_head = j->next;
         if (!jobs_head) jobs_tail = NULL;
         pthread_mutex_unlock(&jobs_lock);
+        atomic_store(&worker_t0[me], SDL_GetTicksNS());
         j->fn(j->arg);
+        atomic_store(&worker_t0[me], 0);
         free(j);
     }
     return NULL;
@@ -635,7 +641,7 @@ static void *worker(void *a) {
 
 static bool sync_shaders(void) {
     static int v = -1;
-    if (v < 0) v = getenv("LARECOMP_SYNC_SHADERS") != NULL;
+    if (v < 0) v = ENV("LARECOMP_SYNC_SHADERS") != NULL;
     return v;
 }
 
@@ -654,7 +660,9 @@ static void *translator(void *a) {
         tjobs_head = j->next;
         if (!tjobs_head) tjobs_tail = NULL;
         pthread_mutex_unlock(&tjobs_lock);
+        atomic_store(&translator_t0, SDL_GetTicksNS());
         j->fn(j->arg);
+        atomic_store(&translator_t0, 0);
         free(j);
     }
     return NULL;
@@ -681,8 +689,9 @@ static void run_job(void (*fn)(void *), void *arg) {
         // first entry into an area builds dozens of pipelines at once: use most of the CPU (draws wait for them)
         int n = SDL_GetNumLogicalCPUCores() - 4;
         if (n < 4) n = 4;
-        if (n > 16) n = 16;
-        for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
+        if (n > MAX_WORKERS) n = MAX_WORKERS;
+        nworkers = n;
+        for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, (void *)(intptr_t)i); }
     }
     Job *j = malloc(sizeof *j);
     j->fn = fn; j->arg = arg; j->next = NULL;
@@ -767,7 +776,7 @@ const char *renderer_stats(void) {
              atomic_exchange(&stat_compiles, 0), (unsigned long long)stat_feedback_copies, (double)stat_upload_bytes / 1048576.0,
              (double)stat_vtx_cached / 1048576.0, (double)stat_vtx_host / 1048576.0, (unsigned long long)stat_xfb_sessions);
     stat_feedback_copies = stat_upload_bytes = stat_vtx_cached = stat_vtx_host = stat_xfb_sessions = 0;
-    if (getenv("LARECOMP_SKIP_WHY")) {
+    if (ENV("LARECOMP_SKIP_WHY")) {
         LOG("[vk] skipped by line:");
         for (int i = 0; i < 4096; i++) if (skip_why[i]) LOG(" %d:%u", i, skip_why[i]);
         LOG("\n");
@@ -842,7 +851,7 @@ static void st_defaults(void) {
 }
 
 void vk_exec_init(void) {
-    prof = getenv("LARECOMP_VK_PROF") != NULL;
+    prof = ENV("LARECOMP_VK_PROF") != NULL;
     if (prof) {
         prof_up_ns = 0;
         VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = SUBS * 2};
@@ -906,7 +915,7 @@ static struct {
 static int ss_on = -1;
 static void ss_forget(void) { ss.known = 0; ss.vb_known = 0; }
 static bool ss_enabled(void) {
-    if (ss_on < 0) { const char *e = getenv("LARECOMP_VK_STATE_FILTER"); ss_on = !e || atoi(e) != 0; }
+    if (ss_on < 0) { const char *e = ENV("LARECOMP_VK_STATE_FILTER"); ss_on = !e || atoi(e) != 0; }
     return ss_on;
 }
 // true: the state must be recorded (and is remembered as known)
@@ -928,7 +937,7 @@ static void vk_end_pass_at(int line) {
         char path[256];
         static uint64_t debug_pass_frame = ~0ull;
         static int multi = -1;
-        if (multi < 0) multi = getenv("LARECOMP_DEBUG_FRAMES") != NULL;
+        if (multi < 0) multi = ENV("LARECOMP_DEBUG_FRAMES") != NULL;
         if (multi && renderer_present_count() != debug_pass_frame) { debug_pass_frame = renderer_present_count(); debug_pass_no = 0; }
         if (multi) snprintf(path, sizeof path, "build/pass_%llu_%03d.png", (unsigned long long)debug_pass_frame, debug_pass_no++);
         else snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no++);
@@ -1271,7 +1280,7 @@ static VkPipelineLayout make_layout(Prog *p, int nsets, VkShaderStageFlags s0, V
 }
 
 static void save_glsl(const char *src, uint64_t addr, const char *suffix) {
-    if (!getenv("LARECOMP_SAVE_MSL")) return;
+    if (!ENV("LARECOMP_SAVE_MSL")) return;
     mkdir("build/glsl", 0755);
     char path[256];
     snprintf(path, sizeof path, "build/glsl/%llx_%s.glsl", (unsigned long long)addr, suffix);
@@ -1308,7 +1317,7 @@ static void gwin_pick(void) {
     pthread_mutex_lock(&lock);
     if (!atomic_load(&gwin_done)) {
         uint64_t a = 0, sz = kernel_phys_largest(&a);
-        const char *force = getenv("LARECOMP_GWIN");  // (debug) <base hex>:<size hex>
+        const char *force = ENV("LARECOMP_GWIN");  // (debug) <base hex>:<size hex>
         if (force) {
             unsigned long long fb = 0, fs = 0;
             sscanf(force, "%llx:%llx", &fb, &fs);
@@ -1346,7 +1355,7 @@ static void translate_program(void *arg) {
         p->fi = p->code[1] ? maxwell_translate((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], STAGE_FRAGMENT, &p->fkey)
                            : maxwell_empty_fragment();
     }
-    if (getenv("LARECOMP_DUMP_GLSL")) {  // (debug) build/glsl/<code address>.{vert,frag}[.asm]: source and disassembly
+    if (ENV("LARECOMP_DUMP_GLSL")) {  // (debug) build/glsl/<code address>.{vert,frag}[.asm]: source and disassembly
         mkdir("build/glsl", 0755);
         for (int sg = 0; sg < 2; sg++) {
             ShaderInfo *si = sg ? p->fi : p->vi;
@@ -1770,7 +1779,7 @@ static void debug_save_depth(TexBackend *b, const char *path) {
 // (debug) LARECOMP_COPY_TRACE=<frame>: draws' attachments / sampled textures, copies and snapshots of that frame ("[ct]")
 static bool ct_on(void) {
     static const char *e = (const char *)1;
-    if (e == (const char *)1) e = getenv("LARECOMP_COPY_TRACE");
+    if (e == (const char *)1) e = ENV("LARECOMP_COPY_TRACE");
     if (!e) return false;
     static uint64_t memo_f = ~0ull;
     static bool memo;
@@ -1822,7 +1831,7 @@ static uint64_t stat_alias_made, stat_alias_renamed, stat_alias_partial, stat_al
 
 static int copy_opt(void) {
     static int on = -1;
-    if (on < 0) { const char *e = getenv("LARECOMP_VK_COPY_OPT"); on = e && *e ? atoi(e) : 1; }
+    if (on < 0) { const char *e = ENV("LARECOMP_VK_COPY_OPT"); on = e && *e ? atoi(e) : 1; }
     return on;
 }
 
@@ -1954,7 +1963,7 @@ static void alias_draw_check(void) {
 static void resolve_feedback(Prog *pr) {
     nfeedback = 0;
     static int off = -1;
-    if (off < 0) off = getenv("LARECOMP_NO_FEEDBACK") != NULL;
+    if (off < 0) off = ENV("LARECOMP_NO_FEEDBACK") != NULL;
     if (off) return;
     ShaderInfo *infos[2] = {pr->vi, pr->fi};
     for (int sg = 0; sg < 2; sg++)
@@ -1965,7 +1974,7 @@ static void resolve_feedback(Prog *pr) {
             for (int k = 0; k < nfeedback; k++) have |= feedback_tex[k] == t;
             if (have || nfeedback == 4) continue;
             static int nosnap = -1;
-            if (nosnap < 0) nosnap = getenv("LARECOMP_NO_SNAPSHOT_REUSE") != NULL;
+            if (nosnap < 0) nosnap = ENV("LARECOMP_NO_SNAPSHOT_REUSE") != NULL;
             int si = -1;
             for (int k = 0; k < 8; k++) if (snap_tex[k] == t) si = k;
             bool self_write = t == st.rt.depth && st.ds[0] && st.ds[1];
@@ -2016,6 +2025,24 @@ static VkDescriptorBufferInfo ubo_span(VkSpan s, uint64_t size) {
 static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32_t gx, uint32_t gy, uint32_t gz) {
     static const uint8_t zeros[0x10000];
     if (k == 0) {
+        // The driver constants are made from the stage's buffer bindings (and a dispatch's group size) alone: a draw
+        // binding the same ones as the previous draw of its kind, in the same submission, shares that copy. Comparing
+        // those few hundred bytes replaced building the 2 KB table and comparing it whole, twice a draw (7% of the
+        // render thread, the one that limits the frame rate on slower CPUs).
+        uint64_t size = si->cbuf_size[0] > 0x800 ? 0x800 : (si->cbuf_size[0] ? si->cbuf_size[0] : 256);
+        if (size < 0x500 && stage == 5) size = 0x500;
+        struct { uint64_t size, sb[16][2], ub[16][2]; uint32_t g[4]; } key;
+        memset(&key, 0, sizeof key);
+        key.size = size;
+        for (int i = 0; i < 16; i++) key.sb[i][0] = st.sbuf[stage][i].addr, key.sb[i][1] = st.sbuf[stage][i].size;
+        if (stage == 5) {
+            for (int i = 0; i < 16; i++) key.ub[i][0] = st.ubuf[5][i].addr, key.ub[i][1] = st.ubuf[5][i].size;
+            key.g[0] = gx, key.g[1] = gy, key.g[2] = gz;
+        }
+        static struct { uint64_t seq; __typeof__(key) key; VkSpan span; } last[3];
+        int slot = stage == 5 ? 2 : stage == 1 ? 1 : 0;
+        uint64_t seq = vk_pending_seq();
+        if (last[slot].seq == seq && !memcmp(&last[slot].key, &key, sizeof key)) return ubo_span(last[slot].span, size);
         uint32_t drv[0x800 / 4] = {0};
         if (si->uses_gmem) {  // storage buffers outside the guest memory window: their shader accesses read zero
             static int nlog;
@@ -2045,9 +2072,9 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
                 e[2] = (uint32_t)st.sbuf[stage][i].size;
             }
         }
-        uint64_t size = si->cbuf_size[0] > sizeof drv ? sizeof drv : (si->cbuf_size[0] ? si->cbuf_size[0] : 256);
-        if (size < 0x500 && stage == 5) size = 0x500;
-        return ubo_span(copy_dedupe(stage == 5 ? DEDUPE_DRV_C : stage == 1 ? DEDUPE_DRV_F : DEDUPE_DRV_V, drv, size, 256), size);
+        VkSpan sp = vk_transient_copy(drv, size, 256);
+        last[slot].seq = seq, last[slot].key = key, last[slot].span = sp;
+        return ubo_span(sp, size);
     }
     if (k == 1) {  // compiler constants stored after the shader code
         NvnShaderStage *ss = &st.program->stages[stage];
@@ -2118,7 +2145,7 @@ static uint64_t gmem_tried;  // heap size the import was last attempted for (gme
 
 static VkDescriptorBufferInfo gmem_info(void) {
     static int off = -1;
-    if (off < 0) off = getenv("LARECOMP_VK_NO_GMEM") != NULL || !g_vk.host_import;
+    if (off < 0) off = ENV("LARECOMP_VK_NO_GMEM") != NULL || !g_vk.host_import;
     uint64_t want = (gwin_want() + 0xFFFF) & ~0xFFFFull;
     if (want > gwin_max) want = gwin_max;
     static int nlog;
@@ -2188,7 +2215,7 @@ static uint64_t stat_xm_fallback;
 
 static bool xm_on(void) {
     static int on = -1;
-    if (on < 0) { const char *e = getenv("LARECOMP_VK_XFB_MIRROR"); on = !e || atoi(e) != 0; }
+    if (on < 0) { const char *e = ENV("LARECOMP_VK_XFB_MIRROR"); on = !e || atoi(e) != 0; }
     return on && g_vk.host_import;
 }
 
@@ -2264,7 +2291,7 @@ static void xm_copy_back(VkCommandBuffer cb) {
 
 static void gfast_prepare(VkCommandBuffer cb) {
     static int on = -1;
-    if (on < 0) { const char *e = getenv("LARECOMP_VK_GMEM_FAST"); on = !e || atoi(e) != 0; }
+    if (on < 0) { const char *e = ENV("LARECOMP_VK_GMEM_FAST"); on = !e || atoi(e) != 0; }
     memset(gmap_tab, 0, sizeof gmap_tab);
     gfast_n = 0;
     gmem_info();  // (the heap import, made on first use)
@@ -2298,9 +2325,9 @@ static void gfast_prepare(VkCommandBuffer cb) {
         off += (len + 255) & ~255ull;
     }
     if (!m) return;
-    if (getenv("LARECOMP_LOG_GFAST")) {  // (debug) =<shader code address hex>: that shader's first tables
+    if (ENV("LARECOMP_LOG_GFAST")) {  // (debug) =<shader code address hex>: that shader's first tables
         static int nlog;
-        if (st.program->stages[5].code_addr == strtoull(getenv("LARECOMP_LOG_GFAST"), NULL, 16) && nlog++ < 40) {
+        if (st.program->stages[5].code_addr == strtoull(ENV("LARECOMP_LOG_GFAST"), NULL, 16) && nlog++ < 40) {
             LOG("[gfast] cs %llx: %d ranges, %llu KB:", (unsigned long long)st.program->stages[5].code_addr, m, (unsigned long long)(off >> 10));
             for (int i = 0; i < m; i++) LOG(" %llx+%llx", (unsigned long long)(r[i].lo + gwin_base), (unsigned long long)(r[i].hi - r[i].lo));
             LOG("\n");
@@ -2436,7 +2463,7 @@ static void vc_mark_sbufs(int stage) {
 
 static bool vcache_lookup(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
     if (vc_on < 0) {
-        const char *e = getenv("LARECOMP_VK_VCACHE");
+        const char *e = ENV("LARECOMP_VK_VCACHE");
         vc_on = !e || atoi(e) != 0;
         if (vc_on && !pt_init()) {
             LOG("[vk] vertex cache off: no page write tracking\n");
@@ -2549,7 +2576,7 @@ void vc_flush(void) {
 
 static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
     static int copy = -1;
-    if (copy < 0) copy = getenv("LARECOMP_VK_COPY_VERTICES") != NULL;
+    if (copy < 0) copy = ENV("LARECOMP_VK_COPY_VERTICES") != NULL;
     if (copy || addr < gwin_base) return false;
     if (addr + size > gwin_base + gmem_size && gwin_want() != gmem_tried) { gmem_tried = gwin_want(); gmem_info(); }
     if (!gmem_buf || addr + size > gwin_base + gmem_size) return false;
@@ -2609,7 +2636,7 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
             extern uint32_t vk_view_gen;
             extern uint64_t vk_frame_counter(void);
             static int nomemo = -1;
-            if (nomemo < 0) nomemo = getenv("LARECOMP_VK_NO_TEX_MEMO") != NULL;
+            if (nomemo < 0) nomemo = ENV("LARECOMP_VK_NO_TEX_MEMO") != NULL;
             static struct { NvnTexture *tex; uint64_t vh, frame; uint32_t gen; uint8_t type, has_view; VkImageView view; } memo[1024];
             uint64_t vh = e->has_view ? hash_words(0, &e->view, sizeof e->view) : 0, frame = vk_frame_counter();
             uint32_t ms = (uint32_t)((((uintptr_t)e->tex >> 4) ^ vh ^ (uint64_t)st_->type * 0x9E3779B97F4A7C15ull) & 1023);
@@ -2636,7 +2663,7 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
     }
     {   // (debug) LARECOMP_CS_DUMMY_TEX=<compute code hex>: that compute shader samples 1x1 black textures
         static uint64_t dummy_cs = ~0ull;
-        if (dummy_cs == ~0ull) dummy_cs = getenv("LARECOMP_CS_DUMMY_TEX") ? strtoull(getenv("LARECOMP_CS_DUMMY_TEX"), NULL, 16) : 0;
+        if (dummy_cs == ~0ull) dummy_cs = ENV("LARECOMP_CS_DUMMY_TEX") ? strtoull(ENV("LARECOMP_CS_DUMMY_TEX"), NULL, 16) : 0;
         if (stage == 5 && dummy_cs && st.program && (dummy_cs == 1 || st.program->stages[5].code_addr == dummy_cs))
             view = VK_NULL_HANDLE;  // (1: every compute shader - code addresses change between runs)
     }
@@ -2760,7 +2787,7 @@ static CsProg *compute_program(NvnProgram *np) {
     k.glsl = 1;
     pthread_mutex_lock(&translate_lock);
     cp->si = maxwell_translate((const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, STAGE_COMPUTE, &k);
-    if (getenv("LARECOMP_DUMP_GLSL")) {  // (debug) build/glsl/<code address>.comp
+    if (ENV("LARECOMP_DUMP_GLSL")) {  // (debug) build/glsl/<code address>.comp
         mkdir("build/glsl", 0755);
         char path[96];
         snprintf(path, sizeof path, "build/glsl/%llx.comp", (unsigned long long)ss->code_addr);
@@ -2771,7 +2798,7 @@ static CsProg *compute_program(NvnProgram *np) {
     cp->p.vi = cp->si;
     if (!cp->si->msl) {
         LOG("[compute] translate failed: %s (code %llx)\n", cp->si->error, (unsigned long long)ss->code_addr);
-        if (getenv("LARECOMP_DUMP_CS_HEAD")) {
+        if (ENV("LARECOMP_DUMP_CS_HEAD")) {
             const uint32_t *w = (const uint32_t *)(uintptr_t)ss->code_addr;
             int nz = 1;
             while (nz < 1024 && !w[nz]) nz++;
@@ -2799,10 +2826,10 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     if (!cp || atomic_load(&cp->p.state) != 1) { stat_skipped_here(); return; }
     {   // LARECOMP_SKIP_CS=<code address hex> (debug): skip that compute shader's dispatches, to see what it does
         static uint64_t skip = ~0ull;
-        if (skip == ~0ull) { const char *e = getenv("LARECOMP_SKIP_CS"); skip = e ? strtoull(e, NULL, 16) : 0; }
+        if (skip == ~0ull) { const char *e = ENV("LARECOMP_SKIP_CS"); skip = e ? strtoull(e, NULL, 16) : 0; }
         if (skip && st.program->stages[5].code_addr == skip) { stat_skipped_here(); return; }
     }
-    if (cp->si->uses_gmem && getenv("LARECOMP_LOG_CS_SBUF")) {  // (debug) the storage buffers bound to gmem dispatches
+    if (cp->si->uses_gmem && ENV("LARECOMP_LOG_CS_SBUF")) {  // (debug) the storage buffers bound to gmem dispatches
         static uint64_t seen_cs[16];
         static int seen_n[16];
         int k = 0;
@@ -2831,7 +2858,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         }
         LOG("\n");
     }
-    if (getenv("LARECOMP_LOG_CS_TEX")) {  // (debug) each compute shader's textures, once
+    if (ENV("LARECOMP_LOG_CS_TEX")) {  // (debug) each compute shader's textures, once
         static uint64_t seen[64];
         static int nseen;
         uint64_t code = st.program->stages[5].code_addr;
@@ -2929,7 +2956,7 @@ static void xfb_note(void) {
         (unsigned long long)xfb_size[0], (unsigned long long)xfb_addr[1], (unsigned long long)xfb_size[1],
         (unsigned long long)xfb_addr[2], (unsigned long long)xfb_size[2], (unsigned long long)xfb_addr[3],
         (unsigned long long)xfb_size[3]);
-    if (getenv("LARECOMP_DUMP_XFB") && st.program->stages[0].control) {
+    if (ENV("LARECOMP_DUMP_XFB") && st.program->stages[0].control) {
         char path[96];
         snprintf(path, sizeof path, "build/xfb_%llx.bin", (unsigned long long)vs);
         FILE *f = fopen(path, "wb");
@@ -2942,13 +2969,33 @@ static void draw_(CmdRec *r, bool indexed);
 // window image - whose shader or pipeline is still being built is waited for (a few ms, once) rather than skipped:
 // skipping one of those left the whole frame black (Pokémon Z-A: a black flash as a menu opened or closed).
 // Scene draws are still skipped until ready (a moment's pop-in instead of a hitch).
+// One that isn't built within 2 s isn't waited for again (it was 2 s per frame: a black screen at 0.5 fps on a
+// player's PC as a battle began), and the log says what the shader threads were doing.
 static bool wait_built(_Atomic int *state, const CmdRec *r) {
     if (atomic_load(state) == 1) return true;
     if (r->x[2] > 6) return false;
+    static _Atomic int *gave_up[64];
+    static int ngave_up;
+    for (int i = 0; i < ngave_up; i++) if (gave_up[i] == state) return false;
     uint64_t t0 = SDL_GetTicksNS();
     while (atomic_load(state) == 0 && SDL_GetTicksNS() - t0 < 2000000000ull) SDL_Delay(1);
+    uint64_t now = SDL_GetTicksNS();
     static int n;
-    if (n++ < 20) LOG("[vk] full-screen draw waited %.1f ms for its shader / pipeline\n", (SDL_GetTicksNS() - t0) / 1e6);
+    if (n++ < 20) LOG("[vk] full-screen draw waited %.1f ms for its shader / pipeline\n", (now - t0) / 1e6);
+    if (atomic_load(state) == 0) {
+        if (ngave_up < 64) gave_up[ngave_up++] = state;
+        uint64_t tt = atomic_load(&translator_t0), longest = 0;
+        int busy = 0;
+        for (int i = 0; i < nworkers; i++) {
+            uint64_t w = atomic_load(&worker_t0[i]);
+            if (w) busy++, longest = now - w > longest ? now - w : longest;
+        }
+        LOG("[vk] full-screen draw (vs %llx fs %llx): its shader / pipeline isn't built after 2 s - not waited for again; "
+            "translator %s %.1f s, %d of %d compile threads busy (longest %.1f s)\n",
+            st.program ? (unsigned long long)st.program->stages[0].code_addr : 0ull,
+            st.program ? (unsigned long long)st.program->stages[1].code_addr : 0ull, tt ? "busy for" : "idle",
+            tt ? (now - tt) / 1e9 : 0.0, busy, nworkers, longest / 1e9);
+    }
     return atomic_load(state) == 1;
 }
 static void draw(CmdRec *r, bool indexed) {
@@ -3021,7 +3068,7 @@ static void draw_(CmdRec *r, bool indexed) {
         static int nskip = -1;
         if (nskip < 0) {
             nskip = 0;
-            for (const char *p = getenv("LARECOMP_SKIP_FSHASH"); p && *p && nskip < 16;) {
+            for (const char *p = ENV("LARECOMP_SKIP_FSHASH"); p && *p && nskip < 16;) {
                 skip[nskip++] = strtoull(p, (char **)&p, 16);
                 while (*p == ',') p++;
             }
@@ -3029,7 +3076,7 @@ static void draw_(CmdRec *r, bool indexed) {
         for (int i = 0; i < nskip; i++) if (last_hash == skip[i]) { stat_skipped_here(); return; }
         extern bool pot_level_active(void);
         if (last_hash == 0xa2177dbb72197bd9ull && pot_level_active()) { stat_skipped_here(); return; }
-        if (g_debug_frame && getenv("LARECOMP_LOG_FSHASH")) LOG("[fshash] fs=%llx hash %016llx\n", (unsigned long long)fs, (unsigned long long)last_hash);
+        if (g_debug_frame && ENV("LARECOMP_LOG_FSHASH")) LOG("[fshash] fs=%llx hash %016llx\n", (unsigned long long)fs, (unsigned long long)last_hash);
         g_cur_fs_hash = last_hash;
         extern void widescreen_backdrop_seen(uint64_t hash);
         if (last_hash) widescreen_backdrop_seen(last_hash);
@@ -3120,7 +3167,7 @@ static void draw_(CmdRec *r, bool indexed) {
 
     // ---- depth / stencil (dynamic)
     static int nodt = -1;
-    if (nodt < 0) nodt = getenv("LARECOMP_NO_DEPTH_TEST") != NULL;
+    if (nodt < 0) nodt = ENV("LARECOMP_NO_DEPTH_TEST") != NULL;
     bool dt = st.ds[0] && !nodt && pass_depth;
     if (ss_need(SS_DT, ss.dt == (VkBool32)dt)) { ss.dt = dt; vkCmdSetDepthTestEnable(cb, dt); }
     VkBool32 dw = dt && st.ds[1];
@@ -3132,7 +3179,7 @@ static void draw_(CmdRec *r, bool indexed) {
     // workaround: LESS_OR_EQUAL with a few ulps of bias towards the camera, which also let walls paint over the
     // plants stuck flat on them (beach) - so it is off.
     static int tol = -1;
-    if (tol < 0) tol = getenv("LARECOMP_VK_EQUAL_TOL") != NULL;
+    if (tol < 0) tol = ENV("LARECOMP_VK_EQUAL_TOL") != NULL;
     bool equal_tol = dop == VK_COMPARE_OP_EQUAL && tol;
     if (equal_tol) dop = VK_COMPARE_OP_LESS_OR_EQUAL;
     if (ss_need(SS_DOP, ss.dop == dop)) { ss.dop = dop; vkCmdSetDepthCompareOp(cb, dop); }
@@ -3164,7 +3211,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (ss_need(SS_CULL, ss.cull == cm)) { ss.cull = cm; vkCmdSetCullMode(cb, cm); }
     bool ccw = st.poly[1] == 1;
     static int flipw = -1;  // LARECOMP_VK_FLIP_WINDING: invert the front-face mapping (A/B against Metal)
-    if (flipw < 0) flipw = getenv("LARECOMP_VK_FLIP_WINDING") != NULL;
+    if (flipw < 0) flipw = ENV("LARECOMP_VK_FLIP_WINDING") != NULL;
     bool front_ccw = (ccw != vkey.flip_y) != (flipw != 0);
     VkFrontFace ff = front_ccw ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
     if (ss_need(SS_FF, ss.ff == ff)) { ss.ff = ff; vkCmdSetFrontFace(cb, ff); }
@@ -3175,7 +3222,7 @@ static void draw_(CmdRec *r, bool indexed) {
     {
         float f[3] = {0, 0, 0};
         static int off = -1;
-        if (off < 0) off = getenv("LARECOMP_NO_DEPTH_BIAS") != NULL;
+        if (off < 0) off = ENV("LARECOMP_NO_DEPTH_BIAS") != NULL;
         bool on = (st.poly[3] & 4) && !off;
         if (on) memcpy(f, st.poly_offset, sizeof f);
         if (equal_tol) { f[1] -= 8; on = true; }  // (see the EQUAL comment above: a few depth ulps nearer)
@@ -3464,7 +3511,7 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
         st.viewport[0][0], st.viewport[0][1], st.viewport[0][2], st.viewport[0][3], pr->vi->attr_mask, st.color_state[0], st.ds[0],
         st.ds[1], st.ds[2], st.poly[0], st.poly[1], st.channel_mask, st.poly[3], st.poly_offset[0], st.poly_offset[1],
         st.poly_offset[2]);
-    if (getenv("LARECOMP_DEBUG_DATA")) {  // vertex streams 0-1 and fragment cbufs: the first floats
+    if (ENV("LARECOMP_DEBUG_DATA")) {  // vertex streams 0-1 and fragment cbufs: the first floats
         for (int s = 0; s < 2; s++) {
             if (!st.vbuf[s].addr) continue;
             const float *v = (const float *)(uintptr_t)st.vbuf[s].addr;
@@ -3513,7 +3560,7 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
         // (LARECOMP_DEBUG_TEX: the first 64 sampled textures of 256+ pixels and the first 32 sampled render targets, once each)
         static NvnTexture *saved[96];
         static int nsaved, nsaved_rt, dump = -1;
-        if (dump < 0) dump = getenv("LARECOMP_DEBUG_TEX") != NULL;
+        if (dump < 0) dump = ENV("LARECOMP_DEBUG_TEX") != NULL;
         bool rt = b && b->scalable;
         if (dump && b && t->width >= 256 && t->height >= 64 && (rt ? nsaved_rt < 32 : nsaved < 64) &&
             !(b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) {
@@ -3565,7 +3612,7 @@ static void draw_indirect(CmdRec *r) {
     for (uint32_t i = 0; i < n; i++) {
         const uint32_t *p = (const uint32_t *)(uintptr_t)(ind + (uint64_t)i * stride);
         static int nargs;
-        if (nargs < 400 && getenv("LARECOMP_LOG_INDIRECT")) {
+        if (nargs < 400 && ENV("LARECOMP_LOG_INDIRECT")) {
             nargs++;
             LOG("[vk] indirect %llx: %u %u %u %u %u\n", (unsigned long long)(ind + (uint64_t)i * stride), p[0], p[1], p[2], p[3],
                 elements ? p[4] : 0);
@@ -3578,7 +3625,7 @@ static void draw_indirect(CmdRec *r) {
             // draw reads them there; the CPU side covers the index range from the buffer's start (the first index
             // applies on the GPU) with one instance
             static int gpu_args_log = -1;  // (debug) LARECOMP_LOG_GPU_ARGS=<n>: n parameter sets as the GPU sees them
-            if (gpu_args_log < 0) gpu_args_log = getenv("LARECOMP_LOG_GPU_ARGS") ? atoi(getenv("LARECOMP_LOG_GPU_ARGS")) : 0;
+            if (gpu_args_log < 0) gpu_args_log = ENV("LARECOMP_LOG_GPU_ARGS") ? atoi(ENV("LARECOMP_LOG_GPU_ARGS")) : 0;
             if (gpu_args_log > 0 && renderer_present_count() > 600) {
                 gpu_args_log--;
                 vk_end_pass();
@@ -4020,7 +4067,7 @@ static void post_pass(VkCommandBuffer cb, const char *fs, const VkImageView *src
 static bool depth_blit_ok(VkFormat f) {
     static struct { VkFormat f; bool ok; } cache[4];
     static int forced = -1;
-    if (forced < 0) { const char *e = getenv("LARECOMP_VK_DEPTH_BLIT"); forced = e && !strcmp(e, "shader"); }
+    if (forced < 0) { const char *e = ENV("LARECOMP_VK_DEPTH_BLIT"); forced = e && !strcmp(e, "shader"); }
     if (forced) return false;
     for (int i = 0; i < 4; i++)
         if (cache[i].f == f) return cache[i].ok;
@@ -4258,7 +4305,7 @@ static void exec_list(uint64_t handle, int depth) {
             NvnProgram *p = (NvnProgram *)(uintptr_t)r->x[0];
             uint32_t m = (uint32_t)r->x[1] & 0x3F;
             if (!m) m = 0x3F;
-            if (getenv("LARECOMP_LOG_BINDPROG")) {
+            if (ENV("LARECOMP_LOG_BINDPROG")) {
                 static int n;
                 if (n++ < 40) LOG("[bindprog] %p stages %#x (program has %#x)\n", (void *)p, m, p ? p->stage_mask : 0);
             }
@@ -4325,7 +4372,7 @@ static void exec_list(uint64_t handle, int depth) {
             st.rt.dview = rt->dview;
             st.rt.has_dview = rt->has_dview;
             static int always = -1;
-            if (always < 0) always = getenv("LARECOMP_VK_PASS_RESTART") != NULL;
+            if (always < 0) always = ENV("LARECOMP_VK_PASS_RESTART") != NULL;
             if (always || memcmp(&prev, &st.rt, sizeof prev)) st.rt_dirty = true;
             break;
         }
@@ -4355,7 +4402,7 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_CLEAR_COLOR: {
             snap_reason = "clear-color"; snapshots_invalidate(NULL);
             int index = (int)r->x[0];
-            if (getenv("LARECOMP_LOG_CLEARS") && index < st.rt.ncolor && st.rt.color[index])
+            if (ENV("LARECOMP_LOG_CLEARS") && index < st.rt.ncolor && st.rt.color[index])
                 LOG("[cclear] frame %llu idx %d %ux%u f%#x mask %#x\n", (unsigned long long)renderer_present_count(), index,
                     st.rt.color[index]->width, st.rt.color[index]->height, st.rt.color[index]->format, (uint32_t)r->x[2]);
             if (ct_on() && index < st.rt.ncolor && st.rt.color[index])
@@ -4429,7 +4476,7 @@ static void exec_list(uint64_t handle, int depth) {
             // shading - left for the submission's end, cutscenes drew them black and scenery vanished)
             if (xm_back_n) { vk_end_pass(); xm_copy_back(vk_cmd()); }
             static int nlog = -1;  // (debug) LARECOMP_LOG_XFB_DATA=<n>: the first entries of n sessions' buffers, as written
-            if (nlog < 0) nlog = getenv("LARECOMP_LOG_XFB_DATA") ? atoi(getenv("LARECOMP_LOG_XFB_DATA")) : 0;
+            if (nlog < 0) nlog = ENV("LARECOMP_LOG_XFB_DATA") ? atoi(ENV("LARECOMP_LOG_XFB_DATA")) : 0;
             if (nlog > 0 && renderer_present_count() > 600 && gmem_buf) {
                 nlog--;
                 vk_end_pass();
@@ -4476,7 +4523,7 @@ static void exec_list(uint64_t handle, int depth) {
             break;
         case CMD_FENCE_SYNC: {
             static int fence_flush = -1;
-            if (fence_flush < 0) fence_flush = getenv("LARECOMP_FENCE_FLUSH") ? 1 : 0;
+            if (fence_flush < 0) fence_flush = ENV("LARECOMP_FENCE_FLUSH") ? 1 : 0;
             if (fence_flush) renderer_flush();
             extern void nvn_sync_set_seq(uint64_t guest, uint64_t seq);
             if (r->x[1]) nvn_sync_set_seq(r->x[1], renderer_fence_seq());
@@ -4506,7 +4553,7 @@ static void exec_list(uint64_t handle, int depth) {
             {   // (test) LARECOMP_TEST_COUNTER_DELAY_MS=<ms>: stall the host after a frame's first counter - a slow CPU
                 static double delay = -1;
                 static uint64_t delayed_frame = ~0ull;
-                if (delay < 0) delay = getenv("LARECOMP_TEST_COUNTER_DELAY_MS") ? atof(getenv("LARECOMP_TEST_COUNTER_DELAY_MS")) : 0;
+                if (delay < 0) delay = ENV("LARECOMP_TEST_COUNTER_DELAY_MS") ? atof(ENV("LARECOMP_TEST_COUNTER_DELAY_MS")) : 0;
                 if (delay > 0 && vk_frame_counter() != delayed_frame) {
                     delayed_frame = vk_frame_counter();
                     SDL_DelayPrecise((Uint64)(delay * 1e6));
@@ -4545,7 +4592,7 @@ void backend_execute(uint64_t handle) {
     PROF_ADD(prof_exec);
     if (prof) cum_exec += SDL_GetTicksNS() - prof_t0_;
     static int sync_submit = -1;
-    if (sync_submit < 0) sync_submit = getenv("LARECOMP_SYNC_SUBMIT") ? 1 : 0;
+    if (sync_submit < 0) sync_submit = ENV("LARECOMP_SYNC_SUBMIT") ? 1 : 0;
     if (sync_submit) renderer_flush();
     else renderer_submit();
 }
