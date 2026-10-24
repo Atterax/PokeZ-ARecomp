@@ -13840,6 +13840,10 @@ static void ImGui::NavUpdateWindowing()
                 g.NavInputSource = ImGuiInputSource_Keyboard;
                 break;
             }
+    // (LASRecomp: a toggle the gamepad started has no key - a keyboard nav key pressed while the gamepad's Menu button is
+    // held made the source Keyboard, then IsKeyReleased(ImGuiKey_None) asserted: the controls tab crash, issue #14)
+    if (g.NavWindowingToggleLayer && g.NavInputSource == ImGuiInputSource_Keyboard && g.NavWindowingToggleKey == ImGuiKey_None)
+        g.NavWindowingToggleLayer = false;
     if (g.NavWindowingToggleLayer && g.NavInputSource == ImGuiInputSource_Keyboard)
     {
         // We cancel toggling nav layer when any text has been typed (generally while holding Alt). (See #370)
