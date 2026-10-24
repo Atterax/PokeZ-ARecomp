@@ -20,6 +20,7 @@
 static uint32_t skip_why[4096];
 #define stat_skipped_here() (stat_skipped++, skip_why[__LINE__ & 4095]++)
 static uint64_t stat_vtx_cached, stat_vtx_host, stat_xfb_sessions;  // vertex stream bytes bound from the vertex cache / from host memory
+static uint64_t stat_scene_wait_ns;  // (wait_scene)
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static uint64_t stat_upload_bytes;
 // LARECOMP_VK_PROF=1: render-thread time per category in the fps log (exec = whole command lists, draw = draw(),
@@ -770,11 +771,13 @@ const char *renderer_stats(void) {
     }
     snprintf(stats_text, sizeof stats_text,
              "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, wait %.0fms, compile %d, fbcopy %llu, upload %.1fMB, "
-             "vertices %.0fMB cached %.0fMB host, xfb sessions %llu",
+             "vertices %.0fMB cached %.0fMB host, xfb sessions %llu, scene waits %.0fms",
              (unsigned long long)stat_draws, (unsigned long long)stat_skipped, (unsigned long long)stat_passes,
              (unsigned long long)stat_dispatches, (unsigned long long)stat_flushes, (double)stat_wait_ns / 1e6,
              atomic_exchange(&stat_compiles, 0), (unsigned long long)stat_feedback_copies, (double)stat_upload_bytes / 1048576.0,
-             (double)stat_vtx_cached / 1048576.0, (double)stat_vtx_host / 1048576.0, (unsigned long long)stat_xfb_sessions);
+             (double)stat_vtx_cached / 1048576.0, (double)stat_vtx_host / 1048576.0, (unsigned long long)stat_xfb_sessions,
+             (double)stat_scene_wait_ns / 1e6);
+    stat_scene_wait_ns = 0;
     stat_feedback_copies = stat_upload_bytes = stat_vtx_cached = stat_vtx_host = stat_xfb_sessions = 0;
     if (ENV("LARECOMP_SKIP_WHY")) {
         LOG("[vk] skipped by line:");
@@ -3051,12 +3054,32 @@ static void fixed_state(FixedState *f, bool flip_x, bool flip_y, bool native, Vk
 // A draw of a handful of vertices - a full-screen pass: post-processing, a menu's backdrop, the composite into the
 // window image - whose shader or pipeline is still being built is waited for (a few ms, once) rather than skipped:
 // skipping one of those left the whole frame black (Pokémon Z-A: a black flash as a menu opened or closed).
-// Scene draws are still skipped until ready (a moment's pop-in instead of a hitch).
+// Scene draws wait a little too: a pipeline already in the caches (cache/vk_pipelines.bin, the driver's, the SPIR-V
+// one) is built in 1-2 ms, but skipping the draw took the object off the screen for a whole frame - every time a
+// scene came into view, and at different places each run, as the builds' timing varies (trees, buildings, tables
+// blinking or going black for a frame in a recorded play). Up to 4 ms a draw, 6 ms a frame
+// (LARECOMP_VK_SCENE_WAIT_MS, 0: skip at once); past that it's skipped as before - shaders never built before (a
+// moment's pop-in the first time instead of a hitch).
 // One that isn't built within 2 s isn't waited for again (it was 2 s per frame: a black screen at 0.5 fps on a
 // player's PC as a battle began), and the log says what the shader threads were doing.
+static bool wait_scene(_Atomic int *state) {
+    static double budget_ms = -1;
+    if (budget_ms < 0) budget_ms = ENV("LARECOMP_VK_SCENE_WAIT_MS") ? atof(ENV("LARECOMP_VK_SCENE_WAIT_MS")) : 6;
+    static uint64_t frame = ~0ull, spent_ns;
+    uint64_t f = renderer_present_count();
+    if (f != frame) frame = f, spent_ns = 0;
+    uint64_t left = (uint64_t)(budget_ms * 1e6) > spent_ns ? (uint64_t)(budget_ms * 1e6) - spent_ns : 0;
+    if (left > 4000000ull) left = 4000000ull;
+    if (!left) return false;
+    uint64_t t0 = SDL_GetTicksNS(), now = t0;
+    while (atomic_load(state) == 0 && (now = SDL_GetTicksNS()) - t0 < left) SDL_DelayPrecise(100000);
+    spent_ns += now - t0;
+    stat_scene_wait_ns += now - t0;
+    return atomic_load(state) == 1;
+}
 static bool wait_built(_Atomic int *state, const CmdRec *r) {
     if (atomic_load(state) == 1) return true;
-    if (r->x[2] > 6) return false;
+    if (r->x[2] > 6) return wait_scene(state);
     static _Atomic int *gave_up[64];
     static int ngave_up;
     for (int i = 0; i < ngave_up; i++) if (gave_up[i] == state) return false;
