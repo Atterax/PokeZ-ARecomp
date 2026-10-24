@@ -451,10 +451,12 @@ static void tab_display(void) {
         extern bool g_za_frame_hook;
         if (g_za_frame_hook) {
             int fr = g_settings.fps60 ? 1 : 0;
-            static const char *rates[] = {"30 fps (Switch)", "60 fps"};
+            static const char *rates[] = {"30 fps (Switch)", "60 fps (experimental)"};
             if (opt_choice("Frame rate", &fr, rates, 2, 0,
-                           "30 fps: as on the Switch. 60 fps: the game presents every vsync and steps its world 1/60 s "
-                           "a frame - same speed, smoother; needs a faster CPU."))
+                           "30 fps: as on the Switch (recommended). 60 fps (experimental): the game presents every vsync "
+                           "and steps its world 1/60 s a frame - smoother, but it needs a fast CPU (slow motion "
+                           "otherwise), and distant trees, shadows and some surfaces can flicker or go black for a "
+                           "moment: parts of the game made for 30 fps."))
                 g_settings.fps60 = fr == 1;
         }
     }
