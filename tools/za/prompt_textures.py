@@ -29,6 +29,8 @@ ap.add_argument('--romfs', action='append', help='game files: a folder or a RomF
                                                   'extracted/romfs.bin); more than once: several game versions')
 ap.add_argument('--ooz', help='ooz shared library (ooz_decompress export; default: ooz.dll / libooz.so next to this program)')
 ap.add_argument('--styles', default='keyboard,xbox,playstation,nintendo', help='the sets to make')
+ap.add_argument('--list', metavar='REGEX', help="print the UI archives' textures whose name matches (then make nothing)")
+ap.add_argument('--list-dir', help='with --list: save the BC5 ones there as PNG (red = label, green = shape)')
 ap.add_argument('--install', metavar='VERSION', help='made into <out>.new, then <out>/.made = VERSION and swapped in '
                                                       'whole (the start screen / runtime: a game never sees half a set)')
 ap.add_argument('--settings', default=None, help='settings file with bind_key_* lines (default: none = defaults)')
@@ -791,11 +793,25 @@ found = {}  # hash -> (name, decoded)
 bc3 = set()  # (those stored as BC3: written back label -> RGB, shape -> alpha)
 
 
+listed = set()
+
+
 def scan_sarc(d):
     if d[:4] != b'SARC': return
     for f in sarc_files(d):
         if f[:4] != b'BNTX': continue
         for name, w, h, fmt, bh, data in bntx_textures(f):
+            if args.list and re.search(args.list, name) and name not in listed:  # (finding a game's icons by name)
+                listed.add(name)
+                print(f'texture {name} {w}x{h} fmt {fmt:#x} {hash_full(data):016x}')
+                if args.list_dir:
+                    os.makedirs(args.list_dir, exist_ok=True)
+                    if fmt in (0x1e01, 0x1c01):
+                        im = decode_bc5(data, w, h, bh, fmt)
+                        rgb = np.zeros((h, w, 3), np.uint8)
+                        rgb[:, :, 0] = (im[:, :, 0] * 255).astype(np.uint8)
+                        rgb[:, :, 1] = (im[:, :, 1] * 255).astype(np.uint8)
+                        Image.fromarray(rgb).save(os.path.join(args.list_dir, name.replace('^', '_') + '.png'))
             if name not in ICONS or fmt not in (0x1e01, 0x1c01): continue  # (BC5; BC3 in some mods' archives)
             hh = hash_full(data)
             if hh not in found: found[hh] = (name, decode_bc5(data, w, h, bh, fmt))
@@ -828,6 +844,7 @@ for root, _, names in os.walk(args.mods):
     for nm in names:
         if nm.endswith('.arc'):
             with open(os.path.join(root, nm), 'rb') as f: scan_sarc(f.read())
+if args.list: sys.exit(0)
 print(len(found), 'icon textures,', sum(len(v) for v in icon_fonts.values()), 'icon fonts')
 print('labels:', {b: key(b) for b in ('a', 'b', 'x', 'y', 'l', 'r', 'zl', 'zr', 'plus', 'minus')})
 
