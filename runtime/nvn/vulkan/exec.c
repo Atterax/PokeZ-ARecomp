@@ -2019,6 +2019,19 @@ static void resolve_feedback(Prog *pr) {
         for (int i = 0; i < infos[sg]->ntex; i++) {
             NvnTexture *t = shader_texture_object(sg, &infos[sg]->tex[i]);
             if (!is_attachment(t)) continue;
+            // Drawn into one mip level above the base, reading the texture's other levels: a mip chain being built,
+            // no feedback loop - sampled in place. Pokémon Z-A builds its depth pyramid this way (each level from the
+            // one above, the whole texture sampled at an explicit level); the snapshot held level 0 only and was
+            // reused for the following levels, so most of the pyramid came out empty or stale, and the game's GPU
+            // occlusion culling, which reads it, dropped visible objects: tables, statues, trees and stalls vanishing
+            // and coming back with the camera.
+            if (t == st.rt.depth && st.rt.has_dview && (st.rt.dview.setmask & 1) && st.rt.dview.base_level) continue;
+            {
+                bool mip = false;
+                for (int k = 0; k < st.rt.ncolor; k++)
+                    if (t == st.rt.color[k] && st.rt.has_cview[k] && (st.rt.cview[k].setmask & 1) && st.rt.cview[k].base_level) mip = true;
+                if (mip) continue;
+            }
             bool have = false;
             for (int k = 0; k < nfeedback; k++) have |= feedback_tex[k] == t;
             if (have || nfeedback == 4) continue;
