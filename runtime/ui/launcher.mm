@@ -468,22 +468,36 @@ static bool import_packages(const std::vector<std::string> &pkgs, const std::str
     return true;
 }
 
-// Pokémon Z-A's button icons redrawn for the keyboard, Xbox and PlayStation (textures/prompts/<style>/, the one
+// Pokémon Z-A's button icons redrawn for the keyboard and the controllers (textures/prompts/<style>/, the one
 // runtime/hle/pl.c picks at boot) from the player's own game files by zaprompts (tools/za/prompt_textures.py frozen,
-// with ooz: GPLv3, a program of its own - third_party/ooz/README.ZARecomp.md). Made once per PROMPTS_VERSION: zaprompts
-// --install draws them into textures/prompts.new and swaps that in whole itself (a game started meanwhile never sees
-// half a set). Tried up to 3 times per version (textures/prompts.tried): failing leaves the game's own icons.
-// Log: textures/prompts.log. The setup waits for it (the first boot has them); a copy set up before them gets
-// them in the background when the game boots (runtime/main.c: that copy skips this screen), for its next start.
-#define PROMPTS_VERSION "1"
+// with ooz: GPLv3, a program of its own - third_party/ooz/README.ZARecomp.md). Each icon names the key or button bound
+// to its input, so they are made for one set of bindings: textures/prompts/.made holds the stamp they were made for
+// (PROMPTS_VERSION + a hash of the bindings), and they are made again when it differs - at the setup (waited for: the
+// first boot has them), at a boot (runtime/main.c: a set-up copy skips this screen) and right after a rebind in the
+// Controls tab (both in the background: from the next start). zaprompts --install draws them into textures/prompts.new
+// and swaps that in whole itself (a game never sees half a set). Up to 3 tries per stamp (textures/prompts.tried):
+// failing leaves the game's own icons. Log: textures/prompts.log.
+#define PROMPTS_VERSION "2"
 static std::atomic<bool> g_prompts_busy{false};
-// a marker file's version, and (textures/prompts.tried: "<version> <tries>") its count
+static PlatProc g_prompts_proc;  // (the one left running: a newer rebind ends it and starts over)
+static std::string prompts_stamp(void) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    auto mix = [&](const void *p, size_t n) {
+        for (size_t i = 0; i < n; i++) h = (h ^ ((const uint8_t *)p)[i]) * 0x100000001b3ull;
+    };
+    mix(g_bind_pad, sizeof g_bind_pad);
+    mix(g_bind_key, sizeof g_bind_key);
+    char s[48];
+    snprintf(s, sizeof s, "%s-%016llx", PROMPTS_VERSION, (unsigned long long)h);
+    return s;
+}
+// a marker file holding this stamp, and (textures/prompts.tried: "<stamp> <tries>") its count
 static bool prompts_marked(const char *path, int *tries = NULL) {
     FILE *f = fopen(path, "rb");
     if (!f) return false;
-    char v[16] = "";
+    char v[48] = "";
     int n = 0;
-    bool ok = fscanf(f, "%15s %d", v, &n) >= 1 && !strcmp(v, PROMPTS_VERSION);
+    bool ok = fscanf(f, "%47s %d", v, &n) >= 1 && prompts_stamp() == v;
     fclose(f);
     if (tries) *tries = ok ? n : 0;
     return ok;
@@ -496,7 +510,7 @@ static bool prompts_wanted(void) {
     return rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool) &&
            file_exists(g_root + "/romfs.bin") && !prompts_marked("textures/prompts/.made") && tries < 3;
 }
-// wait: until made (the setup), else started and left running (the game's boot)
+// wait: until made (the setup), else started and left running (a boot, a rebind)
 static bool make_prompts(bool wait) {
     char tool[1100];
     if (g_prompts_busy.exchange(true)) return false;
@@ -504,18 +518,22 @@ static bool make_prompts(bool wait) {
         g_prompts_busy = false;
         return false;
     }
+    if (g_prompts_proc && plat_proc_wait(g_prompts_proc, false) < 0) plat_proc_kill(g_prompts_proc);  // (made for old bindings)
+    g_prompts_proc = 0;
     mkdir("textures", 0755);
+    std::string stamp = prompts_stamp();
     int tries = 0;
     prompts_marked("textures/prompts.tried", &tries);
-    if (FILE *f = fopen("textures/prompts.tried", "wb")) fprintf(f, "%s %d", PROMPTS_VERSION, tries + 1), fclose(f);
+    if (FILE *f = fopen("textures/prompts.tried", "wb")) fprintf(f, "%s %d", stamp.c_str(), tries + 1), fclose(f);
     std::string romfs = g_root + "/romfs.bin";
-    const char *ini = getenv("LARECOMP_SETTINGS");  // (as runtime/settings.c: the bound keys label the keyboard's icons)
+    const char *ini = getenv("LARECOMP_SETTINGS");  // (as runtime/settings.c: the bindings the icons name)
     if (!ini || !*ini) ini = "larecomp.ini";
     const char *argv[] = {tool, "--romfs", romfs.c_str(), "--settings", ini, "--mods", "mods", "--out", "textures/prompts",
-                          "--install", PROMPTS_VERSION, NULL};
+                          "--install", stamp.c_str(), NULL};
     PlatProc p = plat_spawn(argv, "textures/prompts.log", false);
     if (!wait || !p) {
         fprintf(stderr, "[launcher] button icons: %s\n", p ? "being made (zaprompts, textures/prompts.log)" : "zaprompts didn't start");
+        g_prompts_proc = p;
         g_prompts_busy = false;
         return p != 0;
     }
@@ -524,10 +542,16 @@ static bool make_prompts(bool wait) {
     g_prompts_busy = false;
     return r == 0;
 }
-// runtime/main.c, a set-up copy booting straight into the game: the icons made in the background if they never were
+// runtime/main.c, a set-up copy booting straight into the game: the icons made in the background if they never were,
+// or were made for other bindings
 extern "C" void launcher_prompts_kick(const char *root) {
     g_root = root;
+    settings_load();  // (the bindings: the boot loads them later, runtime/main.c boot)
     if (prompts_wanted()) make_prompts(false);
+}
+// runtime/ui/controls_ui.mm, a binding changed (larecomp.ini saved): the icons made again for it, from the next start
+extern "C" void launcher_prompts_refresh(void) {
+    if (!g_root.empty() && prompts_wanted()) make_prompts(false);
 }
 
 // progress (the overlay's bar): the romfs copy, then the image build - each about the size of romfs/ (g_done, g_total)

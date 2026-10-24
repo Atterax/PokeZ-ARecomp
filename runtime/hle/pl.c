@@ -137,10 +137,10 @@ static void load_fonts(void) {
         load_one("fonts/nintendo_ext_003.ttf", &fonts[1]);
 }
 
-// The prompts' style, chosen once at boot: "keyboard", "xbox" (controls by position: A/B and X/Y traded - the
-// Switch's A on the east button), "xboxlabel" (by letter, A on the Xbox pad's A: the letters stay; both name the
-// shoulders / triggers / menu buttons LB RB LT RT Menu View), "playstation" / "playstation_south" (the face buttons'
-// shapes, A on the circle / on the cross; L1 R1 L2 R2 Options Share) or NULL (the game's own). Names both the button glyph
+// The prompts' style, chosen once at boot: "keyboard", "xbox", "playstation", "nintendo" (a controller SDL names no
+// family for) or NULL (the game's own: no controller, prompts = nintendo). Each set names, for every input, the key
+// or button it is bound to now - in that pad's own words (A B X Y LB RB LT RT Menu View; cross circle square triangle
+// L1 R1 L2 R2 Options Share), made by tools/za/prompt_textures.py for the current bindings. Names both the button glyph
 // font (fonts/nintendo_ext_003_<set>.ttf: tools/za/keyboard_font.py, xbox_font.py) and the game's own UI icons
 // relabelled (textures/prompts/<set>: tools/za/prompt_textures.py, runtime/nvn/vulkan/textures.c).
 const char *pl_prompt_set(void) {
@@ -157,9 +157,8 @@ const char *pl_prompt_set(void) {
     bool xbox = g_settings.prompts == PROMPTS_XBOX || (g_settings.prompts == PROMPTS_AUTO && fam == 1);
     bool ps = g_settings.prompts == PROMPTS_PLAYSTATION || (g_settings.prompts == PROMPTS_AUTO && fam == 2);
     bool keys = g_settings.prompts == PROMPTS_KEYBOARD || (g_settings.prompts == PROMPTS_AUTO && !pad);
-    bool east = g_bind_pad[0] == SDL_GAMEPAD_BUTTON_EAST;  // (the Switch's A on the east button: by position)
-    // PlayStation: shapes - "playstation" A = circle (east), "playstation_south" A = cross
-    set = keys ? "keyboard" : xbox ? (east ? "xbox" : "xboxlabel") : ps ? (east ? "playstation" : "playstation_south") : NULL;
+    (void)g_bind_pad;  // (each set is made for the bindings: runtime/ui/launcher.mm remakes them when those change)
+    set = keys ? "keyboard" : xbox ? "xbox" : ps ? "playstation" : pad ? "nintendo" : NULL;
     return set;
 }
 

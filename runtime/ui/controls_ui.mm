@@ -10,6 +10,7 @@
 extern "C" {
 #include "../input_bind.h"
 #include "../settings.h"
+void launcher_prompts_refresh(void);  // runtime/ui/launcher.mm
 }
 
 static void cell(int dev, int slot, int fam, int cap_dev, int cap_slot, int ms_left) {
@@ -114,7 +115,10 @@ extern "C" void controls_bindings_draw(float scale) {
                      bind_input_name(rother), rdev == BIND_DEV_PAD ? bind_pad_label(g_bind_pad[rother], fam) : bind_key_label(g_bind_key[rother]));
         else if (kind == 3) snprintf(msg, sizeof msg, "Cancelled: %s unchanged.", bind_input_name(rslot));
         else if (kind == 4) snprintf(msg, sizeof msg, "Nothing pressed: %s unchanged.", bind_input_name(rslot));
-        if (kind == 1 || kind == 2 || kind == 5) settings_save();
+        if (kind == 1 || kind == 2 || kind == 5) {
+            settings_save();
+            launcher_prompts_refresh();  // (the game's button icons drawn again for the new bindings: runtime/ui/launcher.mm)
+        }
     }
     if (msg[0]) ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", msg);
 
@@ -155,6 +159,7 @@ extern "C" void controls_bindings_draw(float scale) {
     ImGui::TextDisabled("Bindings apply to the game only. Menus keep the fixed layout (right face button / Enter "
                         "select, bottom face button / Esc back), and the in-game menu always opens with F1 or Esc, or "
                         "the controller's Back + Start held together, or its Home / Guide button - so this page can't be "
-                        "locked out. The game's button icons follow the controller bindings.");
+                        "locked out. The game's button icons follow these bindings: after a change they are drawn "
+                        "again in the background and show from the next start.");
     ImGui::PopTextWrapPos();
 }

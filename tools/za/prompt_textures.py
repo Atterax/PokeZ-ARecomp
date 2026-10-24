@@ -1,12 +1,13 @@
 # Makes textures/prompts/<style>/<hash>.png: Pokémon Z-A's own button icons (the UI layouts' icon_key_a_00,
-# icon_key_zl_00, ... and the title screen's "PRESS (A)") relabelled for the keyboard and the Xbox pad. The system
+# icon_key_zl_00, ... and the title screen's "PRESS (A)") relabelled for the keyboard and the controllers. The system
 # font glyphs (keyboard_font.py / xbox_font.py) only cover the button glyphs inside message text; the HUD, menus' key
 # guides and the title draw these textures instead. runtime/nvn/vulkan/textures.c swaps them in like an HD pack
-# texture, from the set runtime/hle/pl.c picks for the prompts (the same choice as the fonts):
-#   keyboard   - keys with the bound keys' names (the settings file's bind_key_* lines, else the defaults); rerun
-#                after rebinding
-#   xbox       - controls by position (the Switch's A on the east button): A/B and X/Y traded, LB RB LT RT Menu View
-#   xboxlabel  - controls by letter: A B X Y unchanged, LB RB LT RT Menu View
+# texture, from the set runtime/hle/pl.c picks for the prompts (the same choice as the fonts). Every set follows the
+# settings file's bindings (else the defaults): each icon names what the player presses for that input.
+#   keyboard     - keys with the bound keys' names (bind_key_*)
+#   xbox         - the Xbox pad's button bound to each input (bind_pad_*): A B X Y, LB RB LT RT, Menu View
+#   playstation  - the same in PlayStation's: cross circle square triangle, L1 R1 L2 R2, Options Share
+#   nintendo     - a Nintendo controller: only inputs moved off their own button get a new label
 #
 # The icons are BC5 masks: green = the button's shape, red = white with the label cut out. A relabel keeps the shape
 # (the keyboard's keys get a key cap) and redraws the label, at 4x the game's size.
@@ -27,7 +28,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument('--romfs', action='append', help='game files: a folder or a RomFS image (default extracted/romfs, else '
                                                   'extracted/romfs.bin); more than once: several game versions')
 ap.add_argument('--ooz', help='ooz shared library (ooz_decompress export; default: ooz.dll / libooz.so next to this program)')
-ap.add_argument('--styles', default='keyboard,xbox,xboxlabel,playstation,playstation_south', help='the sets to make')
+ap.add_argument('--styles', default='keyboard,xbox,playstation,nintendo', help='the sets to make')
 ap.add_argument('--install', metavar='VERSION', help='made into <out>.new, then <out>/.made = VERSION and swapped in '
                                                       'whole (the start screen / runtime: a game never sees half a set)')
 ap.add_argument('--settings', default=None, help='settings file with bind_key_* lines (default: none = defaults)')
@@ -233,12 +234,17 @@ SHORT = {'Return': 'Enter', 'Backspace': 'Bksp', 'Escape': 'Esc', 'Left Shift': 
          'Delete': 'Del', 'Insert': 'Ins', 'PageUp': 'PgUp', 'PageDown': 'PgDn', 'Keypad Enter': 'Enter'}
 ARROWS = {'Up': 'up', 'Down': 'down', 'Left': 'left', 'Right': 'right'}
 
-binds = dict(DEFAULTS)
+# the controller: the button each Switch input is on (bind_pad_*, by position; runtime/hle/bindings.c DEF_PAD)
+PAD_DEFAULTS = {'a': 'east', 'b': 'south', 'x': 'north', 'y': 'west', 'lstick': 'lstick', 'rstick': 'rstick',
+                'l': 'lshoulder', 'r': 'rshoulder', 'zl': 'ltrigger', 'zr': 'rtrigger', 'plus': 'start', 'minus': 'back',
+                'left': 'dpad_left', 'up': 'dpad_up', 'right': 'dpad_right', 'down': 'dpad_down'}
+binds, pad_binds = dict(DEFAULTS), dict(PAD_DEFAULTS)
 if args.settings:
     for line in open(args.settings, encoding='utf-8', errors='replace'):
         k, _, v = line.partition('=')
         k, v = k.strip(), v.strip()
         if k.startswith('bind_key_') and v and k[9:] in binds: binds[k[9:]] = v
+        if k.startswith('bind_pad_') and v and k[9:] in pad_binds: pad_binds[k[9:]] = v
 
 
 def key(slot):
@@ -266,12 +272,23 @@ ICONS = {'icon_key_a_00^t': 'a', 'icon_key_b_00^t': 'b', 'icon_key_x_00^t': 'x',
          'grptext_title_key_guide_00^t': 'a'}
 KEEP_SHAPE = ('_hold_', '_keep_', '_ol_', 'title')  # (shapes with a mark of their own: hold / outline)
 
-XBOX_COMMON = {'l': 'LB', 'r': 'RB', 'zl': 'LT', 'zr': 'RT', 'plus': ('menu',), 'minus': ('view',)}
-# PlayStation: shapes, not letters. playstation = controls by position (the Switch's A on the east button: circle),
-# playstation_south = A on the south button (cross), as bind_pad_a = south
-PS_COMMON = {'l': 'L1', 'r': 'R1', 'zl': 'L2', 'zr': 'R2', 'plus': ('options',), 'minus': ('share',)}
-PS_FACE = {'playstation': {'a': ('circle',), 'b': ('cross',), 'x': ('triangle',), 'y': ('square',)},
-           'playstation_south': {'a': ('cross',), 'b': ('circle',), 'x': ('square',), 'y': ('triangle',)}}
+# The controllers' sets name, for each Switch input, the button it is bound to (bind_pad_*) in that pad's own words:
+# a rebind (say the menu, the Switch's X, moved to Xbox Menu) changes the icons with it. runtime/ui/launcher.mm remakes
+# them when the bindings change. A d-pad direction or stick press on its own place keeps the game's drawing.
+PAD_LABEL = {
+    'xbox': {'south': 'A', 'east': 'B', 'west': 'X', 'north': 'Y', 'lshoulder': 'LB', 'rshoulder': 'RB',
+             'ltrigger': 'LT', 'rtrigger': 'RT', 'start': ('menu',), 'back': ('view',), 'lstick': 'LS', 'rstick': 'RS',
+             'guide': 'XB', 'misc1': 'SH', 'rpaddle1': 'P1', 'lpaddle1': 'P3', 'rpaddle2': 'P2', 'lpaddle2': 'P4'},
+    'playstation': {'south': ('cross',), 'east': ('circle',), 'west': ('square',), 'north': ('triangle',),
+                    'lshoulder': 'L1', 'rshoulder': 'R1', 'ltrigger': 'L2', 'rtrigger': 'R2', 'start': ('options',),
+                    'back': ('share',), 'lstick': 'L3', 'rstick': 'R3', 'guide': 'PS', 'touchpad': 'TP',
+                    'misc1': 'M', 'rpaddle1': 'RB', 'lpaddle1': 'LB', 'rpaddle2': 'RF', 'lpaddle2': 'LF'},
+    # a Nintendo controller (Pro Controller, Joy-Cons): only a moved input gets a new label
+    'nintendo': {'south': 'B', 'east': 'A', 'west': 'Y', 'north': 'X', 'lshoulder': 'L', 'rshoulder': 'R',
+                 'ltrigger': 'ZL', 'rtrigger': 'ZR', 'start': '+', 'back': '-', 'lstick': 'LS', 'rstick': 'RS',
+                 'guide': 'H', 'misc1': 'C'},
+}
+DPAD = {'dpad_up': ('arrow', 'up'), 'dpad_down': ('arrow', 'down'), 'dpad_left': ('arrow', 'left'), 'dpad_right': ('arrow', 'right')}
 
 
 def label(style, button):
@@ -280,10 +297,11 @@ def label(style, button):
         if button == 'ls': return stick_keys('ls_')
         if button == 'rs': return stick_keys('rs_')
         return key(button)
-    if style in PS_FACE: return PS_FACE[style].get(button) or PS_COMMON.get(button)
-    if button in XBOX_COMMON: return XBOX_COMMON[button]
-    if style == 'xbox': return {'a': 'B', 'b': 'A', 'x': 'Y', 'y': 'X'}.get(button)
-    return None
+    if button not in pad_binds: return None  # (the sticks' own icons)
+    host = pad_binds[button]
+    if host == PAD_DEFAULTS[button] and (button in ('lstick', 'rstick', 'up', 'down', 'left', 'right') or style == 'nintendo'):
+        return None
+    return DPAD.get(host) or PAD_LABEL[style].get(host, host[:2].upper())
 
 
 # ------------------------------------------------------------------ drawing
