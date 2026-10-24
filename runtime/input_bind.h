@@ -28,6 +28,14 @@ enum { PADB_LTRIGGER = 26 /* SDL_GAMEPAD_BUTTON_COUNT */, PADB_RTRIGGER, PADB_HO
 
 extern int16_t g_bind_pad[BIND_PAD_COUNT];  // PADB value per Switch button
 extern int16_t g_bind_key[BIND_KEY_COUNT];  // SDL_Scancode per input (0 = none)
+// Mouse buttons -> Switch button (BIND_A..BIND_DOWN, -1 none): the other way round from the tables above, so a mouse
+// button adds to the keyboard's key instead of taking its place. Only while the mouse camera holds the cursor.
+enum { MOUSEB_LEFT, MOUSEB_RIGHT, MOUSEB_MIDDLE, MOUSEB_X1, MOUSEB_X2, MOUSEB_COUNT };
+extern int16_t g_bind_mouse[MOUSEB_COUNT];
+const char *bind_mouse_name(int mb);           // "Left button"
+int bind_mouse_from_sdl(int sdl_button);       // SDL_BUTTON_* -> MOUSEB_* (-1: another button)
+void bind_mouse_reset(void);
+bool bind_mouse_is_default(void);
 
 const char *bind_input_name(int slot);         // "A", "D-pad Up", "Left stick Up"
 const char *bind_pad_label(int host, int fam); // controller button in the pad family's own words (fam: input_pad_family)

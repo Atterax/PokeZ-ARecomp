@@ -13,6 +13,7 @@ enum { UPSCALE_BILINEAR = 0, UPSCALE_METALFX = 1 /* macOS */, UPSCALE_FSR1 = 2 /
 #endif
 enum { AA_OFF = 0, AA_SMAA = 1 };
 enum { PROMPTS_AUTO = 0, PROMPTS_NINTENDO = 1, PROMPTS_XBOX = 2, PROMPTS_PLAYSTATION = 3, PROMPTS_KEYBOARD = 4 };  // (keyboard: Pokémon Z-A's font glyphs, runtime/hle/pl.c)
+enum { MOUSE_CAM_OFF = 0, MOUSE_CAM_HOLD = 1 /* right button held */, MOUSE_CAM_CAPTURED = 2 /* cursor held by the window */ };
 enum { CHAOS_LETTERS_OFF = 0, CHAOS_LETTERS_EXPLORED = 1, CHAOS_LETTERS_MAP = 2 /* explored, all with the Map */ };
 // System language served to the game (runtime/services/am.c GetDesiredLanguage, services/hid_set.c GetLanguageCode):
 // the game picks its text language from it, as it would from the Switch's own system setting. LANG_AUTO follows the
@@ -37,6 +38,8 @@ typedef struct {
     bool tex_hd, tex_dump;  // HD texture packs (textures/hd) on; dump the game's textures (textures/dump): vulkan/textures.c
     bool dpad_move;      // the d-pad (and arrow keys) move Link like the stick
     bool move_360;       // analog movement in any direction (the game snaps the stick to 8): runtime/hle/qol.c
+    int mouse_camera;    // MOUSE_CAM_*: how the mouse turns the camera (runtime/hle/input.c)
+    float mouse_sens;    // mouse camera speed, 1 = default
     bool blur_removal;   // no tilt-shift blur at the top / bottom of the screen
     bool hide_hero_icon; // no Hero Mode icon on the HUD
     bool mirror_mode;    // the world mirrored left to right (Gameplay tab): renderers + runtime/hle/input.c

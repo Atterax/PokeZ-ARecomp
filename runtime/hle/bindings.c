@@ -26,6 +26,26 @@ _Static_assert(PADB_LTRIGGER == SDL_GAMEPAD_BUTTON_COUNT, "trigger pseudo-button
     SDL_SCANCODE_KP_4, SDL_SCANCODE_KP_6}
 static const int16_t k_def_pad[BIND_PAD_COUNT] = DEF_PAD, k_def_key[BIND_KEY_COUNT] = DEF_KEY;
 int16_t g_bind_pad[BIND_PAD_COUNT] = DEF_PAD, g_bind_key[BIND_KEY_COUNT] = DEF_KEY;
+// mouse: left ZR (Pokémon Z-A throws the ball), right ZL (aims / locks on)
+#define DEF_MOUSE {BIND_ZR, BIND_ZL, -1, -1, -1}
+static const int16_t k_def_mouse[MOUSEB_COUNT] = DEF_MOUSE;
+int16_t g_bind_mouse[MOUSEB_COUNT] = DEF_MOUSE;
+static const char *const k_mouse_ini[MOUSEB_COUNT] = {"left", "right", "middle", "x1", "x2"};
+static const char *const k_mouse_names[MOUSEB_COUNT] = {"Left button", "Right button", "Middle button", "Back side button", "Forward side button"};
+
+const char *bind_mouse_name(int mb) { return mb >= 0 && mb < MOUSEB_COUNT ? k_mouse_names[mb] : "?"; }
+int bind_mouse_from_sdl(int b) {
+    switch (b) {
+    case SDL_BUTTON_LEFT: return MOUSEB_LEFT;
+    case SDL_BUTTON_RIGHT: return MOUSEB_RIGHT;
+    case SDL_BUTTON_MIDDLE: return MOUSEB_MIDDLE;
+    case SDL_BUTTON_X1: return MOUSEB_X1;
+    case SDL_BUTTON_X2: return MOUSEB_X2;
+    default: return -1;
+    }
+}
+void bind_mouse_reset(void) { memcpy(g_bind_mouse, k_def_mouse, sizeof g_bind_mouse); }
+bool bind_mouse_is_default(void) { return !memcmp(g_bind_mouse, k_def_mouse, sizeof g_bind_mouse); }
 
 static const char *const k_ini[BIND_KEY_COUNT] = {
     "a", "b", "x", "y", "lstick", "rstick", "l", "r", "zl", "zr", "plus", "minus", "left", "up", "right", "down",
@@ -203,6 +223,13 @@ bool bind_capture_event(const SDL_Event *e) {
 
 // ------------------------------------------------------------------ larecomp.ini
 bool bind_settings_load(const char *key, const char *val) {
+    if (!strncmp(key, "bind_mouse_", 11)) {  // bind_mouse_left = zr / none
+        for (int m = 0; m < MOUSEB_COUNT; m++)
+            if (!strcmp(key + 11, k_mouse_ini[m])) g_bind_mouse[m] = (int16_t)(strcmp(val, "none") ? bind_slot_from_name(val) : -1);
+        for (int m = 0; m < MOUSEB_COUNT; m++)
+            if (g_bind_mouse[m] >= BIND_PAD_COUNT) g_bind_mouse[m] = -1;  // (buttons only: not a stick direction)
+        return true;
+    }
     bool pad = !strncmp(key, "bind_pad_", 9), kb = !strncmp(key, "bind_key_", 9);
     if (!pad && !kb) return false;
     for (int i = 0; i < (pad ? BIND_PAD_COUNT : BIND_KEY_COUNT); i++) {
@@ -225,4 +252,7 @@ void bind_settings_save(FILE *f) {
     for (int i = 0; i < BIND_KEY_COUNT; i++)
         if (g_bind_key[i] != k_def_key[i])
             fprintf(f, "bind_key_%s = %s\n", k_ini[i], g_bind_key[i] ? SDL_GetScancodeName((SDL_Scancode)g_bind_key[i]) : "none");
+    for (int m = 0; m < MOUSEB_COUNT; m++)
+        if (g_bind_mouse[m] != k_def_mouse[m])
+            fprintf(f, "bind_mouse_%s = %s\n", k_mouse_ini[m], g_bind_mouse[m] >= 0 ? k_ini[g_bind_mouse[m]] : "none");
 }

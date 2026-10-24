@@ -35,6 +35,50 @@ static void cell(int dev, int slot, int fam, int cap_dev, int cap_slot, int ms_l
     if (waiting && !ImGui::IsItemVisible()) ImGui::SetScrollHereY(0.5f);  // (a capture started by a test hook)
 }
 
+// The mouse: how it turns the camera, how fast, and the Switch button each of its buttons presses (runtime/hle/input.c)
+static void mouse_draw() {
+    ImGui::SeparatorText("Mouse");
+    static const char *const modes[] = {"Off", "Hold the right button", "Always (the window holds the cursor)"};
+    bool changed = false;
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
+    changed |= ImGui::Combo("Camera", &g_settings.mouse_camera, modes, 3);
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
+    ImGui::SliderFloat("Camera speed", &g_settings.mouse_sens, 0.1f, 5.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+    if (ImGui::IsItemDeactivatedAfterEdit()) changed = true;  // (saved once let go, not on every step of a drag)
+    ImGui::PushTextWrapPos(0);
+    ImGui::TextDisabled("Always: while you play, the cursor is hidden and moving the mouse turns the camera; F1 or Esc "
+                        "(the menu) or switching windows gives the cursor back. The buttons below work only then.");
+    ImGui::PopTextWrapPos();
+    // the Switch buttons a mouse button can press: names and order as the table above
+    static const int opts[] = {-1, BIND_A, BIND_B, BIND_X, BIND_Y, BIND_L, BIND_R, BIND_ZL, BIND_ZR, BIND_PLUS, BIND_MINUS,
+                               BIND_UP, BIND_DOWN, BIND_LEFT, BIND_RIGHT, BIND_LSTICK, BIND_RSTICK};
+    if (ImGui::BeginTable("##mouse", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX)) {
+        for (int m = 0; m < MOUSEB_COUNT; m++) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(bind_mouse_name(m));
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            char id[16];
+            snprintf(id, sizeof id, "##mb%d", m);
+            if (ImGui::BeginCombo(id, g_bind_mouse[m] >= 0 ? bind_input_name(g_bind_mouse[m]) : "(none)")) {
+                for (int o : opts)
+                    if (ImGui::Selectable(o >= 0 ? bind_input_name(o) : "(none)", g_bind_mouse[m] == o)) {
+                        g_bind_mouse[m] = (int16_t)o;
+                        changed = true;
+                    }
+                ImGui::EndCombo();
+            }
+        }
+        ImGui::EndTable();
+    }
+    ImGui::BeginDisabled(bind_mouse_is_default());
+    if (ImGui::Button("Reset mouse buttons to defaults")) { bind_mouse_reset(); changed = true; }
+    ImGui::EndDisabled();
+    if (changed) settings_save();
+}
+
 extern "C" void controls_bindings_draw(float scale) {
     (void)scale;
     int fam = bind_label_family();
@@ -97,6 +141,8 @@ extern "C" void controls_bindings_draw(float scale) {
         }
         ImGui::EndTable();
     }
+    ImGui::Spacing();
+    mouse_draw();
     ImGui::Spacing();
     ImGui::BeginDisabled(bind_is_default(BIND_DEV_PAD));
     if (ImGui::Button("Reset controller to defaults")) { bind_capture_cancel(); bind_reset(BIND_DEV_PAD); }

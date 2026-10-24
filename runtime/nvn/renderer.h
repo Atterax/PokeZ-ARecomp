@@ -21,3 +21,5 @@ bool renderer_format_has_stencil(uint32_t f);
 void renderer_mark_gpu_owned(NvnTexture *t);
 void input_handle_event(const SDL_Event *e);
 bool input_user_blocked(const SDL_Event *e);
+struct SDL_Window;
+void input_mouse_update(struct SDL_Window *w);  // after each batch of events: the mouse camera holds the cursor or not

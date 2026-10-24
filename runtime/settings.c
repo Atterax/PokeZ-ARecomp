@@ -27,6 +27,8 @@ Settings g_settings = {
     .tracker = true,
     .chaos_letters = CHAOS_LETTERS_MAP,
     .diff_damage = 1.0f,
+    .mouse_camera = MOUSE_CAM_CAPTURED,
+    .mouse_sens = 1.0f,
     .upscaler = UPSCALE_SHARP,  // (MetalFX on macOS, AMD FSR 1 on Windows)
 };
 
@@ -112,6 +114,8 @@ void settings_load(void) {
         else if (!strcmp(key, "inv_keys")) g_settings.inv_keys = atoi(val) != 0;
         else if (!strcmp(key, "dpad_move")) g_settings.dpad_move = atoi(val) != 0;
         else if (!strcmp(key, "move_360")) g_settings.move_360 = atoi(val) != 0;
+        else if (!strcmp(key, "mouse_camera")) g_settings.mouse_camera = !strcmp(val, "off") ? MOUSE_CAM_OFF : !strcmp(val, "hold") ? MOUSE_CAM_HOLD : MOUSE_CAM_CAPTURED;
+        else if (!strcmp(key, "mouse_sens")) g_settings.mouse_sens = (float)atof(val);
         else if (!strcmp(key, "blur_removal")) g_settings.blur_removal = atoi(val) != 0;
         else if (!strcmp(key, "hide_hero_icon")) g_settings.hide_hero_icon = atoi(val) != 0;
         else if (!strcmp(key, "mirror_mode")) g_settings.mirror_mode = atoi(val) != 0;
@@ -144,6 +148,7 @@ void settings_load(void) {
     if (!aspect_key) g_settings.aspect_asked = true;  // (likewise: the aspect ratio was chosen already)
     if (g_settings.volume < 0) g_settings.volume = 0;
     if (g_settings.volume > 2) g_settings.volume = 2;
+    if (!(g_settings.mouse_sens >= 0.1f && g_settings.mouse_sens <= 5)) g_settings.mouse_sens = 1.0f;
     LOG("[settings] loaded %s\n", SETTINGS_FILE);
 }
 
@@ -173,6 +178,9 @@ void settings_save(void) {
     else fprintf(f, "resolution = match\n");
     fprintf(f, "inv_keys = %d\n", g_settings.inv_keys);
     fprintf(f, "dpad_move = %d\n", g_settings.dpad_move);
+    static const char *const mouse_cam[] = {"off", "hold", "captured"};
+    fprintf(f, "mouse_camera = %s\nmouse_sens = %.2f\n", mouse_cam[g_settings.mouse_camera <= 2 ? g_settings.mouse_camera : 2],
+            g_settings.mouse_sens);
     fprintf(f, "move_360 = %d\nblur_removal = %d\nhide_hero_icon = %d\n", g_settings.move_360, g_settings.blur_removal,
             g_settings.hide_hero_icon);
     static const char *const prompts[] = {"auto", "nintendo", "xbox", "playstation", "keyboard"};

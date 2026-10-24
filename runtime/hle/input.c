@@ -91,7 +91,7 @@ static bool test_event(const SDL_Event *e) {
 // Scripted test runs ignore the user's own input (a key or stick touched while a test drives Link spoils it):
 // LARECOMP_NO_USER_INPUT=1, on by default whenever LARECOMP_INPUT / LARECOMP_DOORJUMP_TEST / LARECOMP_PLACE is set
 // (or LARECOMP_HOST_INPUT / LARECOMP_BIND_TEST; LARECOMP_NO_USER_INPUT=0 lets it through again).
-bool input_user_blocked(const SDL_Event *e) {
+static bool input_user_blocked_any(void) {
     static int on = -1;
     if (on < 0) {
         const char *v = getenv("LARECOMP_NO_USER_INPUT");
@@ -99,7 +99,10 @@ bool input_user_blocked(const SDL_Event *e) {
                                  getenv("LARECOMP_HOST_INPUT") || getenv("LARECOMP_BIND_TEST"));
         if (on) LOG("[input] scripted run: keyboard, mouse and controllers ignored\n");
     }
-    if (!on) return false;
+    return on;
+}
+bool input_user_blocked(const SDL_Event *e) {
+    if (!input_user_blocked_any()) return false;
     if (test_event(e)) return false;  // (LARECOMP_HOST_INPUT type: / sdlkey: / sdlpad: - the test's own presses)
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: case SDL_EVENT_TEXT_INPUT: case SDL_EVENT_TEXT_EDITING:
@@ -136,9 +139,37 @@ int input_pad_family(void) {
     return env >= 0 ? env : pad_family;
 }
 
-// mouse camera: right stick deflection from the last motion with the right button held (input_handle_event), and its time
+// mouse camera: right stick deflection from the last motion (input_handle_event), and its time. Setting mouse_camera:
+// captured = the window holds the cursor (relative mode, input_mouse_update) and every motion turns the camera;
+// hold = only with the right button held, the cursor free.
 static _Atomic int32_t mouse_rx, mouse_ry;
 static _Atomic uint64_t mouse_t;
+// mouse buttons through g_bind_mouse (Switch button bits), counted only while the cursor is held: a click that brings
+// the window to the front, or one meant for the menu, is not a ball thrown
+static _Atomic bool mouse_held;
+static _Atomic uint64_t mouse_buttons;
+static uint8_t mouse_down[MOUSEB_COUNT];
+static void recompute_mouse(void) {
+    uint64_t b = 0;
+    for (int m = 0; m < MOUSEB_COUNT; m++)
+        if (mouse_down[m] && g_bind_mouse[m] >= 0 && g_bind_mouse[m] < BIND_PAD_COUNT) b |= 1ull << g_bind_mouse[m];
+    mouse_buttons = b;
+}
+
+extern bool menu_input_captured(void);  // runtime/ui/menu.mm
+// Main thread, after each batch of events (runtime/nvn/vulkan/device.c ui_run): the cursor held while the game has
+// the window and the controls - not with the menu or the name entry up (they take the mouse), nor without focus.
+void input_mouse_update(SDL_Window *w) {
+    bool want = g_settings.mouse_camera == MOUSE_CAM_CAPTURED && !menu_input_captured() && !input_user_blocked_any() &&
+                (SDL_GetWindowFlags(w) & SDL_WINDOW_INPUT_FOCUS);
+    if (want == mouse_held) return;
+    SDL_SetWindowRelativeMouseMode(w, want);
+    mouse_held = want;
+    memset(mouse_down, 0, sizeof mouse_down);  // (a button held across the change: released)
+    recompute_mouse();
+    mouse_rx = mouse_ry = 0;
+    LOG("[input] mouse %s\n", want ? "held by the window: it turns the camera" : "free");
+}
 void input_handle_event(const SDL_Event *e) {
     static bool scanned;  // pads present at startup: their ADDED event may have gone to the start screen's loop
     if (!scanned) {
@@ -164,10 +195,20 @@ void input_handle_event(const SDL_Event *e) {
     case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
         recompute_pad();
         break;
-    case SDL_EVENT_MOUSE_MOTION:  // right button held: the mouse turns the camera (right stick)
-        if (e->motion.state & SDL_BUTTON_RMASK) {
-            static double gain = -1;
-            if (gain < 0) gain = getenv("LARECOMP_MOUSE_GAIN") ? atof(getenv("LARECOMP_MOUSE_GAIN")) : 2500;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP: {
+        int m = bind_mouse_from_sdl(e->button.button);
+        if (m < 0) break;
+        if (e->type == SDL_EVENT_MOUSE_BUTTON_UP) mouse_down[m] = 0;
+        else if (mouse_held) mouse_down[m] = 1;
+        recompute_mouse();
+        break;
+    }
+    case SDL_EVENT_MOUSE_MOTION:  // the mouse turns the camera (right stick): cursor held, or the right button held
+        if (mouse_held || (g_settings.mouse_camera == MOUSE_CAM_HOLD && (e->motion.state & SDL_BUTTON_RMASK))) {
+            static double base = -1;
+            // (10000: speed 1 is what the first player to try the captured camera set, 4x the old hold-to-turn's 2500)
+            if (base < 0) base = getenv("LARECOMP_MOUSE_GAIN") ? atof(getenv("LARECOMP_MOUSE_GAIN")) : 10000;
+            double gain = base * g_settings.mouse_sens;
             double x = e->motion.xrel * gain, y = -e->motion.yrel * gain;
             mouse_rx = (int32_t)(x > 32767 ? 32767 : x < -32767 ? -32767 : x);
             mouse_ry = (int32_t)(y > 32767 ? 32767 : y < -32767 ? -32767 : y);
@@ -418,7 +459,7 @@ static void fill_state(Cpu *c) {
         LOG("[input] watching controller object %llx\n", c->x[1] - 8);
     }
     bool menu = menu_input_captured();  // the overlay menu / name entry has the controls (typing there isn't for the game)
-    uint64_t b = menu ? script_buttons : key_buttons | pad_buttons | script_buttons;
+    uint64_t b = menu ? script_buttons : key_buttons | pad_buttons | mouse_buttons | script_buttons;
     {   // injected Plus: held for ~10 presented frames (the game polls several times per frame)
         extern uint64_t renderer_present_count(void);
         static uint64_t until;
