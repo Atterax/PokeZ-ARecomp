@@ -139,7 +139,8 @@ static void load_fonts(void) {
 
 // The prompts' style, chosen once at boot: "keyboard", "xbox" (controls by position: A/B and X/Y traded - the
 // Switch's A on the east button), "xboxlabel" (by letter, A on the Xbox pad's A: the letters stay; both name the
-// shoulders / triggers / menu buttons LB RB LT RT Menu View) or NULL (the game's own). Names both the button glyph
+// shoulders / triggers / menu buttons LB RB LT RT Menu View), "playstation" / "playstation_south" (the face buttons'
+// shapes, A on the circle / on the cross; L1 R1 L2 R2 Options Share) or NULL (the game's own). Names both the button glyph
 // font (fonts/nintendo_ext_003_<set>.ttf: tools/za/keyboard_font.py, xbox_font.py) and the game's own UI icons
 // relabelled (textures/prompts/<set>: tools/za/prompt_textures.py, runtime/nvn/vulkan/textures.c).
 const char *pl_prompt_set(void) {
@@ -147,12 +148,18 @@ const char *pl_prompt_set(void) {
     static const char *set;
     if (done) return set;
     done = 1;
-    extern int input_pad_family(void);
+    // (bind_label_family, not input_pad_family: runtime/services/fs.c asks this before runtime/hle/input.c has opened
+    // the controller - it asked SDL, which knows the pad's type already; "auto" used to come out as Nintendo's)
+    extern int bind_label_family(void);
     extern int16_t g_bind_pad[];
     bool pad = SDL_HasGamepad();
-    bool xbox = g_settings.prompts == PROMPTS_XBOX || (g_settings.prompts == PROMPTS_AUTO && pad && input_pad_family() == 1);
+    int fam = pad ? bind_label_family() : 0;
+    bool xbox = g_settings.prompts == PROMPTS_XBOX || (g_settings.prompts == PROMPTS_AUTO && fam == 1);
+    bool ps = g_settings.prompts == PROMPTS_PLAYSTATION || (g_settings.prompts == PROMPTS_AUTO && fam == 2);
     bool keys = g_settings.prompts == PROMPTS_KEYBOARD || (g_settings.prompts == PROMPTS_AUTO && !pad);
-    set = keys ? "keyboard" : !xbox ? NULL : g_bind_pad[0] == SDL_GAMEPAD_BUTTON_EAST ? "xbox" : "xboxlabel";
+    bool east = g_bind_pad[0] == SDL_GAMEPAD_BUTTON_EAST;  // (the Switch's A on the east button: by position)
+    // PlayStation: shapes - "playstation" A = circle (east), "playstation_south" A = cross
+    set = keys ? "keyboard" : xbox ? (east ? "xbox" : "xboxlabel") : ps ? (east ? "playstation" : "playstation_south") : NULL;
     return set;
 }
 

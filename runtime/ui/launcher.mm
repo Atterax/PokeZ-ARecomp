@@ -468,6 +468,68 @@ static bool import_packages(const std::vector<std::string> &pkgs, const std::str
     return true;
 }
 
+// Pokémon Z-A's button icons redrawn for the keyboard, Xbox and PlayStation (textures/prompts/<style>/, the one
+// runtime/hle/pl.c picks at boot) from the player's own game files by zaprompts (tools/za/prompt_textures.py frozen,
+// with ooz: GPLv3, a program of its own - third_party/ooz/README.ZARecomp.md). Made once per PROMPTS_VERSION: zaprompts
+// --install draws them into textures/prompts.new and swaps that in whole itself (a game started meanwhile never sees
+// half a set). Tried up to 3 times per version (textures/prompts.tried): failing leaves the game's own icons.
+// Log: textures/prompts.log. The setup waits for it (the first boot has them); a copy set up before them gets
+// them in the background when the game boots (runtime/main.c: that copy skips this screen), for its next start.
+#define PROMPTS_VERSION "1"
+static std::atomic<bool> g_prompts_busy{false};
+// a marker file's version, and (textures/prompts.tried: "<version> <tries>") its count
+static bool prompts_marked(const char *path, int *tries = NULL) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    char v[16] = "";
+    int n = 0;
+    bool ok = fscanf(f, "%15s %d", v, &n) >= 1 && !strcmp(v, PROMPTS_VERSION);
+    fclose(f);
+    if (tries) *tries = ok ? n : 0;
+    return ok;
+}
+// (3 tries: a game closed before zaprompts is done may end it with the process)
+static bool prompts_wanted(void) {
+    char tool[1100];
+    int tries = 0;
+    prompts_marked("textures/prompts.tried", &tries);
+    return rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool) &&
+           file_exists(g_root + "/romfs.bin") && !prompts_marked("textures/prompts/.made") && tries < 3;
+}
+// wait: until made (the setup), else started and left running (the game's boot)
+static bool make_prompts(bool wait) {
+    char tool[1100];
+    if (g_prompts_busy.exchange(true)) return false;
+    if (!rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool)) {
+        g_prompts_busy = false;
+        return false;
+    }
+    mkdir("textures", 0755);
+    int tries = 0;
+    prompts_marked("textures/prompts.tried", &tries);
+    if (FILE *f = fopen("textures/prompts.tried", "wb")) fprintf(f, "%s %d", PROMPTS_VERSION, tries + 1), fclose(f);
+    std::string romfs = g_root + "/romfs.bin";
+    const char *ini = getenv("LARECOMP_SETTINGS");  // (as runtime/settings.c: the bound keys label the keyboard's icons)
+    if (!ini || !*ini) ini = "larecomp.ini";
+    const char *argv[] = {tool, "--romfs", romfs.c_str(), "--settings", ini, "--mods", "mods", "--out", "textures/prompts",
+                          "--install", PROMPTS_VERSION, NULL};
+    PlatProc p = plat_spawn(argv, "textures/prompts.log", false);
+    if (!wait || !p) {
+        fprintf(stderr, "[launcher] button icons: %s\n", p ? "being made (zaprompts, textures/prompts.log)" : "zaprompts didn't start");
+        g_prompts_busy = false;
+        return p != 0;
+    }
+    int r = plat_proc_wait(p, true);
+    fprintf(stderr, "[launcher] button icons: %s (zaprompts exit %d; textures/prompts.log)\n", r == 0 ? "made" : "not made", r);
+    g_prompts_busy = false;
+    return r == 0;
+}
+// runtime/main.c, a set-up copy booting straight into the game: the icons made in the background if they never were
+extern "C" void launcher_prompts_kick(const char *root) {
+    g_root = root;
+    if (prompts_wanted()) make_prompts(false);
+}
+
 // progress (the overlay's bar): the romfs copy, then the image build - each about the size of romfs/ (g_done, g_total)
 // The bar: copying and the data image are the first tenth, building the game code (runtime/gamebuild.c) the rest
 static unsigned long long g_phase_base;
@@ -579,6 +641,10 @@ static void *extract_thread(void *) {
 check:
     {
         std::string why = check_game_files(g_root);
+        if (why.empty() && prompts_wanted()) {
+            set_job("Drawing the button icons for your controller...");
+            make_prompts(true);
+        }
         if (why.empty()) set_job("Game files ready.");
         else set_failure(why.find("version") != std::string::npos ? FAIL_VERSION : FAIL_MISSING);
     }
@@ -1226,6 +1292,7 @@ extern "C" void launcher_run(const char *root) {
 
     std::string status = check_game_files(g_root);
     if (status.empty()) load_background(dev);
+    if (status.empty() && prompts_wanted()) make_prompts(false);  // (set up before the icons existed: made now, aside)
     std::vector<std::string> seeds = list_seeds();
     std::vector<std::string> choices = {"Vanilla"};
     choices.insert(choices.end(), seeds.begin(), seeds.end());

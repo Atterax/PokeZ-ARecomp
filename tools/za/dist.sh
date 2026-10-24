@@ -27,6 +27,18 @@ fi
 USERPROFILE="$(cygpath -w ~)" build/gen-venv/Scripts/python.exe -m PyInstaller --noconfirm --clean --log-level WARN \
     --distpath build/helper --workpath build/pyinstaller tools/lasgen.spec
 build/gen-venv/Scripts/python.exe tools/pe_no_cfg.py build/helper/lasgen/lasgen.exe
+# 2b. the button icon maker (tools/za/prompt_textures.py + ooz, GPLv3: third_party/ooz/README.ZARecomp.md)
+mkdir -p build/ooz
+(cd third_party/ooz && g++ -O2 -shared -static -include sys/stat.h -Dmain=ooz_main kraken.cpp bitknit.cpp lzna.cpp \
+    ooz_lib.cpp -o ../../build/ooz/ooz.dll)
+if [ ! -f build/prompts-venv/.ok ]; then
+    py -3.12 -m venv build/prompts-venv
+    build/prompts-venv/Scripts/python.exe -m pip install -q pillow==13.0.0 numpy==2.5.4 fonttools==4.67.0 cffsubr==0.4.0 \
+        pyinstaller==6.22.3
+    touch build/prompts-venv/.ok
+fi
+USERPROFILE="$(cygpath -w ~)" build/prompts-venv/Scripts/python.exe -m PyInstaller --noconfirm --clean --log-level WARN \
+    --distpath build/helper --workpath build/pyinstaller-prompts tools/zaprompts.spec
 # 3. the LGPL FFmpeg, the exe (release: no console, log in lasrecomp.log) and zig with its runtime built ahead of time
 SRC_FF=build/deps-win/src/ffmpeg-9.0.2.tar.xz
 [ -f $SRC_FF ] || { mkdir -p build/deps-win/src; /c/Windows/System32/curl.exe -fsSL -o $SRC_FF https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz; }
@@ -43,6 +55,9 @@ dotnet publish tools/zaimport -c Release -r win-x64 --self-contained true -p:Pub
 rm -rf build/dist-za && mkdir -p "$D/gamelib-src" "$D/zaimport"
 cp $B/lasrecomp.exe $B/lasrecomp.dll.a "$D/"
 cp -R build/helper/lasgen "$D/"
+cp -R build/helper/zaprompts "$D/"
+cp third_party/ooz/COPYING "$D/zaprompts/COPYING-GPLv3.txt"
+cp third_party/ooz/README.ZARecomp.md "$D/zaprompts/README-ooz.md"
 cp -R build/zig-slim "$D/zig"
 cp build/zaimport/zaimport.exe "$D/zaimport/"
 cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h tools/gamelib_entry.c runtime/hle/hle_symbols.txt \

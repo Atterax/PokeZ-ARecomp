@@ -209,6 +209,11 @@ int main(int argc, char **argv) {
                 if (freopen("logs/play.log", "w", stderr)) setvbuf(stderr, NULL, _IONBF, 0);
             }
 #endif
+            // the button icons, if this copy never got them (set up before they existed): made aside for the next
+            // start (runtime/ui/launcher.mm; not in scripted runs, which compare pictures)
+            extern void launcher_prompts_kick(const char *root);
+            if (skip_launcher && !getenv("LARECOMP_INPUT") && !getenv("LARECOMP_HOST_INPUT"))
+                launcher_prompts_kick(root);
         }
     }
     for (bool title = !skip_launcher;;) {

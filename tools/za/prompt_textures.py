@@ -24,16 +24,31 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 ap = argparse.ArgumentParser()
-ap.add_argument('--romfs', action='append', help='game files folder (default extracted/romfs); more than once: several game versions')
-ap.add_argument('--ooz', required=True, help='ooz shared library (ooz_decompress export)')
+ap.add_argument('--romfs', action='append', help='game files: a folder or a RomFS image (default extracted/romfs, else '
+                                                  'extracted/romfs.bin); more than once: several game versions')
+ap.add_argument('--ooz', help='ooz shared library (ooz_decompress export; default: ooz.dll / libooz.so next to this program)')
+ap.add_argument('--styles', default='keyboard,xbox,xboxlabel,playstation,playstation_south', help='the sets to make')
+ap.add_argument('--install', metavar='VERSION', help='made into <out>.new, then <out>/.made = VERSION and swapped in '
+                                                      'whole (the start screen / runtime: a game never sees half a set)')
 ap.add_argument('--settings', default=None, help='settings file with bind_key_* lines (default: none = defaults)')
 ap.add_argument('--out', default='textures/prompts')
 ap.add_argument('--scale', type=int, default=4)
 ap.add_argument('--font', default=None, help='bold TrueType font for the labels')
 ap.add_argument('--mods', default='mods', help="mods folder (runtime/services/fs.c): their UI archives' icons too")
 args = ap.parse_args()
-args.romfs = args.romfs or ['extracted/romfs']
+args.romfs = args.romfs or ['extracted/romfs' if os.path.isdir('extracted/romfs') else 'extracted/romfs.bin']
+FINAL = args.out
+if args.install:
+    import shutil
+    args.out = FINAL.rstrip('/\\') + '.new'
+    shutil.rmtree(args.out, ignore_errors=True)
 S = args.scale
+HERE = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
+if not args.ooz:  # (the release's zaprompts/: ooz in the bundle, or next to the program)
+    dirs = [getattr(sys, '_MEIPASS', HERE), HERE]
+    args.ooz = next((p for p in (os.path.join(d, n) for d in dirs for n in ('ooz.dll', 'libooz.so', 'libooz.dylib'))
+                     if os.path.exists(p)), None)
+    if not args.ooz: sys.exit('error: no ooz library: pass --ooz')
 
 # ------------------------------------------------------------------ game files: ONEPACK -> packs -> SARC -> BNTX
 ooz = ctypes.CDLL(os.path.abspath(args.ooz))
@@ -64,11 +79,41 @@ class Entry:  # one file in a pack: where its fields are (positions in data.trpf
     def __init__(s, **k): s.__dict__.update(k)
 
 
-def game_files(path):
-    f = open(path, 'rb')
-    m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+def open_game(romfs):
+    """-> (data.trpfs bytes, data.trpfd bytes): from a folder, or straight out of a RomFS image (romfs.bin, what the
+    start screen's setup leaves: no copy of the multi-GB pack file)"""
+    if os.path.isdir(romfs):
+        with open(os.path.join(romfs, 'arc', 'data.trpfs'), 'rb') as f:
+            m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        with open(os.path.join(romfs, 'arc', 'data.trpfd'), 'rb') as f:
+            return memoryview(m), f.read()
+    with open(romfs, 'rb') as f:
+        img = memoryview(mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ))
+    h = struct.unpack_from('<10Q', img, 0)  # (tools/za/romfs_extract.py: the same layout)
+    dm, fm, data = img[h[3]:h[3] + h[4]], img[h[7]:h[7] + h[8]], h[9]
+
+    def dir_path(d):
+        parts = []
+        while d:
+            parent, = struct.unpack_from('<I', dm, d)
+            nl, = struct.unpack_from('<I', dm, d + 0x14)
+            parts.append(bytes(dm[d + 0x18:d + 0x18 + nl]).decode())
+            d = parent
+        return '/'.join(reversed(parts))
+    want, o = {}, 0
+    while o + 0x20 <= len(fm):
+        parent, _, off, size, _, nl = struct.unpack_from('<IIQQII', fm, o)
+        name = bytes(fm[o + 0x20:o + 0x20 + nl]).decode()
+        if name in ('data.trpfs', 'data.trpfd') and dir_path(parent) == 'arc':
+            want[name] = img[data + off:data + off + size]
+        o += 0x20 + ((nl + 3) & ~3)
+    if len(want) != 2: sys.exit(f'error: {romfs}: no arc/data.trpfs / data.trpfd in it')
+    return want['data.trpfs'], bytes(want['data.trpfd'])
+
+
+def game_files(m):
     fb = FB(m)
-    assert m[:8] == b'ONEPACK\0', 'not a ONEPACK file'
+    assert bytes(m[:8]) == b'ONEPACK\0', 'not a ONEPACK file'
     root = fb.u64(8)
     rt = fb.table(root + fb.u32(root))
     _, hp = fb.vec(rt[0])
@@ -83,7 +128,8 @@ def game_files(path):
             comp = m[ft[1]] if len(ft) > 1 and ft[1] else 0xFF
             size = fb.u64(ft[3]) if len(ft) > 3 and ft[3] else 0
             dn, dp = fb.vec(ft[4])
-            if size < 64 << 20 and m[dp:dp + 4] != b'BNTX' and (comp != 0xFF or m[dp:dp + 4] == b'SARC'):
+            magic = bytes(m[dp:dp + 4])
+            if size < 64 << 20 and magic != b'BNTX' and (comp != 0xFF or magic == b'SARC'):
                 yield Entry(comp=comp, size=size, raw=m[dp:dp + dn], m=m, pack=i, pack_hash=fb.u64(hp + 8 * i),
                             pack_off=off, slot=(fb.u64(op + 8 * i + 8) if i + 1 < n else len(m)) - off, index=j)
 
@@ -221,14 +267,20 @@ ICONS = {'icon_key_a_00^t': 'a', 'icon_key_b_00^t': 'b', 'icon_key_x_00^t': 'x',
 KEEP_SHAPE = ('_hold_', '_keep_', '_ol_', 'title')  # (shapes with a mark of their own: hold / outline)
 
 XBOX_COMMON = {'l': 'LB', 'r': 'RB', 'zl': 'LT', 'zr': 'RT', 'plus': ('menu',), 'minus': ('view',)}
+# PlayStation: shapes, not letters. playstation = controls by position (the Switch's A on the east button: circle),
+# playstation_south = A on the south button (cross), as bind_pad_a = south
+PS_COMMON = {'l': 'L1', 'r': 'R1', 'zl': 'L2', 'zr': 'R2', 'plus': ('options',), 'minus': ('share',)}
+PS_FACE = {'playstation': {'a': ('circle',), 'b': ('cross',), 'x': ('triangle',), 'y': ('square',)},
+           'playstation_south': {'a': ('cross',), 'b': ('circle',), 'x': ('square',), 'y': ('triangle',)}}
 
 
 def label(style, button):
-    """the new label: a string, ('arrow', dir), ('menu',) / ('view',), or None = leave the game's"""
+    """the new label: a string, ('arrow', dir), a shape (('menu',), ('circle',)...), or None = leave the game's"""
     if style == 'keyboard':
         if button == 'ls': return stick_keys('ls_')
         if button == 'rs': return stick_keys('rs_')
         return key(button)
+    if style in PS_FACE: return PS_FACE[style].get(button) or PS_COMMON.get(button)
     if button in XBOX_COMMON: return XBOX_COMMON[button]
     if style == 'xbox': return {'a': 'B', 'b': 'A', 'x': 'Y', 'y': 'X'}.get(button)
     return None
@@ -254,13 +306,28 @@ def text_mask(s, cap_h, max_w):
     return im.resize((max(1, round(im.width * k)), max(1, round(im.height * k))), Image.LANCZOS)
 
 
-def shape_mask(kind, w, h):  # Xbox Menu (three bars) / View (two overlapping windows) at w x h
+def shape_mask(kind, w, h):  # Xbox Menu (three bars) / View (two windows), PlayStation's shapes, at w x h
     big = 8
     im = Image.new('L', (w * big, h * big))
     d = ImageDraw.Draw(im)
     W, H = w * big, h * big
     t = max(1, round(min(W, H) * 0.13))
-    if kind == 'menu':
+    if kind in ('circle', 'cross', 'triangle', 'square'):
+        t = max(1, round(min(W, H) * 0.14))
+        if kind == 'circle': d.ellipse((t / 2, t / 2, W - t / 2, H - t / 2), outline=255, width=t)
+        elif kind == 'square': d.rectangle((W * 0.08, H * 0.08, W * 0.92, H * 0.92), outline=255, width=t)
+        elif kind == 'triangle':
+            pts = [(W / 2, H * 0.06), (W * 0.97, H * 0.88), (W * 0.03, H * 0.88)]
+            d.line(pts + [pts[0], pts[1]], fill=255, width=t, joint='curve')
+        else:
+            for a, b in (((0.12, 0.12), (0.88, 0.88)), ((0.88, 0.12), (0.12, 0.88))):
+                d.line((W * a[0], H * a[1], W * b[0], H * b[1]), fill=255, width=round(t * 1.1))
+        return im.resize((w, h), Image.LANCZOS)
+    if kind == 'share':  # Share / Create: a flat pill, as the touchpad beside it (an upright one read as a zero)
+        d.rounded_rectangle((W * 0.04, H * 0.27, W * 0.96, H * 0.73), radius=H * 0.2, outline=255, width=t)
+        d.line((W * 0.32, H * 0.5, W * 0.68, H * 0.5), fill=255, width=t)
+        return im.resize((w, h), Image.LANCZOS)
+    if kind in ('menu', 'options'):
         for i in range(3):
             y = H * (0.2 + 0.3 * i)
             d.rounded_rectangle((W * 0.1, y - t / 2, W * 0.9, y + t / 2), radius=t / 2, fill=255)
@@ -479,6 +546,16 @@ def poly(pts):
     return [('moveTo', (pts[0],))] + [('lineTo', (p,)) for p in pts[1:]] + [('closePath', ())]
 
 
+def ellipse(cx, cy, rx, ry, reverse=False):  # four cubic arcs, counter-clockwise (clockwise: reverse)
+    k = 0.5523
+    sy = -1 if reverse else 1
+    return [('moveTo', ((cx + rx, cy),)),
+            ('curveTo', ((cx + rx, cy + sy * k * ry), (cx + k * rx, cy + sy * ry), (cx, cy + sy * ry))),
+            ('curveTo', ((cx - k * rx, cy + sy * ry), (cx - rx, cy + sy * k * ry), (cx - rx, cy))),
+            ('curveTo', ((cx - rx, cy - sy * k * ry), (cx - k * rx, cy - sy * ry), (cx, cy - sy * ry))),
+            ('curveTo', ((cx + k * rx, cy - sy * ry), (cx + rx, cy - sy * k * ry), (cx + rx, cy))), ('closePath', ())]
+
+
 LABEL_FONT = None
 
 
@@ -492,9 +569,35 @@ def label_contours(new, cx, cy, cap_h, max_w):
         pts = {'up': [(0, s), (-s, -s * 0.8), (s, -s * 0.8)], 'down': [(0, -s), (s, s * 0.8), (-s, s * 0.8)],
                'left': [(-s, 0), (s * 0.8, -s), (s * 0.8, s)], 'right': [(s, 0), (-s * 0.8, s), (-s * 0.8, -s)]}[new[1]]
         return [poly([(cx + x, cy + y) for x, y in pts])]
-    if isinstance(new, tuple):  # Menu / View
+    if isinstance(new, tuple) and new[0] in ('circle', 'cross', 'triangle', 'square', 'share'):
+        # PlayStation's shapes as rings: an outer contour and the inner one the other way round (one polygon for the
+        # cross: overlapping bars would leave its middle filled once the label is cut out of the button)
+        s, t = cap_h * 0.62, cap_h * 0.15
+        if new[0] == 'circle':
+            return [ellipse(cx, cy, s, s), ellipse(cx, cy, s - t, s - t, reverse=True)]
+        if new[0] == 'square':
+            a = s * 0.86
+            return [poly([(cx - a, cy - a), (cx + a, cy - a), (cx + a, cy + a), (cx - a, cy + a)]),
+                    poly([(cx - a + t, cy - a + t), (cx - a + t, cy + a - t), (cx + a - t, cy + a - t), (cx + a - t, cy - a + t)])]
+        if new[0] == 'triangle':
+            outer = [(cx, cy + s), (cx - s * 1.08, cy - s * 0.8), (cx + s * 1.08, cy - s * 0.8)]
+            k = t * 2.0  # (the inner one: the outer shrunk by the stroke towards the centre of the triangle)
+            g = (cx, cy - s * 0.2)
+            inner = [(px + (g[0] - px) * k / s / 1.6, py + (g[1] - py) * k / s / 1.6) for px, py in outer]
+            return [poly(outer), poly(inner[::-1])]
+        if new[0] == 'share':  # (a flat pill with a bar in it, as the textures)
+            w, hh = s * 1.05, s * 0.48
+            return [rrect(cx - w, cy - hh, cx + w, cy + hh, hh * 0.8),
+                    contours(lambda p: replay(rrect(cx - w + t, cy - hh + t, cx + w - t, cy + hh - t, (hh - t) * 0.8), p, True))[0],
+                    rrect(cx - w * 0.38, cy - t / 2, cx + w * 0.38, cy + t / 2, t / 2)]
+        # cross: arms of half width a out to r, turned 45 degrees
+        a, r = t * 0.62, s
+        pl = [(a, a), (a, r), (-a, r), (-a, a), (-r, a), (-r, -a), (-a, -a), (-a, -r), (a, -r), (a, -a), (r, -a), (r, a)]
+        c45 = 0.70710678
+        return [poly([(cx + (x - y) * c45, cy + (x + y) * c45) for x, y in pl])]
+    if isinstance(new, tuple):  # Menu / View (PlayStation's Options: three bars as Menu)
         s, t = cap_h * 0.6, cap_h * 0.16
-        if new[0] == 'menu':
+        if new[0] in ('menu', 'options'):
             return [rrect(cx - s, cy + y - t / 2, cx + s, cy + y + t / 2, t / 2) for y in (-s * 0.7, 0, s * 0.7)]
         # View: a window outline behind a filled one
         a, b = (cx - s * 0.35, cy - s * 0.35, cx + s, cy + s), (cx - s, cy - s, cx + s * 0.35, cy + s * 0.35)
@@ -581,9 +684,8 @@ def font_bytes(t):
     return b.getvalue()
 
 
-def trpfd_pack_size_at(path, pack_hash):
-    """position of the pack's size (u64) in data.trpfd: its packs table, by the name's FNV-1a hash"""
-    d = open(path, 'rb').read()
+def trpfd_pack_size_at(d, pack_hash):
+    """position of the pack's size (u64) in data.trpfd (its bytes): its packs table, by the name's FNV-1a hash"""
     fb = FB(d)
     t = fb.table(fb.u32(0))
     n, np_ = fb.vec(t[1])
@@ -683,9 +785,10 @@ def scan_sarc(d):
 
 
 icon_fonts = {}  # game files folder -> [(Entry, magic, decoded TTF) of or_font / or_font_eng]
+trpfds = {}  # game files -> data.trpfd's bytes
 for romfs in args.romfs:
-    trpfs = os.path.join(romfs, 'arc', 'data.trpfs')
-    print('reading', trpfs)
+    print('reading', romfs, flush=True)
+    trpfs, trpfds[romfs] = open_game(romfs)
     icon_fonts[romfs] = []
     for ent in game_files(trpfs):
         comp, size, raw = ent.comp, ent.size, ent.raw
@@ -724,7 +827,7 @@ def record(path, off, orig, data):
 
 # glyphs left as they are when the relabelled fonts don't fit their pack's room, in this order
 OPTIONAL = [(0xE33C, 0xE33D, 0xE33E, 0xE33F), (0xE338, 0xE339), (0xE325, 0xE326, 0xE327, 0xE328)]
-for style in ('keyboard', 'xbox', 'xboxlabel'):
+for style in args.styles.split(','):
     d = os.path.join(args.out, style)
     os.makedirs(d, exist_ok=True)
     for f in os.listdir(d):
@@ -765,13 +868,16 @@ for style in ('keyboard', 'xbox', 'xboxlabel'):
             continue
         if skip: print(f'{d}: {romfs}: (to fit, {len(skip)} icon font glyphs left as they are)')
         pack += bytes(e0.slot - len(pack))
-        trpfd = os.path.join(romfs, 'arc', 'data.trpfd')
-        size_at, _ = trpfd_pack_size_at(trpfd, e0.pack_hash)
-        with open(trpfd, 'rb') as f:
-            f.seek(size_at)
-            old_size = f.read(8)
+        size_at, _ = trpfd_pack_size_at(trpfds[romfs], e0.pack_hash)
+        old_size = trpfds[romfs][size_at:size_at + 8]
         recs.append(record('arc/data.trpfs', e0.pack_off, e0.m[e0.pack_off:e0.pack_off + e0.slot], pack))
         recs.append(record('arc/data.trpfd', size_at, old_size, struct.pack('<Q', len(pack))))
     if recs:
         open(patch, 'wb').write(b'ZAROMFS2' + struct.pack('<I', len(recs)) + b''.join(recs))
         print(f'{patch}: icon fonts for {len(recs) // 2} game version(s)')
+
+if args.install:  # the finished sets in place of the old ones, in one move
+    with open(os.path.join(args.out, '.made'), 'w') as f: f.write(args.install)
+    shutil.rmtree(FINAL, ignore_errors=True)
+    os.replace(args.out, FINAL)
+    print('installed', FINAL)
