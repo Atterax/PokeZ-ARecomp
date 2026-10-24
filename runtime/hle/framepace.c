@@ -44,14 +44,49 @@ uint32_t rt_frame_steps(uint32_t interval) {
 }
 
 // Pokémon Z-A's frame mode (tools/patches.py ZA_BUILDS): its configured vsyncs per frame - 1 (1: 30 fps). With
-// the fps60 setting (or LARECOMP_FPS=60) 0: it presents every vsync and steps its world 1/60 s a frame; slower frames
-// still get the vsyncs that really passed (the game's own dynamic step), so the speed holds. LARECOMP_FPS=30: as is.
+// the fps60 setting (or LARECOMP_FPS=60) 0: it presents every vsync and steps its world 1/60 s a frame. A frame
+// that takes longer still steps 1/60 s: below 60 fps the whole game moves in slow motion (a player's log: 35 fps
+// = 58% speed; the CPU-side game code couldn't keep up, an RTX 4060 waiting half the time). So the setting backs off
+// by itself: presented below FPS60_MIN for FPS60_SLOW_S seconds in a row (after FPS60_WARM_S to settle - shaders
+// building right after the switch), the game goes back to 30 fps for the rest of the session and the overlay says so
+// (menu_notice). Choosing 60 again in F1 tries again. LARECOMP_FPS=30: as is; LARECOMP_FPS=60: 60, no backing off.
 #include "../settings.h"
-bool g_za_frame_hook;  // (the game is Pokémon Z-A: exec.c leaves its GPU timing counters alone)
+#include "../platform.h"
+#define FPS60_MIN 50
+#define FPS60_SLOW_S 5
+#define FPS60_WARM_S 5
+bool g_za_frame_hook;    // (the game is Pokémon Z-A: exec.c leaves its GPU timing counters alone)
+bool g_fps60_fell_back;  // (60 fps chosen, but this session went back to 30: runtime/ui/menu.mm says so)
+static bool fps60_holds(void) {
+    extern uint64_t renderer_present_count(void);
+    extern void menu_notice(const char *text, int seconds);
+    static int last_setting = -1, warm, slow;
+    static uint64_t t0, p0;
+    if (last_setting != (int)g_settings.fps60) {  // (chosen again in F1: a new try)
+        last_setting = g_settings.fps60;
+        g_fps60_fell_back = false, warm = slow = 0, t0 = 0;
+    }
+    if (!g_settings.fps60 || g_fps60_fell_back) return false;
+    uint64_t now = plat_now_ns(), pc = renderer_present_count();
+    if (!t0) { t0 = now, p0 = pc; return true; }
+    if (now - t0 < 1000000000ull) return true;
+    double fps = (double)(pc - p0) * 1e9 / (double)(now - t0);
+    t0 = now, p0 = pc;
+    if (warm < FPS60_WARM_S) { warm++; return true; }
+    static double min = -1;  // LARECOMP_FPS60_MIN: another floor (tests: 59 makes a busy scene back off)
+    if (min < 0) min = ENV("LARECOMP_FPS60_MIN") ? atof(ENV("LARECOMP_FPS60_MIN")) : FPS60_MIN;
+    slow = fps < min ? slow + 1 : 0;
+    if (slow < FPS60_SLOW_S) return true;
+    g_fps60_fell_back = true;
+    LOG("[pace] 60 fps not held (%.0f fps for %d s): back to 30 fps - below 60 the game moves in slow motion\n", fps, slow);
+    menu_notice("60 fps turned off: this PC didn't keep 60 fps, and below that the game moves in slow motion. "
+                "Back to 30 fps (choose 60 again in F1 to retry).", 8);
+    return false;
+}
 int32_t rt_za_frame_cfg(int32_t cfg) {
     g_za_frame_hook = true;
     const char *e = ENV("LARECOMP_FPS");
-    bool on = e ? atoi(e) >= 60 : g_settings.fps60;
+    bool on = e ? atoi(e) >= 60 : fps60_holds();
     static int logged = -1;
     if (logged != (int)on) { logged = on; LOG("[pace] game frame mode %d -> %d (%s)\n", cfg, on ? 0 : cfg, on ? "60 fps" : "as is"); }
     return on ? 0 : cfg;

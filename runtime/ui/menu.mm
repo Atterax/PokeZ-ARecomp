@@ -62,6 +62,16 @@ static void push(const QEvent &e) {
     pthread_mutex_unlock(&q_lock);
 }
 
+// A line at the bottom of the screen for a few seconds, from any thread (runtime/hle/framepace.c: 60 fps turned off)
+static char g_notice_text[256];
+static std::atomic<uint64_t> g_notice_until{0};
+extern "C" void menu_notice(const char *text, int seconds) {
+    pthread_mutex_lock(&q_lock);
+    snprintf(g_notice_text, sizeof g_notice_text, "%s", text);
+    pthread_mutex_unlock(&q_lock);
+    g_notice_until = SDL_GetTicks() + (uint64_t)seconds * 1000;
+}
+
 bool menu_is_open(void) { return g_open.load(); }
 static void set_open(bool open);
 extern "C" void menu_test_open(void) {
@@ -448,16 +458,18 @@ static void tab_display(void) {
     }
     opt_toggle("Show FPS", &g_settings.show_fps, false, "Shows the frame rate in the top right corner.");
     {   // Pokémon Z-A's frame mode (runtime/hle/framepace.c rt_za_frame_cfg): applies from the next frame
-        extern bool g_za_frame_hook;
+        extern bool g_za_frame_hook, g_fps60_fell_back;
         if (g_za_frame_hook) {
             int fr = g_settings.fps60 ? 1 : 0;
             static const char *rates[] = {"30 fps (Switch)", "60 fps (experimental)"};
             if (opt_choice("Frame rate", &fr, rates, 2, 0,
                            "30 fps: as on the Switch (recommended). 60 fps (experimental): the game presents every vsync "
-                           "and steps its world 1/60 s a frame - smoother, but it needs a fast CPU (slow motion "
-                           "otherwise), and distant trees, shadows and some surfaces can flicker or go black for a "
-                           "moment: parts of the game made for 30 fps."))
+                           "and steps its world 1/60 s a frame - smoother, but it needs a fast CPU: the game counts "
+                           "frames, not time, so below 60 fps everything moves in slow motion. When this PC doesn't "
+                           "keep 60, ZA Recomp goes back to 30 by itself (choose 60 again to retry)."))
                 g_settings.fps60 = fr == 1;
+            if (g_settings.fps60 && g_fps60_fell_back)
+                ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "Running at 30 fps: this PC didn't keep 60 fps.");
         }
     }
     opt_toggle("Anisotropic filtering 16x", &g_settings.aniso16, false,
@@ -865,7 +877,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool trk = !open && tracker_overlay_wanted();
     bool chaos = !open && chaos_overlay_wanted();
     bool kbd = g_kbd.load() == 1;
-    if (!open && !kbd && !g_settings.show_fps && !inv && !trk && !chaos) {
+    bool notice = SDL_GetTicks() < g_notice_until.load();
+    if (!open && !kbd && !g_settings.show_fps && !inv && !trk && !chaos && !notice) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
@@ -916,6 +929,22 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         ImGui::Begin("##fps", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                         ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
         ImGui::Text("%.0f fps", io.Framerate);
+        ImGui::End();
+    }
+
+    if (notice) {  // menu_notice: a line at the bottom for a few seconds
+        char text[sizeof g_notice_text];
+        pthread_mutex_lock(&q_lock);
+        memcpy(text, g_notice_text, sizeof text);
+        pthread_mutex_unlock(&q_lock);
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y - 40 * scale), 0, ImVec2(0.5f, 1));
+        ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(io.DisplaySize.x * 0.8f, FLT_MAX));
+        ImGui::SetNextWindowBgAlpha(0.8f);
+        ImGui::Begin("##notice", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                           ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+        ImGui::PushTextWrapPos(io.DisplaySize.x * 0.75f);
+        ImGui::TextUnformatted(text);
+        ImGui::PopTextWrapPos();
         ImGui::End();
     }
 
