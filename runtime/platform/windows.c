@@ -266,6 +266,16 @@ bool plat_exe_path(char *buf, size_t size) {
     return n > 0 && n < size;
 }
 
+// RtlGetVersion: the real version (GetVersionEx answers what the manifest declares). Build 22000+ is Windows 11.
+void plat_os_name(char *buf, size_t size) {
+    typedef LONG(WINAPI * RtlGetVersionFn)(OSVERSIONINFOW *);
+    RtlGetVersionFn f = (RtlGetVersionFn)(void *)GetProcAddress(GetModuleHandleA("ntdll.dll"), "RtlGetVersion");
+    OSVERSIONINFOW v = {.dwOSVersionInfoSize = sizeof v};
+    if (!f || f(&v) != 0) { snprintf(buf, size, "Windows"); return; }
+    snprintf(buf, size, "Windows %s %lu.%lu.%lu", v.dwMajorVersion == 10 && v.dwBuildNumber >= 22000 ? "11" : "10",
+             v.dwMajorVersion, v.dwMinorVersion, v.dwBuildNumber);
+}
+
 // Quote one argument the way CommandLineToArgvW / the CRT parse it back.
 static void append_arg(char *out, size_t cap, const char *a) {
     size_t n = strlen(out);

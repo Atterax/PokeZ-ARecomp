@@ -77,6 +77,14 @@ bool plat_exe_path(char *buf, size_t size) {
     return _NSGetExecutablePath(buf, &len) == 0;
 }
 
+#include <sys/sysctl.h>
+void plat_os_name(char *buf, size_t size) {
+    char v[64] = "";
+    size_t n = sizeof v;
+    if (sysctlbyname("kern.osproductversion", v, &n, NULL, 0) != 0) v[0] = 0;
+    snprintf(buf, size, "macOS %s", v);
+}
+
 void plat_exec(char *const argv[]) {
     if (argv) { execv(argv[0], argv); return; }
     char path[4096];

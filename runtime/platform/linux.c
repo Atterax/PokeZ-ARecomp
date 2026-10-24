@@ -127,6 +127,24 @@ bool plat_exe_path(char *buf, size_t size) {
     return true;
 }
 
+// /etc/os-release's PRETTY_NAME and the kernel release ("SteamOS (6.11.11-valve12-1-neptune)")
+#include <sys/utsname.h>
+void plat_os_name(char *buf, size_t size) {
+    char name[128] = "Linux", line[256];
+    FILE *f = fopen("/etc/os-release", "r");
+    while (f && fgets(line, sizeof line, f))
+        if (!strncmp(line, "PRETTY_NAME=", 12)) {
+            char *v = line + 12, *e;
+            if (*v == '"') v++;
+            if ((e = strpbrk(v, "\"\n"))) *e = 0;
+            snprintf(name, sizeof name, "%s", v);
+        }
+    if (f) fclose(f);
+    struct utsname u;
+    if (uname(&u) == 0) snprintf(buf, size, "%s (%s)", name, u.release);
+    else snprintf(buf, size, "%s", name);
+}
+
 // Our own command line, from /proc/self/cmdline (NUL-separated).
 static char **self_argv(void) {
     static char buf[32768];

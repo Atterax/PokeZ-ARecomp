@@ -10,8 +10,61 @@
 #include "hle.h"
 #include "kernel.h"
 #include "rando.h"
+#include "platform.h"
+#include "gamebuild.h"  // (gamelib_old_cpu)
+#include <stdio.h>
+#if defined(__x86_64__) || defined(__i386__)
+#include <cpuid.h>
+#endif
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#endif
 
 const char *g_romfs_dir;
+
+// The player's machine at the top of the log: what a slow or broken run report needs first (the CPU runs the
+// recompiled game code; the GPU line comes from runtime/nvn/vulkan/device.c). No user or machine names, no paths.
+static void cpu_name(char *buf, size_t size) {
+    snprintf(buf, size, "unknown CPU");
+#if defined(__x86_64__) || defined(__i386__)
+    unsigned r[12], top = __get_cpuid_max(0x80000000, NULL);
+    if (top >= 0x80000004) {
+        for (unsigned i = 0; i < 3; i++) __get_cpuid(0x80000002 + i, &r[4 * i], &r[4 * i + 1], &r[4 * i + 2], &r[4 * i + 3]);
+        char s[49];
+        memcpy(s, r, 48);
+        s[48] = 0;
+        char *p = s;
+        while (*p == ' ') p++;
+        snprintf(buf, size, "%s", p);
+    }
+#elif defined(__APPLE__)
+    size_t n = size;
+    if (sysctlbyname("machdep.cpu.brand_string", buf, &n, NULL, 0) != 0) snprintf(buf, size, "Apple CPU");
+#else
+    FILE *f = fopen("/proc/cpuinfo", "r");
+    char line[256];
+    while (f && fgets(line, sizeof line, f))
+        if (!strncmp(line, "model name", 10) || !strncmp(line, "Model", 5)) {
+            char *v = strchr(line, ':');
+            if (v) { v += 1 + (v[1] == ' '); v[strcspn(v, "\n")] = 0; snprintf(buf, size, "%s", v); break; }
+        }
+    if (f) fclose(f);
+#endif
+}
+static void log_system(void) {
+    extern const char *rt_version(void);  // runtime/ui/launcher.mm
+    char cpu[128], os[160];
+    cpu_name(cpu, sizeof cpu);
+    plat_os_name(os, sizeof os);
+    char feat[96] = "";
+#if defined(__x86_64__)
+    snprintf(feat, sizeof feat, ", AVX2 %s FMA %s BMI2 %s -> game code for x86-64-%s",
+             __builtin_cpu_supports("avx2") ? "yes" : "no", __builtin_cpu_supports("fma") ? "yes" : "no",
+             __builtin_cpu_supports("bmi2") ? "yes" : "no", gamelib_old_cpu() ? "v2" : "v3");
+#endif
+    LOG("[system] ZA Recomp %s | %s | CPU: %s (%d threads%s) | RAM %d GB\n", rt_version(), os, cpu,
+        SDL_GetNumLogicalCPUCores(), feat, (SDL_GetSystemRAM() + 512) / 1024);
+}
 
 // rtld normally passes these to nn::init::Start: run every module's init/fini arrays.
 static void run_array(Cpu *c, uint64_t arr, uint64_t size) {
@@ -216,6 +269,7 @@ int main(int argc, char **argv) {
                 launcher_prompts_kick(root);
         }
     }
+    log_system();
     for (bool title = !skip_launcher;;) {
         if (title) {  // start screen (runtime/ui/launcher.mm): game files setup, seed choice, settings
             extern void launcher_run(const char *root);

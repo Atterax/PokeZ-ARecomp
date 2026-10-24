@@ -114,7 +114,21 @@ static void pick_device(void) {
     }
     free(qp);
     if (g_vk.qfam == UINT32_MAX) FATAL("no graphics+present queue\n");
-    LOG("[vk] using %s\n", g_vk.props.deviceName);
+    {   // (with the [system] line, runtime/main.c: kind, video memory, driver - what a report needs)
+        VkPhysicalDeviceDriverProperties dp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+        VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &dp};
+        vkGetPhysicalDeviceProperties2(g_vk.phys, &p2);
+        VkPhysicalDeviceMemoryProperties mp;
+        vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
+        uint64_t vram = 0;
+        for (uint32_t i = 0; i < mp.memoryHeapCount; i++)
+            if (mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) vram += mp.memoryHeaps[i].size;
+        VkPhysicalDeviceType t = g_vk.props.deviceType;
+        LOG("[vk] using %s (%s, %.1f GB video memory, driver %s %s, Vulkan %u.%u.%u)\n", g_vk.props.deviceName,
+            t == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? "dedicated" : t == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? "integrated" : "other",
+            (double)vram / (1u << 30), dp.driverName, dp.driverInfo, VK_API_VERSION_MAJOR(g_vk.props.apiVersion),
+            VK_API_VERSION_MINOR(g_vk.props.apiVersion), VK_API_VERSION_PATCH(g_vk.props.apiVersion));
+    }
 }
 
 static bool g_fault_ext;
