@@ -3219,6 +3219,29 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     Prog *pr = get_program(st.program, &vkey, &fkey);
     if (!pr || !wait_built(&pr->state, r)) { stat_skipped_here(); return; }
+    {   // Stretched-geometry guard: a vertex shader reading attributes past a one-attribute layout (position only) is
+        // drawing with another draw's layout - its mesh spreads across the sky (Z-A: 36-byte vertices read as 12).
+        // Skipped until the cause is found; LARECOMP_SKIP_BAD_LAYOUT=0 draws them.
+        static int on = -1, fault = -1;
+        if (on < 0) on = !ENV("LARECOMP_SKIP_BAD_LAYOUT") || atoi(ENV("LARECOMP_SKIP_BAD_LAYOUT")) != 0;
+        // (test) LARECOMP_TEST_BAD_LAYOUT=<n>: every n-th draw of a mesh with interleaved vertices (stride >= 24) gets
+        // the bug's layout (position only, stride 12) - the stretching on demand, to test this guard
+        if (fault < 0) fault = ENV("LARECOMP_TEST_BAD_LAYOUT") ? atoi(ENV("LARECOMP_TEST_BAD_LAYOUT")) : 0;
+        static uint64_t nfault;
+        if (fault > 0 && st.nattrib > 1 && st.nstream && st.stream[0][0] >= 24 && (pr->vi->attr_mask & ~1u) &&
+            (st.attrib[0] & 0xFF) == 0x22 && (st.attrib[0] >> 8 & 0x1F) == 0 && ++nfault % (uint64_t)fault == 0) {
+            st.nattrib = 1;
+            st.stream[0][0] = 12;
+        }
+        if (on && st.nattrib <= 1 && (pr->vi->attr_mask & ~1u)) {
+            static uint64_t nskip;
+            if (nskip++ < 20) LOG("[vtxstate] skipped draw: vs %llx reads attribs %#x, %d bound (vb0 %llx)\n",
+                                  (unsigned long long)st.program->stages[0].code_addr, pr->vi->attr_mask, st.nattrib,
+                                  (unsigned long long)st.vbuf[0].addr);
+            stat_skipped_here();
+            return;
+        }
+    }
     g_mirror_w = 0;
     {   // mirror mode (runtime/hle/mirror.c; as renderer.m): the scene's composite into the window image is mirrored
         extern bool mirror_draw(bool composite);
