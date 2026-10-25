@@ -41,7 +41,9 @@ Problemas conhecidos:
 - Alguns ícones da interface (modo câmera, o PRESS A da tela de título) vêm dos arquivos do próprio jogo e ainda
   mostram os botões do Switch
 - Tela preta rápida ocasional; listras rosas em algumas paredes à noite
-- Testado até agora só no Windows com GPU NVIDIA (o código também compila no Linux e no macOS, sem testes com o Z-A)
+- Testado até agora só no Windows com GPU NVIDIA (o código também compila no Linux, sem testes com o Z-A)
+- **No Mac:** veja o [MonZaMac](https://github.com/lucabravi/MonZaMac), de [@lucabravi](https://github.com/lucabravi),
+  um port nativo para macOS baseado neste projeto
 
 ## Como jogar
 
@@ -136,6 +138,8 @@ NVN (`runtime/nvn/`), o backend Vulkan (`runtime/nvn/vulkan/`) e o tradutor de s
   [@gitarre1234rr5](https://github.com/gitarre1234rr5), [@rkammoun](https://github.com/rkammoun) e todos que relataram
   problemas - veja [docs/LASRecomp-README.md](docs/LASRecomp-README.md#credits) para a contribuição de cada um.
 - **[Hexveil404](https://github.com/Hexveil404)** - o port de Pokémon Legends: Z-A (este fork).
+- **[lucabravi](https://github.com/lucabravi)** - [MonZaMac](https://github.com/lucabravi/MonZaMac), o port nativo de
+  ZA Recomp para macOS.
 - **[Ryujinx](https://github.com/Ryujinx/Ryujinx)** - usado como referência de comportamento durante o port (nenhum
   código copiado).
 - **[envytools](https://github.com/envytools/envytools)** e **[Switchbrew](https://switchbrew.org)** - documentação da
