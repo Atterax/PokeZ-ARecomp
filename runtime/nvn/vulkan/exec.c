@@ -3418,12 +3418,14 @@ static void draw_(CmdRec *r, bool indexed) {
     k.poly_fill = st.poly[2] != 1;
     static int noclamp = -1;  // LARECOMP_VK_NO_DEPTH_CLAMP=1: ignore the game's depth clamp, as before
     if (noclamp < 0) noclamp = ENV("LARECOMP_VK_NO_DEPTH_CLAMP") != NULL;
-    // Only in depth-only passes (shadow maps: the casters past the light's planes, PR #8). Vulkan's clamp also turns off
-    // near clipping, so in a colour pass a big mesh with triangles behind the camera spread across the screen as huge
-    // dark sheets and beams (the plaza at night).
-    static int clamp_color = -1;  // LARECOMP_VK_CLAMP_COLOR=1: in colour passes too (as PR #8 had it)
+    // In depth-only passes (shadow maps: the casters past the light's planes, PR #8) and in passes without depth (the
+    // UI: its quads ask for the clamp, and some lie outside the depth range - clipped, the item-count window after
+    // using a candy stayed hidden). Not in colour passes with depth: Vulkan's clamp also turns off near clipping, so a
+    // big mesh with triangles behind the camera spread across the screen as huge dark sheets and beams (the plaza at
+    // night, G-buffer).
+    static int clamp_color = -1;  // LARECOMP_VK_CLAMP_COLOR=1: in every pass (as PR #8 had it)
     if (clamp_color < 0) clamp_color = ENV("LARECOMP_VK_CLAMP_COLOR") != NULL;
-    k.depth_clamp = st.depth_clamp && !noclamp && (!pass_ncolor || clamp_color);
+    k.depth_clamp = st.depth_clamp && !noclamp && (!pass_ncolor || !pass_depth || clamp_color);
     if (g_vkc.no_eds2) k.restart = st.prim_restart && native && (mode == 3 || mode == 5);  // (as SS_PRE below)
     FixedState fx;
     fixed_state(&fx, vkey.flip_x, vkey.flip_y, native, topo);
