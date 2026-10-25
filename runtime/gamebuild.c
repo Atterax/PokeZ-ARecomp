@@ -211,6 +211,23 @@ static void log_tail(const char *path, char *out, size_t n) {  // the last line 
     snprintf(out, n, "%s", nl ? nl + 1 : buf);
 }
 
+// the end of a failed step's log into lasrecomp.log: a frozen generator's last line is only PyInstaller's "unhandled
+// exception" - the Python traceback above it is what tells (players send lasrecomp.log, not .gamebuild/gen_*.log)
+static void log_dump_tail(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    char buf[3072];
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, size > (long)sizeof buf - 1 ? size - (long)sizeof buf + 1 : 0, SEEK_SET);
+    size_t k = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[k] = 0;
+    char *p = size > (long)sizeof buf - 1 ? strchr(buf, '\n') : NULL;  // (from a whole line)
+    p = p ? p + 1 : buf;
+    for (char *line = strtok(p, "\r\n"); line; line = strtok(NULL, "\r\n")) LOG("[gamebuild]   | %s\n", line);
+}
+
 // ------------------------------------------------------------------ compiling
 typedef struct {
     char src[1100], obj[1100], log[1100];
@@ -402,6 +419,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
                         char last[300];
                         log_tail(g->log, last, sizeof last);
                         LOG("[gamebuild] generator (%s) failed: %s\n", g->name, last);
+                        log_dump_tail(g->log);
                         snprintf(why, why_size, "the game code couldn't be prepared");
                         ok = false;
                     }
