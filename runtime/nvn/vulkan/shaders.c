@@ -459,6 +459,23 @@ static const char *builtin_src(const char *name, int *stage) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\nvoid main() {}\n";
     }
+    // (exec.c gfast_finish) a storing dispatch's device-local copy back to the guest heap: only the words the dispatch
+    // changed (copy f vs its untouched twin o), so the CPU's writes to the rest of the buffer meanwhile survive
+    if (!strcmp(name, "gfast_merge.comp")) {
+        *stage = STAGE_COMPUTE;
+        return "#version 450\n"
+               "layout(local_size_x = 256) in;\n"
+               "layout(std430, set = 0, binding = 0) buffer H { uint h[]; };\n"
+               "layout(std430, set = 0, binding = 1) readonly buffer F { uint f[]; };\n"
+               "layout(std430, set = 0, binding = 2) readonly buffer O { uint o[]; };\n"
+               "layout(push_constant) uniform P { uint src; uint dst; uint n; } pc;\n"
+               "void main() {\n"
+               "  uint i = gl_GlobalInvocationID.x;\n"
+               "  if (i >= pc.n) return;\n"
+               "  uint v = f[pc.src + i];\n"
+               "  if (v != o[pc.src + i]) h[pc.dst + i] = v;\n"
+               "}\n";
+    }
     return NULL;
 }
 

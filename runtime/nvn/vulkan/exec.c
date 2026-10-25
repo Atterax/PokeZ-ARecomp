@@ -2268,6 +2268,44 @@ static int gfast_n;
 // indirect draw's instance count became an old float, 2 billion instances, device lost).
 static VkBufferCopy gfast_back[16];
 static int gfast_back_n;
+// Even the exact bytes clobbered the CPU's writes: the game fills an indirect draw's index count / first index on the
+// CPU while the culling dispatch writes its instance count, both in one buffer. A frame ahead, the CPU wrote a new
+// mesh's counts there while the GPU worked on its copy; the copy back restored the old mesh's (Pokémon Z-A: ~12% of
+// the culled draws used another mesh's index range - sheets and beams across the sky, the player sunk in a grey slab).
+// So a twin of the copy, untouched by the dispatch, goes along, and a merge shader writes back only the words that
+// differ from it. LARECOMP_VK_GFAST_MERGE=0: the plain copy back.
+static VkBuffer gorig_buf;
+static VmaAllocation gorig_mem;
+static VkPipeline gmerge_pipe;
+static VkPipelineLayout gmerge_layout;
+static VkDescriptorSetLayout gmerge_set_layout;
+static int gmerge_on = -1;
+static bool gfast_stores;  // (set before gfast_prepare: the dispatch stores to global memory)
+
+static bool gmerge_init(void) {
+    if (gmerge_on < 0) gmerge_on = !ENV("LARECOMP_VK_GFAST_MERGE") || atoi(ENV("LARECOMP_VK_GFAST_MERGE")) != 0;
+    if (!gmerge_on || gmerge_pipe) return gmerge_on && gmerge_pipe;
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = GFAST_SIZE,
+                             .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &gorig_buf, &gorig_mem, NULL) != VK_SUCCESS) { gmerge_on = 0; return false; }
+    VkDescriptorSetLayoutBinding b[3];
+    for (int i = 0; i < 3; i++)
+        b[i] = (VkDescriptorSetLayoutBinding){.binding = (uint32_t)i, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                              .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
+    VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 3, .pBindings = b};
+    VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &gmerge_set_layout));
+    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 12};
+    VkPipelineLayoutCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
+                                     .pSetLayouts = &gmerge_set_layout, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+    VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &pi, NULL, &gmerge_layout));
+    VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = gmerge_layout,
+                                      .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                                                .module = vk_builtin_shader("gfast_merge.comp"), .pName = "main"}};
+    VK_CHECK(vkCreateComputePipelines(g_vk.dev, VK_NULL_HANDLE, 1, &ci, NULL, &gmerge_pipe));
+    return true;
+}
 
 static VkDescriptorBufferInfo gfast_info(void) {
     if (!gfast_buf) {
@@ -2430,6 +2468,12 @@ static void gfast_prepare(VkCommandBuffer cb) {
     }
     vkCmdCopyBuffer(cb, gmem_buf, gfast_buf, (uint32_t)m, cp);
     vk_full_barrier(cb);
+    if (gfast_stores && gmerge_init()) {  // (the twin: see gfast_back)
+        VkBufferCopy tw[16];
+        for (int i = 0; i < m; i++) tw[i] = (VkBufferCopy){cp[i].dstOffset, cp[i].dstOffset, cp[i].size};
+        vkCmdCopyBuffer(cb, gfast_buf, gorig_buf, (uint32_t)m, tw);
+        vk_full_barrier(cb);
+    }
     gmap_tab[GMAP_MAX * 4] = (uint32_t)m;
     memcpy(gfast_cp, cp, (size_t)m * sizeof cp[0]);
     gfast_n = m;
@@ -2450,8 +2494,30 @@ static void gfast_prepare(VkCommandBuffer cb) {
 static void gfast_finish(VkCommandBuffer cb) {
     if (!gfast_n) return;
     vk_full_barrier(cb);
-    // (overlapping bound buffers copy the same bytes twice - identical data, harmless)
-    if (gfast_back_n) vkCmdCopyBuffer(cb, gfast_buf, gmem_buf, (uint32_t)gfast_back_n, gfast_back);
+    bool merged = false;
+    if (gfast_back_n && gmerge_init()) {
+        merged = true;
+        for (int i = 0; i < gfast_back_n; i++)
+            if ((gfast_back[i].srcOffset | gfast_back[i].dstOffset | gfast_back[i].size) & 3 || gfast_back[i].dstOffset / 4 > 0xFFFFFFFFull)
+                merged = false;  // (not word-aligned: the plain copy)
+    }
+    if (merged) {
+        VkDescriptorSet set = vk_alloc_set(gmerge_set_layout);
+        VkDescriptorBufferInfo bi[3] = {gmem_info(), {gfast_buf, 0, GFAST_SIZE}, {gorig_buf, 0, GFAST_SIZE}};
+        VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0,
+                                  .descriptorCount = 3, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = bi};
+        vkUpdateDescriptorSets(g_vk.dev, 1, &w, 0, NULL);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, gmerge_pipe);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, gmerge_layout, 0, 1, &set, 0, NULL);
+        for (int i = 0; i < gfast_back_n; i++) {
+            uint32_t pc[3] = {(uint32_t)(gfast_back[i].srcOffset / 4), (uint32_t)(gfast_back[i].dstOffset / 4), (uint32_t)(gfast_back[i].size / 4)};
+            vkCmdPushConstants(cb, gmerge_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
+            vkCmdDispatch(cb, (pc[2] + 255) / 256, 1, 1);
+        }
+    } else if (gfast_back_n) {
+        // (overlapping bound buffers copy the same bytes twice - identical data, harmless)
+        vkCmdCopyBuffer(cb, gfast_buf, gmem_buf, (uint32_t)gfast_back_n, gfast_back);
+    }
     vk_full_barrier(cb);
     gfast_n = 0;
 }
@@ -2996,6 +3062,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
             }
         }
     }
+    gfast_stores = cp->si->uses_gmem_store;
     if (cp->si->uses_gmem_map) gfast_prepare(cb);
     VkDescriptorSet ds = stage_set(&cp->p, cp->p.set_layout[0], 0, 5, cp->si, NULL, NULL, gx, gy, gz, NULL);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
@@ -3351,7 +3418,12 @@ static void draw_(CmdRec *r, bool indexed) {
     k.poly_fill = st.poly[2] != 1;
     static int noclamp = -1;  // LARECOMP_VK_NO_DEPTH_CLAMP=1: ignore the game's depth clamp, as before
     if (noclamp < 0) noclamp = ENV("LARECOMP_VK_NO_DEPTH_CLAMP") != NULL;
-    k.depth_clamp = st.depth_clamp && !noclamp;
+    // Only in depth-only passes (shadow maps: the casters past the light's planes, PR #8). Vulkan's clamp also turns off
+    // near clipping, so in a colour pass a big mesh with triangles behind the camera spread across the screen as huge
+    // dark sheets and beams (the plaza at night).
+    static int clamp_color = -1;  // LARECOMP_VK_CLAMP_COLOR=1: in colour passes too (as PR #8 had it)
+    if (clamp_color < 0) clamp_color = ENV("LARECOMP_VK_CLAMP_COLOR") != NULL;
+    k.depth_clamp = st.depth_clamp && !noclamp && (!pass_ncolor || clamp_color);
     if (g_vkc.no_eds2) k.restart = st.prim_restart && native && (mode == 3 || mode == 5);  // (as SS_PRE below)
     FixedState fx;
     fixed_state(&fx, vkey.flip_x, vkey.flip_y, native, topo);
@@ -3768,6 +3840,39 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
     }
 }
 
+// An indexed draw with parameters in GPU memory whose indices run past its vertex buffer (Z-A: the index count is
+// another mesh's, so the draw reads on into the next allocation - matrices, material floats - and its triangles
+// stretch across the screen as sheets and beams). Checked on the parameters as the CPU sees them (the culling
+// compute writes only the instance count) and skipped; LARECOMP_IB_GUARD=0 draws them.
+static bool ib_overrun(CmdRec *r, const uint32_t *p, uint64_t pa) {
+    static int on = -1;
+    if (on < 0) on = !ENV("LARECOMP_IB_GUARD") || atoi(ENV("LARECOMP_IB_GUARD")) != 0;
+    if (!on || !st.nattrib || !(st.attrib[0] & 0xFF)) return false;
+    uint32_t s = st.attrib[0] >> 8 & 0x1F, off = st.attrib[0] >> 13;
+    if (s >= (uint32_t)st.nstream || !st.vbuf[s].size || st.stream[s][1] || !st.stream[s][0]) return false;
+    uint32_t itype = (uint32_t)r->x[1], isz = itype == 0 ? 1 : itype == 1 ? 2 : 4;
+    uint64_t count = p[0], first = p[2], ib = r->x[2];
+    if (!count || count > (1u << 22) || !ib || ib < GUEST_LO) return false;
+    uint32_t restart = st.prim_restart ? st.restart_index : 0xFFFFFFFFu, mx = 0;
+    const uint8_t *ip = (const uint8_t *)(uintptr_t)(ib + first * isz);
+    for (uint64_t i = 0; i < count; i++) {
+        uint32_t v = isz == 1 ? ip[i] : isz == 2 ? ((const uint16_t *)ip)[i] : ((const uint32_t *)ip)[i];
+        if (v != (restart & (isz == 1 ? 0xFFu : isz == 2 ? 0xFFFFu : 0xFFFFFFFFu)) && v > mx) mx = v;
+    }
+    int64_t last = (int64_t)mx + (int32_t)p[3];
+    uint64_t stride = st.stream[s][0];
+    if (last < 0 || (uint64_t)last * stride + off + 4 <= st.vbuf[s].size) return false;
+    static int nlog;
+    if (nlog++ < 60) {
+        LOG("[ibguard] frame %llu: skipped draw: args %llx = count %u inst %u first %u base %d binst %u | "
+            "ib %llx max index %u -> vertex %lld x stride %llu > vbuf %llx+%llu (%llu vertices)\n",
+            (unsigned long long)renderer_present_count(), (unsigned long long)pa, p[0], p[1], p[2], (int)p[3], p[4], (unsigned long long)ib, mx, (long long)last,
+            (unsigned long long)stride, (unsigned long long)st.vbuf[s].addr, (unsigned long long)st.vbuf[s].size,
+            (unsigned long long)(st.vbuf[s].size / stride));
+    }
+    stat_skipped_here();
+    return true;
+}
 // Indirect draws: the parameters (GL / Vulkan layout: arrays {count, instances, first, base instance}, elements
 // {count, instances, first index, base vertex, base instance}) read from guest memory when the list runs, each made a
 // direct draw. Arguments: DrawArraysIndirect (mode, indirect), DrawElementsIndirect (mode, index type, index buffer,
@@ -3827,6 +3932,7 @@ static void draw_indirect(CmdRec *r) {
                 LOG("[vk] gpu args %llx: count %u instances %u first %u base %d base inst %u (cpu: %u %u)\n", (unsigned long long)pa,
                     q[0], q[1], q[2], (int)q[3], q[4], p[0], p[1]);
             }
+            if (elements && ib_overrun(r, p, pa)) continue;
             g_ind_gpu = true; g_ind_off = GM_OFF(pa); g_ind_stride = stride;
             d.x[0] = r->x[0];
             if (elements) {

@@ -373,9 +373,31 @@ void plat_crash_handler_install(void) {
 }
 
 // ---- POSIX shims (win_compat.h)
+// Guest pages are committed on the CPU's first touch (vectored_handler), but ReadFile / WriteFile never fault:
+// into a page that is only reserved the call fails (ERROR_NOACCESS) instead of committing it. So the range is
+// committed first, and a failure is logged rather than handed back as a silent short read.
+static void commit_guest_range(uint64_t a, uint64_t n) {
+    if (!n || a + n <= g_lo || a >= g_hi) return;
+    uint64_t end = a + n < g_hi ? a + n : g_hi;
+    if (a < g_lo) a = g_lo;
+    while (a < end) {
+        MEMORY_BASIC_INFORMATION mi;
+        if (!VirtualQuery((void *)(uintptr_t)a, &mi, sizeof mi)) return;
+        uint64_t rend = (uint64_t)(uintptr_t)mi.BaseAddress + mi.RegionSize;
+        if (mi.State == MEM_RESERVE) {
+            uint64_t lo = a & ~(COMMIT_CHUNK - 1), hi = ((rend < end ? rend : end) + COMMIT_CHUNK - 1) & ~(COMMIT_CHUNK - 1);
+            if (hi > rend) hi = rend;
+            if (!VirtualAlloc((void *)(uintptr_t)lo, hi - lo, MEM_COMMIT, PAGE_READWRITE))
+                VirtualAlloc((void *)(uintptr_t)(a & ~0xFFFull), ((rend < end ? rend : end) - (a & ~0xFFFull) + 0xFFF) & ~0xFFFull,
+                             MEM_COMMIT, PAGE_READWRITE);
+        }
+        a = rend;
+    }
+}
 static ssize_t prw(int fd, void *buf, size_t n, off_t off, bool write) {
     HANDLE h = (HANDLE)_get_osfhandle(fd);
     if (h == INVALID_HANDLE_VALUE) return -1;
+    commit_guest_range((uint64_t)(uintptr_t)buf, n);
     size_t done = 0;
     while (done < n) {
         OVERLAPPED ov = {0};
@@ -386,7 +408,12 @@ static ssize_t prw(int fd, void *buf, size_t n, off_t off, bool write) {
         BOOL ok = write ? WriteFile(h, (const char *)buf + done, chunk, &got, &ov)
                         : ReadFile(h, (char *)buf + done, chunk, &got, &ov);
         if (!ok) {
-            if (GetLastError() == ERROR_HANDLE_EOF) break;
+            DWORD err = GetLastError();
+            if (err == ERROR_HANDLE_EOF) break;
+            static int nlog;
+            if (nlog++ < 40)
+                fprintf(stderr, "[plat] %s of %#llx bytes at file offset %#llx into %p failed after %#llx: error %lu\n",
+                        write ? "write" : "read", (unsigned long long)n, (unsigned long long)off, buf, (unsigned long long)done, err);
             return done ? (ssize_t)done : -1;
         }
         if (!got) break;
