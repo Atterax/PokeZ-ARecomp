@@ -2535,12 +2535,17 @@ static void gfast_finish(VkCommandBuffer cb) {
 #define VC_TAB 8192                   // entries (open addressing)
 #define VC_MAX_RANGE (64ull << 20)    // larger bound ranges: read in place
 #define VC_BUDGET (768ull << 20)      // device-local bytes kept; the least recently used go first
-typedef struct { uint64_t lo, hi, used_seq; uint32_t gen, epoch; VkBuffer buf; VmaAllocation mem; bool gpu; } VcEnt;
+typedef struct { uint64_t lo, hi, used_seq; uint32_t gen, epoch, gpu_until; VkBuffer buf; VmaAllocation mem; bool gpu; } VcEnt;
 static VcEnt vc_tab[VC_TAB];
 static uint32_t vc_pend[VC_TAB];  // entries the pending submission draws from (vc_flush brings them up to date)
 static int vc_npend;
 static uint32_t *vc_page_gen;  // per heap page: the generation of its last CPU write seen (vc_gen when observed)
-static uint8_t *vc_page_gpu;   // per heap page: written by the GPU
+static uint32_t *vc_page_gpu;  // per heap page: the frame the GPU last wrote it (+1; 0: never)
+// A page the GPU hasn't written for this many frames is cached again (copied whole first): the game reuses its
+// memory, and pages a compute dispatch or transform feedback wrote once stayed read in place for the rest of the
+// session - the vertices read across PCIe grew to ~10 GB per 2 s after half an hour (GPU time +25%, 60 fps lost)
+#define VC_GPU_HOLD 120u
+static bool vc_gpu_expired;  // (an entry turned cacheable again: vc_flush orders its copy after the GPU's writes)
 static uint32_t vc_gen = 1, vc_epoch = 1;  // (epoch: bumped when pages turn GPU-written: entries check again)
 static uint64_t vc_bytes;
 #define VC_DEAD 1024
@@ -2580,7 +2585,7 @@ static bool pt_init(void) {
     pt_state = n >= 0 && pg == VC_PAGE;
     if (!pt_state) { LOG("[vk] no page write tracking (%d, page %llu)\n", n, (unsigned long long)pg); return false; }
     vc_page_gen = calloc(HEAP_MAX / VC_PAGE, sizeof *vc_page_gen);
-    vc_page_gpu = calloc(HEAP_MAX / VC_PAGE, 1);
+    vc_page_gpu = calloc(HEAP_MAX / VC_PAGE, sizeof *vc_page_gpu);
     vc_page_gen[0] = ++vc_gen;  // (the probe took page 0's tracking)
     return true;
 }
@@ -2610,7 +2615,8 @@ int vk_pages_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now
 // Heap pages [lo, hi) (offsets) written by the GPU: never cached from now on.
 static void vc_mark_gpu(uint64_t lo, uint64_t hi) {
     if (!pt_init()) return;
-    for (uint64_t p = lo / VC_PAGE; p < (hi + VC_PAGE - 1) / VC_PAGE && p < gwin_max / VC_PAGE; p++) vc_page_gpu[p] = 1;
+    uint32_t now = (uint32_t)vk_frame_counter() + 1;
+    for (uint64_t p = lo / VC_PAGE; p < (hi + VC_PAGE - 1) / VC_PAGE && p < gwin_max / VC_PAGE; p++) vc_page_gpu[p] = now;
     vc_epoch++;
 }
 
@@ -2665,10 +2671,15 @@ static bool vcache_lookup(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceS
         e->lo = lo; e->hi = hi;
         vc_bytes += hi - lo;
     }
-    if (e->epoch != vc_epoch) {  // (pages turned GPU-written since: is this range one of them?)
-        e->gpu = false;
-        for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE && !e->gpu; p++) e->gpu = vc_page_gpu[p];
+    uint32_t now = (uint32_t)vk_frame_counter() + 1;
+    if (e->epoch != vc_epoch || (e->gpu && now >= e->gpu_until)) {  // (pages turned GPU-written since, or their marks expired)
+        bool was = e->gpu;
+        uint32_t last = 0;
+        for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) if (vc_page_gpu[p] > last) last = vc_page_gpu[p];
+        e->gpu = last && now < last + VC_GPU_HOLD;
+        e->gpu_until = last + VC_GPU_HOLD;
         e->epoch = vc_epoch;
+        if (was && !e->gpu) { e->gen = 0; vc_gpu_expired = true; }  // (the GPU's writes aren't tracked: copied whole)
     }
     if (e->gpu) { prof_vc_bypass++; return false; }
     if (e->used_seq != pend) {  // first use in this submission: brought up to date by vc_flush before it runs
@@ -2710,6 +2721,7 @@ void vc_flush(void) {
     }
     prof_vc_scan_ns += SDL_GetTicksNS() - t0;
     VkCommandBuffer cb = vk_upload_cmd();
+    if (vc_gpu_expired) { vk_full_barrier(cb); vc_gpu_expired = false; }  // (after the earlier submissions' writes)
     for (int i = 0; i < vc_npend; i++) {
         VcEnt *e = &vc_tab[vc_pend[i]];
         VkBufferCopy cp[64];
@@ -2779,7 +2791,7 @@ void vk_exec_reset(void) {
     vc_npend = 0;
     vc_free_dead(true);
     vc_bytes = 0;
-    if (vc_page_gpu) memset(vc_page_gpu, 0, gwin_max / VC_PAGE);
+    if (vc_page_gpu) memset(vc_page_gpu, 0, gwin_max / VC_PAGE * sizeof *vc_page_gpu);
     vc_epoch++;
     st_defaults();
 }
