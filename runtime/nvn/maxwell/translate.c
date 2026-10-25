@@ -337,6 +337,13 @@ static uint32_t himm(uint64_t w) {
     return lo | (hi << 16);
 }
 
+// LARECOMP_WARP_EMU=0: plain subgroup calls instead of the prelude's per-32-lane-warp w* functions
+static bool warp_emu(void) {
+    static int on = -1;
+    if (on < 0) on = !getenv("LARECOMP_WARP_EMU") || atoi(getenv("LARECOMP_WARP_EMU")) != 0;
+    return on;
+}
+
 static bool emit_half(Ctx *c, uint64_t w) {
     int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8);
     char t[1800], ib[32], cb[256];
@@ -1197,10 +1204,11 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         int vp = (int)bits(w, 45, 3), mode = (int)bits(w, 48, 2);
         const char *src = P((int)bits(w, 39, 3), bits(w, 42, 1));
         if (!c->glsl) { fail(c, "vote (msl)"); return; }
-        static const char *const fn[] = {"subgroupAll", "subgroupAny", "subgroupAllEqual"};
+        static const char *const fn_w[] = {"wall", "wany", "wequal"}, *const fn_s[] = {"subgroupAll", "subgroupAny", "subgroupAllEqual"};
+        const char *const *fn = warp_emu() ? fn_w : fn_s;  // (per 32-lane warp: the prelude's w* functions)
         if (mode > 2) { fail(c, "vote mode %d", mode); return; }
         if (vp != PT) { c->pred_used[vp] = 1; sp(&c->body, "    p%d = %s(%s);\n", vp, fn[mode], src); }
-        if (d != RZ) { sprintf(t, "subgroupBallot(%s).x", src); set_reg(c, d, t); }
+        if (d != RZ) { sprintf(t, warp_emu() ? "wballot(%s)" : "subgroupBallot(%s).x", src); set_reg(c, d, t); }
     } else if (OPM(0xdf48000000000000ull, 0xfff8000000000000ull)) {  // TXQ
         uint32_t index = (uint32_t)bits(w, 36, 13);
         int qt = (int)bits(w, 22, 6);
@@ -1850,7 +1858,9 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (c->stage == STAGE_VERTEX && !c->glsl) {
             set_reg(c, d, R(a));  // no SIMD-group functions in MSL vertex functions: lane-local value
         } else if (c->glsl) {  // (all stages: Vulkan subgroups. A quad xor - lane mask < 4 - is the subgroup xor in the quad)
-            static const char *const fn[] = {"subgroupShuffle", "subgroupShuffleUp", "subgroupShuffleDown", "subgroupShuffleXor"};
+            static const char *const fn_w[] = {"wshfl", "wup", "wdown", "wxor"},
+                              *const fn_s[] = {"subgroupShuffle", "subgroupShuffleUp", "subgroupShuffleDown", "subgroupShuffleXor"};
+            const char *const *fn = warp_emu() ? fn_w : fn_s;  // (per 32-lane warp: the prelude's w* functions)
             sprintf(t, "%s(%s, uint(%s))", fn[mode], R(a), bv);
             set_reg(c, d, t);
         } else if (mode == 3) {
@@ -1944,7 +1954,7 @@ static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
         {"float2", "vec2"}, {"float3", "vec3"}, {"float4", "vec4"}, {"int2", "ivec2"}, {"int3", "ivec3"},
         {"int4", "ivec4"}, {"uint2", "uvec2"}, {"uint3", "uvec3"}, {"uint4", "uvec4"}, {"bool2", "bvec2"},
         {"ulong", "uint64_t"}, {"rsqrt", "inversesqrt"}, {"rint", "roundEven"}, {"front_facing", "gl_FrontFacing"},
-        {"point_coord", "gl_PointCoord"}, {"lane", "gl_SubgroupInvocationID"}, {"vid", "uint(gl_VertexIndex)"},
+        {"point_coord", "gl_PointCoord"}, {"lane", "wlane()"}, {"vid", "uint(gl_VertexIndex)"},
         {"iid", "uint(gl_InstanceIndex)"}, {"rt_layer", "uint(gl_Layer)"},
     };
     const char *p = src;
@@ -2020,6 +2030,7 @@ static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
         const char *rep = id;
         for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
             if (!strcmp(id, map[i][0])) { rep = map[i][1]; break; }
+        if (!strcmp(id, "lane") && !warp_emu()) rep = "gl_SubgroupInvocationID";
         sp(o, "%s", rep);
     }
 }
@@ -2054,6 +2065,20 @@ static const char glsl_prelude[] =
     "vec2 saturate(vec2 x) { return vec2(saturate(x.x), saturate(x.y)); }\n"
     "float fmin(float a, float b) { return isnan(a) ? b : (isnan(b) ? a : min(a, b)); }\n"
     "float fmax(float a, float b) { return isnan(a) ? b : (isnan(b) ? a : max(a, b)); }\n"
+    // Maxwell's warps are 32 lanes. A subgroup of 64 (AMD's GCN / Vega GPUs always, any GPU whose driver picks it) holds
+    // two of them: lane, ballot, vote and shuffle work on each 32-lane half as on a warp. gl_SubgroupSize is a
+    // constant to the driver's compiler: with 32-lane subgroups only the plain subgroup operation is left.
+    "bool w32() { return gl_SubgroupSize == 32u; }\n"
+    "uint wlane() { return w32() ? gl_SubgroupInvocationID : gl_SubgroupInvocationID & 31u; }\n"
+    "uint wbase() { return gl_SubgroupInvocationID & ~31u; }\n"
+    "uint wballot(bool p) { uvec4 b = subgroupBallot(p); return w32() ? b.x : b[gl_SubgroupInvocationID >> 5]; }\n"
+    "bool wall(bool p) { return w32() ? subgroupAll(p) : wballot(!p) == 0u; }\n"
+    "bool wany(bool p) { return w32() ? subgroupAny(p) : wballot(p) != 0u; }\n"
+    "bool wequal(bool p) { if (w32()) return subgroupAllEqual(p); uint b = wballot(p); return b == 0u || b == wballot(true); }\n"
+    "uint wshfl(uint v, uint i) { return subgroupShuffle(v, w32() ? i : wbase() | (i & 31u)); }\n"
+    "uint wup(uint v, uint n) { if (w32()) return subgroupShuffleUp(v, n); uint l = wlane(), s = subgroupShuffle(v, wbase() | ((l - n) & 31u)); return l < n ? v : s; }\n"
+    "uint wdown(uint v, uint n) { if (w32()) return subgroupShuffleDown(v, n); uint l = wlane(), s = subgroupShuffle(v, wbase() | ((l + n) & 31u)); return l + n > 31u ? v : s; }\n"
+    "uint wxor(uint v, uint m) { return w32() ? subgroupShuffleXor(v, m) : subgroupShuffle(v, gl_SubgroupInvocationID ^ (m & 31u)); }\n"
     "uint clz(uint v) { return v == 0u ? 32u : uint(31 - findMSB(v)); }\n"
     "uint popcount(uint v) { return uint(bitCount(v)); }\n"
     "uint mulhi(uint a, uint b) { uint hi, lo; umulExtended(a, b, hi, lo); return hi; }\n"
@@ -2106,7 +2131,13 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (c->fail) { free(body.buf); free(c->body.buf); free(c); return info; }
     int set = stage == STAGE_FRAGMENT ? 1 : 0;
     Str s = {0};
-    sp(&s, "%s", glsl_prelude);
+    {   // (test) LARECOMP_WARP_FORCE_EMU=1: the 64-lane warp code even on 32-lane subgroups (it must change nothing there)
+        static int force = -1;
+        if (force < 0) force = getenv("LARECOMP_WARP_FORCE_EMU") && atoi(getenv("LARECOMP_WARP_FORCE_EMU"));
+        const char *w = force ? strstr(glsl_prelude, "gl_SubgroupSize == 32u") : NULL;
+        if (w) sp(&s, "%.*sfalse%s", (int)(w - glsl_prelude), glsl_prelude, w + strlen("gl_SubgroupSize == 32u"));
+        else sp(&s, "%s", glsl_prelude);
+    }
     for (int i = 0; i < 18; i++) {
         if (!(info->cbuf_mask & (1u << i))) continue;
         uint32_t n = info->cbuf_size[i] / 16;
