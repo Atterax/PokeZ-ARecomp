@@ -50,6 +50,8 @@ uint32_t rt_frame_steps(uint32_t interval) {
 // by itself: presented below FPS60_MIN for FPS60_SLOW_S seconds in a row (after FPS60_WARM_S to settle - shaders
 // building right after the switch), the game goes back to 30 fps for the rest of the session and the overlay says so
 // (menu_notice). Choosing 60 again in F1 tries again. LARECOMP_FPS=30: as is; LARECOMP_FPS=60: 60, no backing off.
+// Seconds spent building shaders count neither way (#22: an RX 9070 XT with a cold pipeline cache had three 1-2 s
+// shader stalls in a battle and went back to 30 for the session, holding 60 otherwise).
 #include "../settings.h"
 #include "../platform.h"
 #define FPS60_MIN 50
@@ -75,7 +77,12 @@ static bool fps60_holds(void) {
     if (warm < FPS60_WARM_S) { warm++; return true; }
     static double min = -1;  // LARECOMP_FPS60_MIN: another floor (tests: 59 makes a busy scene back off)
     if (min < 0) min = ENV("LARECOMP_FPS60_MIN") ? atof(ENV("LARECOMP_FPS60_MIN")) : FPS60_MIN;
-    slow = fps < min ? slow + 1 : 0;
+    extern uint64_t renderer_shader_builds(void);  // (the renderer: builds done, top bit = one being built now)
+    static uint64_t b0;
+    uint64_t b = renderer_shader_builds();
+    bool building = (b >> 63) || (b & ~(1ull << 63)) - (b0 & ~(1ull << 63)) >= 2;  // (one now, or a few this second)
+    b0 = b;
+    if (!building) slow = fps < min ? slow + 1 : 0;
     if (slow < FPS60_SLOW_S) return true;
     g_fps60_fell_back = true;
     LOG("[pace] 60 fps not held (%.0f fps for %d s): back to 30 fps - below 60 the game moves in slow motion\n", fps, slow);

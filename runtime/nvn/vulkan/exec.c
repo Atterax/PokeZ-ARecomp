@@ -622,6 +622,15 @@ static pthread_cond_t jobs_cond = PTHREAD_COND_INITIALIZER;
 #define MAX_WORKERS 16
 static _Atomic uint64_t worker_t0[MAX_WORKERS], translator_t0;
 static _Atomic int nworkers;
+static _Atomic uint64_t builds_done;  // (shaders / pipelines built, all session: renderer_shader_builds)
+// Shader work for runtime/hle/framepace.c (seconds spent building shaders don't count against 60 fps): the builds
+// done so far, top bit set while one is being built
+uint64_t renderer_shader_builds(void) {
+    uint64_t n = atomic_load(&builds_done);
+    if (atomic_load(&translator_t0)) n |= 1ull << 63;
+    for (int i = 0; i < atomic_load(&nworkers); i++) if (atomic_load(&worker_t0[i])) n |= 1ull << 63;
+    return n;
+}
 
 static void *worker(void *a) {
     int me = (int)(intptr_t)a;
@@ -1325,6 +1334,7 @@ static void compile_program(void *arg) {
     free(sf);
     p->layout = make_layout(p, 2, VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT);
     atomic_fetch_add(&stat_compiles, 1);
+    atomic_fetch_add(&builds_done, 1);
     atomic_store(&p->state, p->vs && p->fs ? 1 : 2);
 }
 
@@ -1742,6 +1752,7 @@ static void build_pipeline(void *arg) {
         if (n++ < 10) LOG("[vk] pipeline creation failed: %d\n", r);
     }
     atomic_fetch_add(&stat_compiles, 1);
+    atomic_fetch_add(&builds_done, 1);
     atomic_store(&pp->state, r == VK_SUCCESS ? 1 : 2);
 }
 
@@ -2968,6 +2979,7 @@ static void build_compute(void *arg) {
                                       .layout = cp->p.layout};
     VkResult r = vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &cp->pipe);
     atomic_fetch_add(&stat_compiles, 1);
+    atomic_fetch_add(&builds_done, 1);
     atomic_store(&cp->p.state, r == VK_SUCCESS ? 1 : 2);
     if (r != VK_SUCCESS) LOG("[compute] pipeline failed: %d\n", r);
 }

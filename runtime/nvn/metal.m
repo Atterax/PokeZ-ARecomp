@@ -209,6 +209,7 @@ static void dump_largest_textures(const char *why) {
 
 static uint64_t frames, total_frames;
 uint64_t renderer_present_count(void) { return total_frames; }
+uint64_t renderer_shader_builds(void) { return 0; }  // (runtime/hle/framepace.c: shader stalls aren't told apart here)
 
 // Output resolution: render targets the game sizes for the 1920x1080 screen are allocated at
 // (sx, sy) times their guest size. Shaders and the renderer keep working in guest ("logical") units.
