@@ -8,6 +8,7 @@
 #include <shellapi.h>
 #include <timeapi.h>
 #include <io.h>
+#include <psapi.h>
 
 #include "../platform.h"
 
@@ -61,6 +62,34 @@ int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, u
     *page = gran;
     if (n >= (ULONG_PTR)max) ResetWriteWatch((void *)(uintptr_t)addr, (SIZE_T)size);  // (more than fit: caller takes all)
     return (int)n;
+}
+
+bool plat_mem_usage(uint64_t *process, uint64_t *guest) {
+    PROCESS_MEMORY_COUNTERS_EX pc = {.cb = sizeof pc};
+    if (!K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pc, sizeof pc)) return false;
+    *process = pc.PrivateUsage;
+    *guest = 0;
+    MEMORY_BASIC_INFORMATION mi;
+    for (uint64_t a = g_lo; a < g_hi && VirtualQuery((void *)(uintptr_t)a, &mi, sizeof mi); a = (uint64_t)(uintptr_t)mi.BaseAddress + mi.RegionSize)
+        if (mi.State == MEM_COMMIT) *guest += mi.RegionSize;
+    static int map_once;  // LARECOMP_MEM_MAP=1 (debug): the largest private allocations outside the guest window, once
+    if (!map_once++ && getenv("LARECOMP_MEM_MAP")) {
+        struct { uint64_t base, size; } top[16] = {{0}};
+        uint64_t cur = 0, sz = 0;
+        for (uint64_t a = 0x10000; VirtualQuery((void *)(uintptr_t)a, &mi, sizeof mi); a = (uint64_t)(uintptr_t)mi.BaseAddress + mi.RegionSize) {
+            uint64_t ab = (uint64_t)(uintptr_t)mi.AllocationBase;
+            if (ab != cur) {  // (an allocation's regions are consecutive: its total when the next one starts)
+                for (int i = 0; i < 16; i++)
+                    if (sz > top[i].size) { memmove(&top[i + 1], &top[i], (15 - i) * sizeof top[0]); top[i].base = cur, top[i].size = sz; break; }
+                cur = ab, sz = 0;
+            }
+            if (mi.State == MEM_COMMIT && mi.Type == MEM_PRIVATE && (ab < g_lo || ab >= g_hi)) sz += mi.RegionSize;
+            if ((uint64_t)(uintptr_t)mi.BaseAddress + mi.RegionSize < a) break;
+        }
+        for (int i = 0; i < 16 && top[i].size; i++)
+            fprintf(stderr, "[mem] private allocation %llx: %llu MB\n", (unsigned long long)top[i].base, (unsigned long long)(top[i].size >> 20));
+    }
+    return true;
 }
 
 // Decommit everything: the range stays reserved, and pages come back zeroed when committed again (lazily).
@@ -199,10 +228,66 @@ static void samp_add(uint64_t rip, uint32_t tid) {
         if (samp[slot].rip == rip && samp[slot].tid == tid) { samp[slot].n++; return; }
     }
 }
+// LARECOMP_SAMPLE_EXEC=1 (with LARECOMP_SAMPLE): only the thread running the game's command lists (plat_sample_focus,
+// from runtime/nvn/vulkan/exec.c), ~1 kHz, each sample its whole call stack (RtlVirtualUnwind) -> build/stacks.txt:
+// "M <base> <size> <module path>" lines, then one "S <rip> <caller> <caller's caller> ..." line per sample
+// (tools/za/stacks.py: self and inclusive time per function).
+static volatile DWORD g_focus_tid;
+void plat_sample_focus(void) { if (!g_focus_tid) g_focus_tid = GetCurrentThreadId(); }
+#define STK_DEPTH 24
+static DWORD WINAPI stack_sampler(double dur) {
+    while (!g_focus_tid) Sleep(10);
+    HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, g_focus_tid);
+    if (!h) return 0;
+    size_t cap = (size_t)(dur * 1100) + 64, n = 0;
+    uint64_t (*stk)[STK_DEPTH] = calloc(cap, sizeof *stk);
+    ULONGLONG end = GetTickCount64() + (ULONGLONG)(dur * 1000);
+    while (GetTickCount64() < end && n < cap) {
+        CONTEXT c = {.ContextFlags = CONTEXT_FULL};
+        if (SuspendThread(h) == (DWORD)-1) break;
+        if (GetThreadContext(h, &c)) {  // (unwound while it is suspended: its stack can't change)
+            for (int d = 0; d < STK_DEPTH && c.Rip; d++) {
+                stk[n][d] = c.Rip;
+                DWORD64 base;
+                PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(c.Rip, &base, NULL);
+                if (!fe) { c.Rip = *(const DWORD64 *)(uintptr_t)c.Rsp; c.Rsp += 8; continue; }  // (a leaf: no frame)
+                void *hd;
+                DWORD64 ef;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Rip, fe, &c, &hd, &ef, NULL);
+            }
+            n++;
+        }
+        ResumeThread(h);
+        Sleep(1);
+    }
+    CloseHandle(h);
+    FILE *f = fopen("build/stacks.txt", "w");
+    if (f) {
+        HMODULE mods[512];
+        DWORD need = 0;
+        if (K32EnumProcessModules(GetCurrentProcess(), mods, sizeof mods, &need))
+            for (DWORD i = 0; i < need / sizeof *mods && i < 512; i++) {
+                MODULEINFO mi;
+                char path[MAX_PATH];
+                if (K32GetModuleInformation(GetCurrentProcess(), mods[i], &mi, sizeof mi) && GetModuleFileNameA(mods[i], path, sizeof path))
+                    fprintf(f, "M %llx %lx %s\n", (unsigned long long)(uintptr_t)mi.lpBaseOfDll, mi.SizeOfImage, path);
+            }
+        for (size_t i = 0; i < n; i++) {
+            fputc('S', f);
+            for (int d = 0; d < STK_DEPTH && stk[i][d]; d++) fprintf(f, " %llx", (unsigned long long)stk[i][d]);
+            fputc('\n', f);
+        }
+        fclose(f);
+    }
+    fprintf(stderr, "[sample] %llu stacks of thread %lu -> build/stacks.txt\n", (unsigned long long)n, g_focus_tid);
+    return 0;
+}
+
 static DWORD WINAPI sampler_main(void *arg) {
     double delay = 0, dur = 10;
     sscanf((const char *)arg, "%lf,%lf", &delay, &dur);
     Sleep((DWORD)(delay * 1000));
+    if (getenv("LARECOMP_SAMPLE_EXEC")) return stack_sampler(dur);
     samp = calloc(SAMP_TAB, sizeof *samp);
     unsigned long long caller_lo = 0, caller_hi = 0;
     if (getenv("LARECOMP_SAMPLE_CALLER")) sscanf(getenv("LARECOMP_SAMPLE_CALLER"), "%llx,%llx", &caller_lo, &caller_hi);

@@ -27,6 +27,11 @@ bool plat_reset_guest(uint64_t lo, uint64_t hi);
 // MEM_WRITE_WATCH), their addresses into pages[] (at most max), and the tracking reset for the range. Returns the
 // count (max: maybe more), or -1 where there is no tracking (macOS, Linux). Page size: *page.
 int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page);
+// Memory in use (the "[mem]" log line): the process's private commit, and the part of it inside the guest window.
+// False where it isn't measured (macOS, Linux).
+bool plat_mem_usage(uint64_t *process, uint64_t *guest);
+// (profiling, LARECOMP_SAMPLE_EXEC: Windows) the calling thread is the one to sample; a no-op elsewhere
+void plat_sample_focus(void);
 enum { PLAT_PROT_NONE = 0, PLAT_PROT_READ = 1, PLAT_PROT_RW = 3 };
 int plat_protect(uint64_t addr, uint64_t size, int prot);  // 0 on success
 #define PLAT_PAGE 0x4000ull  // largest page size we deal with (macOS 16K; multiple of Windows' 4K)

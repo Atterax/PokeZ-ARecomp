@@ -30,7 +30,7 @@ build/gen-venv/Scripts/python.exe tools/pe_no_cfg.py build/helper/lasgen/lasgen.
 # 2b. the button icon maker (tools/za/prompt_textures.py + ooz, GPLv3: third_party/ooz/README.ZARecomp.md)
 mkdir -p build/ooz
 (cd third_party/ooz && g++ -O2 -shared -static -include sys/stat.h -Dmain=ooz_main kraken.cpp bitknit.cpp lzna.cpp \
-    ooz_lib.cpp -o ../../build/ooz/ooz.dll)
+    ooz_lib.cpp -o ../../build/ooz/ooz.dll -Wl,-u,__mingw_fe_dfl_env)  # (-u: newer MinGW libmingwex needs CRT_fp10 from libmingw32)
 if [ ! -f build/prompts-venv/.ok ]; then
     py -3.12 -m venv build/prompts-venv
     build/prompts-venv/Scripts/python.exe -m pip install -q pillow==13.0.0 numpy==2.5.4 fonttools==4.67.0 cffsubr==0.4.0 \

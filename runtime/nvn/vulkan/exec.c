@@ -28,7 +28,14 @@ static uint64_t stat_upload_bytes;
 static int prof = -1;
 static uint64_t prof_exec, prof_draw, prof_sets, prof_vtx, prof_submit, prof_pre, prof_key, prof_dyn, prof_tex, prof_up, prof_gpu;
 static VkQueryPool prof_qp;
-static uint64_t cum_exec, cum_wait, cum_draws, cum_submits;  // (profiling) never reset: hitch log
+// never reset: the slow frame log (vk_hitch_frame). Written by the thread running the game's command lists (under
+// objects.c exec_lock); cum_wait only counts its waits there (backend_execute), not a SyncWait's or the present's.
+static uint64_t cum_exec, cum_wait, cum_draws, cum_submits;
+static uint64_t submit_draws;  // cum_draws at the last submission (backend_execute_batch)
+static bool list_fenced;       // the list being run has a FenceSync: its submission ends with it (backend_execute_batch)
+static __thread uint64_t tl_wait_ns;  // this thread's GPU waits (vk_wait_seq)
+static uint64_t cum_build_wait;  // draws waiting for their shader / pipeline (wait_scene, wait_built)
+static _Atomic int builds_pending;  // translations and compiles queued or running (run_translate, run_job)
 static uint32_t prof_end_line[4096];  // passes ended, by the exec.c line that ended them (0: submit / present)
 uint64_t prof_views_created;  // textures.c vk_image_view cache misses
 uint64_t prof_up_ns = ~0ull;  // textures.c upload checks (~0: profiling off)
@@ -42,7 +49,11 @@ void vk_collect_dead(void);
 
 // ================================================================== submissions
 // A submission = optional upload command buffer + the main one, signalling the timeline with its number.
-#define SUBS 8
+// A ring of nsubs of them: reusing a slot waits for its last submission. Z-A ends each of its ~80 command lists a frame
+// with a submission, so 8 slots let the CPU run only 8 submissions ahead: it waited on the GPU ~4 ms a frame ("ring
+// slot" in the LARECOMP_VK_PROF waits) with the GPU two-thirds idle. LARECOMP_VK_SUBS=<n>: another ring size (<= SUBS).
+#define SUBS 64
+static int nsubs = SUBS;
 typedef struct {
     VkCommandBuffer main, upload;
     bool main_begun, upload_begun, ts;  // ts: GPU timestamps written (profiling)
@@ -84,9 +95,10 @@ void vk_wait_seq(uint64_t seq) {
                               .pValues = &seq};
     uint64_t t0 = SDL_GetTicksNS();
     VkResult r = vkWaitSemaphores(g_vk.dev, &wi, 10ull * 1000000000ull);
-    stat_wait_ns += SDL_GetTicksNS() - t0;
-    cum_wait += SDL_GetTicksNS() - t0;
-    wait_account(SDL_GetTicksNS() - t0);
+    uint64_t waited = SDL_GetTicksNS() - t0;
+    stat_wait_ns += waited;
+    tl_wait_ns += waited;
+    wait_account(waited);
     if (r == VK_TIMEOUT) LOG("[vk] GPU did not finish submission %llu within 10 s (device lost?)\n", (unsigned long long)seq);
     else if (r == VK_SUCCESS) cq_resolve_done(seq);  // (the game reads its timing counters after waiting)
     else {
@@ -438,9 +450,10 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     pthread_mutex_lock(&seq_lock);
     submit_seq++;
     pthread_mutex_unlock(&seq_lock);
-    cur_sub = (cur_sub + 1) % SUBS;
+    cur_sub = (cur_sub + 1) % nsubs;
     stat_flushes++;
     cum_submits++;
+    submit_draws = cum_draws;
     ring_retire();
     vk_collect_dead();
 }
@@ -614,7 +627,8 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size) {
 // ================================================================== worker threads (shader / pipeline builds)
 // First-use compiles run off the render thread; draws needing them are skipped until ready (as on Metal).
 // LARECOMP_SYNC_SHADERS=1 builds on first use, blocking (deterministic tests).
-typedef struct Job { void (*fn)(void *); void *arg; struct Job *next; } Job;
+// state: what the build sets when done (a draw waiting on it can run it itself: run_queued_now)
+typedef struct Job { void (*fn)(void *); void *arg; _Atomic int *state; struct Job *next; } Job;
 static Job *jobs_head, *jobs_tail;
 static pthread_mutex_t jobs_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t jobs_cond = PTHREAD_COND_INITIALIZER;
@@ -635,6 +649,7 @@ static void *worker(void *a) {
         atomic_store(&worker_t0[me], SDL_GetTicksNS());
         j->fn(j->arg);
         atomic_store(&worker_t0[me], 0);
+        atomic_fetch_sub(&builds_pending, 1);
         free(j);
     }
     return NULL;
@@ -664,17 +679,19 @@ static void *translator(void *a) {
         atomic_store(&translator_t0, SDL_GetTicksNS());
         j->fn(j->arg);
         atomic_store(&translator_t0, 0);
+        atomic_fetch_sub(&builds_pending, 1);
         free(j);
     }
     return NULL;
 }
 static bool sync_shaders(void);
-static void run_translate(void (*fn)(void *), void *arg) {
+static void run_translate(void (*fn)(void *), void *arg, _Atomic int *state) {
     if (sync_shaders()) { fn(arg); return; }
     static bool started;
     if (!started) { started = true; pthread_t t; pthread_create(&t, NULL, translator, NULL); }
     Job *j = malloc(sizeof *j);
-    j->fn = fn; j->arg = arg; j->next = NULL;
+    j->fn = fn; j->arg = arg; j->state = state; j->next = NULL;
+    atomic_fetch_add(&builds_pending, 1);
     pthread_mutex_lock(&tjobs_lock);
     if (tjobs_tail) tjobs_tail->next = j; else tjobs_head = j;
     tjobs_tail = j;
@@ -682,7 +699,7 @@ static void run_translate(void (*fn)(void *), void *arg) {
     pthread_mutex_unlock(&tjobs_lock);
 }
 
-static void run_job(void (*fn)(void *), void *arg) {
+static void run_job(void (*fn)(void *), void *arg, _Atomic int *state) {
     if (sync_shaders()) { fn(arg); return; }
     static bool started;
     if (!started) {
@@ -695,12 +712,47 @@ static void run_job(void (*fn)(void *), void *arg) {
         for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, (void *)(intptr_t)i); }
     }
     Job *j = malloc(sizeof *j);
-    j->fn = fn; j->arg = arg; j->next = NULL;
+    j->fn = fn; j->arg = arg; j->state = state; j->next = NULL;
+    atomic_fetch_add(&builds_pending, 1);
     pthread_mutex_lock(&jobs_lock);
     if (jobs_tail) jobs_tail->next = j; else jobs_head = j;
     jobs_tail = j;
     pthread_cond_signal(&jobs_cond);
     pthread_mutex_unlock(&jobs_lock);
+}
+
+// A draw that has to wait for its build (wait_built) takes it out of the queues - the translator's, then the
+// workers' - and runs it on its own thread: queued behind the dozens a new area or effect brings, it waited for all
+// of them (over a second, a frozen frame). false: not queued (running, or done).
+// The queued job building state, taken out of its queue (take) or moved to its front, for the next free thread: a draw
+// skipped for it (wait_scene) gets it in a build or two, not after every build queued before it.
+static Job *queued_job(_Atomic int *state, bool take) {
+    for (int q = 0; q < 2; q++) {
+        pthread_mutex_t *lock = q ? &jobs_lock : &tjobs_lock;
+        Job **head = q ? &jobs_head : &tjobs_head, **tail = q ? &jobs_tail : &tjobs_tail, *prev = NULL;
+        pthread_mutex_lock(lock);
+        for (Job **pj = head; *pj; prev = *pj, pj = &(*pj)->next) {
+            Job *j = *pj;
+            if (j->state != state) continue;
+            if (take || pj != head) {
+                *pj = j->next;
+                if (*tail == j) *tail = prev;
+                if (!take) j->next = *head, *head = j;
+            }
+            pthread_mutex_unlock(lock);
+            return j;
+        }
+        pthread_mutex_unlock(lock);
+    }
+    return NULL;
+}
+static bool run_queued_now(_Atomic int *state) {
+    Job *j = queued_job(state, true);
+    if (!j) return false;
+    j->fn(j->arg);
+    atomic_fetch_sub(&builds_pending, 1);
+    free(j);
+    return true;
 }
 
 // ================================================================== state
@@ -747,20 +799,33 @@ uint32_t nvn_window_origin(void);
 uint32_t nvn_depth_mode(void);
 bool renderer_origin_lower_left(void) { return nvn_window_origin() == 0; }
 
-// (LARECOMP_VK_PROF) called once per presented frame: frames over 50 ms are logged with where their time went.
-// present_ns: time in backend_present's acquire/blit/present.
-void vk_prof_frame(uint64_t frame, uint64_t present_ns) {
-    if (!prof) return;
-    static uint64_t last_t, l_exec, l_wait, l_draws, l_subs;
+// Called once per presented frame: a frame over 100 ms is logged with where its time went - the render thread running
+// the game's command lists (of which waiting for the GPU, and for shaders / pipelines being built), presenting (with
+// waiting for a free frame slot: the GPU behind), and the rest: the game, with the frame pacing sleep (of which blocked
+// in kernel waits / sleeps: g_blocked_ns) - and how many shader builds were still pending. At most 20 lines per 10 s
+// (a PC at 5 fps would log every frame; area loads come in bursts). present_ns: time in backend_present.
+// (on the presenting thread, which runs Z-A's command lists too; another thread presenting - the keyboard dialog's
+// represent - starts the measure again: g_blocked_ns is per thread)
+void vk_hitch_frame(uint64_t frame, uint64_t present_ns) {
+    static uint64_t last_t, l_exec, l_wait, l_build, l_blocked, l_draws, l_subs, window_t;
+    static const void *last_thread;
+    static int logged;
     uint64_t now = SDL_GetTicksNS();
-    if (last_t && now - last_t > 50000000) {
-        uint64_t dt = now - last_t, ex = cum_exec - l_exec, wt = cum_wait - l_wait;
-        LOG("[hitch] frame %llu: %.0f ms = backend exec %.1f (of which GPU waits %.1f) + present %.1f + other %.1f; %llu draws, "
-            "%llu submits, compiles %d pending\n", (unsigned long long)frame, dt / 1e6, ex / 1e6, wt / 1e6, present_ns / 1e6,
-            ((double)dt - ex - present_ns) / 1e6, (unsigned long long)(cum_draws - l_draws), (unsigned long long)(cum_submits - l_subs),
-            atomic_load(&stat_compiles));
+    if (last_thread != &g_blocked_ns) last_thread = &g_blocked_ns, last_t = 0;
+    static uint64_t over = 0;  // LARECOMP_HITCH_MS=<ms>: another threshold (tests: 18 shows each frame that missed 60 fps)
+    static int per10s = 20;
+    if (!over) { over = (ENV("LARECOMP_HITCH_MS") ? atol(ENV("LARECOMP_HITCH_MS")) : 100) * 1000000ull; if (ENV("LARECOMP_HITCH_MS")) per10s = 400; }
+    if (now - window_t > 10000000000ull) window_t = now, logged = 0;
+    if (last_t && now - last_t > over && logged++ < per10s) {
+        uint64_t dt = now - last_t, ex = cum_exec - l_exec;
+        LOG("[hitch] frame %llu: %.0f ms = render %.1f (GPU waits %.1f, shader waits %.1f) + present %.1f + game %.1f "
+            "(blocked %.1f); %llu draws, %llu submits, %d shader builds pending\n", (unsigned long long)frame, dt / 1e6,
+            ex / 1e6, (cum_wait - l_wait) / 1e6, (cum_build_wait - l_build) / 1e6, present_ns / 1e6,
+            ((double)dt - ex - present_ns) / 1e6, (g_blocked_ns - l_blocked) / 1e6, (unsigned long long)(cum_draws - l_draws),
+            (unsigned long long)(cum_submits - l_subs), atomic_load(&builds_pending));
     }
-    last_t = now; l_exec = cum_exec; l_wait = cum_wait; l_draws = cum_draws; l_subs = cum_submits;
+    last_t = now; l_exec = cum_exec; l_wait = cum_wait; l_build = cum_build_wait; l_blocked = g_blocked_ns;
+    l_draws = cum_draws; l_subs = cum_submits;
 }
 
 const char *renderer_stats(void) {
@@ -818,10 +883,12 @@ const char *renderer_stats(void) {
                      (unsigned long long)prof_vc_hits, (unsigned long long)prof_vc_bypass, prof_vc_copied / 1048576.0,
                      (unsigned long long)prof_vc_queries, prof_vc_scan_ns / 1e6, (unsigned long long)prof_vc_scan_pages);
             prof_vc_hits = prof_vc_bypass = prof_vc_copied = prof_vc_queries = prof_vc_scan_pages = prof_vc_scan_ns = 0;
-            extern uint64_t prof_tex_watch_skips;
+            extern uint64_t prof_tex_watch_skips, prof_tex_watch_written, prof_tex_watch_unknown, prof_tex_watch_gpu;
             n = strlen(stats_text);
-            snprintf(stats_text + n, sizeof stats_text - n, " | tex unwritten %llu", (unsigned long long)prof_tex_watch_skips);
-            prof_tex_watch_skips = 0;
+            snprintf(stats_text + n, sizeof stats_text - n, " | tex unwritten %llu written %llu unknown %llu (GPU pages %llu)",
+                     (unsigned long long)prof_tex_watch_skips, (unsigned long long)prof_tex_watch_written,
+                     (unsigned long long)prof_tex_watch_unknown, (unsigned long long)prof_tex_watch_gpu);
+            prof_tex_watch_skips = prof_tex_watch_written = prof_tex_watch_unknown = prof_tex_watch_gpu = 0;
         }
         pthread_mutex_lock(&wait_tab_lock);
         for (int i = 0; i < 12 && wait_tab[i].why; i++) {
@@ -855,6 +922,8 @@ static void st_defaults(void) {
 }
 
 void vk_exec_init(void) {
+    maxwell_disk_cache = true;  // (translate.c: the game's translations kept in cache/maxwell)
+    if (ENV("LARECOMP_VK_SUBS")) { nsubs = atoi(ENV("LARECOMP_VK_SUBS")); nsubs = nsubs < 2 ? 2 : nsubs > SUBS ? SUBS : nsubs; }
     prof = ENV("LARECOMP_VK_PROF") != NULL;
     if (prof) {
         prof_up_ns = 0;
@@ -1370,8 +1439,10 @@ static uint64_t gwin_want(void) { return gwin()->phys ? gwin_.max : kernel_heap_
 static void gmem_window_get(uint64_t *lo, uint64_t *len);  // (the guest-heap import window, below)
 static void translate_program(void *arg) {
     Prog *p = arg;
-    { uint64_t wl, wn; gmem_window_get(&wl, &wn); maxwell_gmem_base = gwin_base + wl; maxwell_gmem_size = wn; }
-    pthread_mutex_lock(&translate_lock);
+    uint64_t wl, wn;
+    gmem_window_get(&wl, &wn);
+    pthread_mutex_lock(&translate_lock);  // (the globals too: the render thread translates as well - run_queued_now)
+    maxwell_gmem_base = gwin_base + wl, maxwell_gmem_size = wn;
     p->vi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], STAGE_VERTEX, &p->vkey);
     if (p->vi->msl) {
         p->fkey.vs_out_mask = p->vi->out_mask;
@@ -1408,7 +1479,34 @@ static void translate_program(void *arg) {
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
     save_glsl(p->vi->msl, p->code[0], "vs");
     save_glsl(p->fi->msl, p->code[1], "fs");
-    run_job(compile_program, p);
+    run_job(compile_program, p, &p->state);
+}
+
+// The code at a shader's address, in brief: its length (to the end of its constants) and four of its words. Programs
+// are looked up by code address, and nothing checked that the code there was still the one they were built from - a
+// game can load other shaders where old ones were (upstream LAS Recomp's stale-program detector, c93564d, logs it).
+// The fingerprint is part of the lookup: other code, its own program (the same code again finds its translation in
+// cache/maxwell); "[shader] code changed" says when it happens.
+static uint64_t code_fp(const NvnShaderStage *s) {
+    uint32_t len = s->const_offset ? s->const_offset + s->const_size : 0;
+    if (!s->code_addr || len < 4) return 0;
+    const uint32_t *c = (const uint32_t *)(uintptr_t)s->code_addr;
+    uint32_t n = len / 4, w[5] = {len, c[n > 0x20 ? 0x20 : 0], c[n / 3], c[2 * (n / 3)], c[n - 1]};
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (int i = 0; i < 5; i++) { h ^= w[i]; h *= 0x100000001B3ull; }
+    return h;
+}
+// A new program's code: logged when the address held other code before (render thread)
+static void note_code(const NvnShaderStage *s, uint64_t fp, const char *stage) {
+    static struct { uint64_t addr, fp; } seen[8192];
+    if (!s->code_addr) return;
+    uint32_t i = (uint32_t)(s->code_addr >> 4) & 8191;
+    for (int probe = 0; seen[i].addr && seen[i].addr != s->code_addr; i = (i + 1) & 8191)
+        if (++probe == 64) return;  // (full here: not noted)
+    static int n;
+    if (seen[i].addr && seen[i].fp != fp && n++ < 40)
+        LOG("[shader] code changed at %llx (%s): a new program\n", (unsigned long long)s->code_addr, stage);
+    seen[i].addr = s->code_addr, seen[i].fp = fp;
 }
 
 #define PROG_TAB 4096
@@ -1416,8 +1514,13 @@ static struct { uint64_t key; Prog *prog; } prog_tab[PROG_TAB];
 
 static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     if (!(np->stage_mask & 1)) return NULL;  // (no fragment stage: depth only - maxwell_empty_fragment)
-    uint64_t h = 0xcbf29ce484222325ull;
-    for (int i = 0; i < 2; i++) { uint64_t a = np->stages[i].code_addr; for (int k = 0; k < 8; k++) { h ^= (a >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; } }
+    uint64_t h = 0xcbf29ce484222325ull, fp[2];
+    for (int i = 0; i < 2; i++) {
+        uint64_t a = np->stages[i].code_addr;
+        fp[i] = code_fp(&np->stages[i]);
+        for (int k = 0; k < 8; k++) { h ^= (a >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; }
+        for (int k = 0; k < 8; k++) { h ^= (fp[i] >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; }
+    }
     const uint8_t *vb = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= vb[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
@@ -1430,13 +1533,15 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     Prog *p = calloc(1, sizeof *p);
     prog_tab[slot].key = h;
     prog_tab[slot].prog = p;
+    note_code(&np->stages[0], fp[0], "vs");
+    note_code(&np->stages[1], fp[1], "fs");
     for (int i = 0; i < 2; i++) {
         p->code[i] = np->stages[i].code_addr;
         p->cmax[i] = np->stages[i].const_offset ? np->stages[i].const_offset : 0x10000;
     }
     p->vkey = *vkey;
     p->fkey = *fkey;
-    run_translate(translate_program, p);
+    run_translate(translate_program, p, &p->state);
     return p;
 }
 
@@ -2175,13 +2280,14 @@ static uint64_t gmem_lo, gmem_window;
 // The window is anchored at the end of the physical region (gwin_max: constant for the session, so shaders may bake it): [lo, gwin_max).
 // Only with a physical-memory window (no heap), else the whole heap as before. The generated shader code computes ga = addr - base, ok = ga < size,
 // so translate_program / build_compute set base and size to the window too (the window changed them by lo: text and buildings read the wrong place).
+// default: on an integrated GPU (the Steam Deck: the full import cost 87 % of the render thread), 256 MB; LARECOMP_VK_GMEM_WINDOW=0 imports it all
+static void gmem_window_init(void) {
+    const char *w = ENV("LARECOMP_VK_GMEM_WINDOW");
+    gmem_window = w ? strtoull(w, NULL, 10) << 20 : g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 256ull << 20 : 0;
+}
 static void gmem_window_get(uint64_t *lo, uint64_t *len) {
-    static int init;
-    // default: on an integrated GPU (the Steam Deck: the full import cost 87 % of the render thread), 256 MB; LARECOMP_VK_GMEM_WINDOW=0 imports it all
-    if (!init++) {
-        const char *w = ENV("LARECOMP_VK_GMEM_WINDOW");
-        gmem_window = w ? strtoull(w, NULL, 10) << 20 : g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 256ull << 20 : 0;
-    }
+    static pthread_once_t once = PTHREAD_ONCE_INIT;  // (the translator and the render thread - run_queued_now - both ask)
+    pthread_once(&once, gmem_window_init);
     if (!gmem_window || !gwin()->phys || gwin_max <= gmem_window) { *lo = 0; *len = gwin_max; return; }
     *lo = (gwin_max - gmem_window) & ~0xFFFFFull;
     *len = gwin_max - *lo;
@@ -2253,9 +2359,9 @@ static VkDescriptorBufferInfo gmem_info(void) {
 // Super and on an RTX 3080 Ti alike, which the game then waits for on its fence - 49-53 fps there on the 1660). Before
 // such a dispatch its bound storage buffers (sorted, merged) are copied into a device-local buffer, the address table
 // (binding GMAP_BUFFER_INDEX) tells the shader (translate.c, GLSL compute) where each range sits, loads and stores
-// inside them use that copy, and a shader that stores gets the ranges copied back to the heap right after it (the
-// game alternates its buffer sets per frame: the CPU isn't writing them meanwhile). Accesses outside the table use
-// the heap as before. LARECOMP_VK_GMEM_FAST=0: no copy (empty table: everything goes to the heap, the old behaviour).
+// inside them use that copy, and a shader that stores gets the ranges copied back to the heap right after it.
+// Accesses outside the table use the heap as before. LARECOMP_VK_GMEM_FAST=0: no copy (empty table: everything goes
+// to the heap, the old behaviour).
 #define GFAST_SIZE (32ull << 20)
 static VkBuffer gfast_buf;
 static VmaAllocation gfast_mem;
@@ -2590,11 +2696,51 @@ static bool pt_init(void) {
     return true;
 }
 
+// Pages outside the window: Pokémon Z-A's textures sit in the alias region (0x74..., its SDK's address regions), not in
+// the physical memory window - every check of theirs was "unknown" and sampled 4096 scattered bytes (~5500 a second
+// at 50 fps, 12 % of the render thread). The OS tracks writes over the whole guest space, so those pages get
+// generations too: a sparse table over [GUEST_LO, GUEST_HI), 2 MB pieces made on first use. (No GPU-written flag:
+// shader stores reach the window only, the gmem import.)
+#define PG_PIECE 512  // pages a piece
+static uint32_t *pg_dir[(GUEST_HI - GUEST_LO) / (PG_PIECE * VC_PAGE)];
+static uint32_t *pg_gen(uint64_t page_addr) {
+    uint64_t p = (page_addr - GUEST_LO) / VC_PAGE;
+    uint32_t **d = &pg_dir[p / PG_PIECE];
+    if (!*d) *d = calloc(PG_PIECE, sizeof **d);
+    return &(*d)[p % PG_PIECE];
+}
+
+static int pages_changed_outside(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) {
+    if (addr < GUEST_LO || addr + size > GUEST_HI) return -1;
+    uint64_t lo = addr & ~(VC_PAGE - 1), hi = (addr + size + VC_PAGE - 1) & ~(VC_PAGE - 1);
+    static uint64_t pages[4096];
+    uint64_t pg = VC_PAGE;
+    int n = plat_written_pages(lo, hi - lo, pages, 4096, &pg);
+    if (n < 0 || pg != VC_PAGE) return -1;
+    uint32_t g = ++vc_gen;
+    if (n >= 4096) for (uint64_t a = lo; a < hi; a += VC_PAGE) *pg_gen(a) = g;
+    else for (int k = 0; k < n; k++) *pg_gen(pages[k]) = g;
+    *now = g;
+    for (uint64_t a = lo; a < hi; a += VC_PAGE)
+        if (*pg_gen(a) > since) return 1;
+    return 0;
+}
+
 // Texture upload checks (textures.c): may guest memory [addr, addr + size) have changed since generation `since`?
-// 0: no CPU write since, 1: written, -1: unknown (no tracking, outside the heap, or pages the GPU writes).
+// 0: no CPU write since, 1: written, < 0: unknown - -1 no tracking, -2 pages the GPU writes.
 // *now: the generation to pass next time.
 int vk_pages_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) {
-    if (!size || addr < gwin_base || addr - gwin_base + size > gwin_max || !pt_init()) return -1;
+    if (!size || !pt_init()) return -1;
+    if (addr < gwin_base || addr - gwin_base + size > gwin_max) {
+        static int outside = -1;  // LARECOMP_VK_PAGES_OUTSIDE=0: unknown there, as before
+        if (outside < 0) { const char *e = ENV("LARECOMP_VK_PAGES_OUTSIDE"); outside = !e || atoi(e) != 0; }
+        int r = outside ? pages_changed_outside(addr, size, since, now) : -1;
+        static int nlog;  // LARECOMP_LOG_PAGES=1 (debug): the first ranges outside the tracked window
+        if (r < 0 && ENV("LARECOMP_LOG_PAGES") && nlog++ < 12)
+            LOG("[pages] %llx+%llx outside the window %llx+%llx: untracked\n", (unsigned long long)addr,
+                (unsigned long long)size, (unsigned long long)gwin_base, (unsigned long long)gwin_max);
+        return r;
+    }
     uint64_t lo = (addr - gwin_base) & ~(VC_PAGE - 1), hi = (addr - gwin_base + size + VC_PAGE - 1) & ~(VC_PAGE - 1);
     static uint64_t pages[4096];
     uint64_t pg = VC_PAGE;
@@ -2606,7 +2752,7 @@ int vk_pages_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now
     *now = g;
     int changed = 0;
     for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) {
-        if (vc_page_gpu[p]) return -1;
+        if (vc_page_gpu[p]) return -2;
         if (vc_page_gen[p] > since) changed = 1;
     }
     return changed;
@@ -2972,20 +3118,29 @@ static void build_compute(void *arg) {
     if (r != VK_SUCCESS) LOG("[compute] pipeline failed: %d\n", r);
 }
 
-static struct CsEnt { uint64_t addr; CsProg *cp; } g_cs_tab[256];  // compute programs by code address
+static struct CsEnt { uint64_t addr, fp; CsProg *cp; } g_cs_tab[256];  // compute programs by code address (code_fp)
 
 static CsProg *compute_program(NvnProgram *np) {
     NvnShaderStage *ss = &np->stages[5];
     if (!ss->code_addr) return NULL;
     struct CsEnt *tab = g_cs_tab;
-    int n = g_cs_n;
-    for (int i = 0; i < n; i++) if (tab[i].addr == ss->code_addr) return tab[i].cp;
+    int n = g_cs_n, at = -1;
+    uint64_t fp = code_fp(ss);
+    for (int i = 0; i < n && at < 0; i++)
+        if (tab[i].addr == ss->code_addr) {
+            if (tab[i].fp == fp) return tab[i].cp;
+            at = i;  // (other code there now: this entry gets the new program)
+        }
     CsProg *cp = calloc(1, sizeof *cp);
-    if (n < 256) { tab[n].addr = ss->code_addr; tab[n].cp = cp; g_cs_n = n + 1; }
-    { uint64_t wl, wn; gmem_window_get(&wl, &wn); maxwell_gmem_base = gwin_base + wl; maxwell_gmem_size = wn; }
+    note_code(ss, fp, "cs");
+    if (at < 0 && n < 256) at = n, g_cs_n = n + 1;
+    if (at >= 0) tab[at].addr = ss->code_addr, tab[at].fp = fp, tab[at].cp = cp;
+    uint64_t wl, wn;
+    gmem_window_get(&wl, &wn);
     ShaderKey k = {0};
     k.glsl = 1;
     pthread_mutex_lock(&translate_lock);
+    maxwell_gmem_base = gwin_base + wl, maxwell_gmem_size = wn;
     cp->si = maxwell_translate((const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, STAGE_COMPUTE, &k);
     if (ENV("LARECOMP_DUMP_GLSL")) {  // (debug) build/glsl/<code address>.comp
         mkdir("build/glsl", 0755);
@@ -3015,7 +3170,7 @@ static CsProg *compute_program(NvnProgram *np) {
         if (!cp->local[i]) cp->local[i] = 1;
     }
     save_glsl(cp->si->msl, ss->code_addr, "cs");
-    run_job(build_compute, cp);
+    run_job(build_compute, cp, &cp->p.state);
     return cp;
 }
 
@@ -3122,23 +3277,36 @@ static bool topology(uint32_t mode, VkPrimitiveTopology *t, uint8_t *cls) {
 // (ShaderKey.stencil_slots: usamplers), and with a signed integer format (*sint: isamplers). Maxwell's fetches give
 // those formats' bits; a float sampler on them is invalid in Vulkan (VUID-vkCmdDraw-format-07753) - NVIDIA returned the
 // bits anyway, other drivers needn't.
+// Each entry's answer (0 neither, 1 usampler, 2 isampler) is kept per texture pool entry for one submitted command list
+// (exec_gen: the game rewrites its pool between submissions, not within one): every draw went through all 32 slots of
+// its stages, reading each bound texture's NvnTexture and backend - two cache misses a slot, 5.5 % of the render
+// thread at 60 fps. LARECOMP_VK_NO_SLOT_MEMO=1: computed each time.
+static uint32_t exec_gen;  // (backend_execute: one per submitted command list)
+static int slot_kind(const NvnTexEntry *e) {
+    if (!renderer_format_has_stencil(e->tex->format)) return vk_view_int_kind(e->tex, &e->view, e->has_view);
+    return (e->has_view && (e->view.setmask & 16) ? e->view.ds_mode : e->tex->ds_mode) == 1;
+}
 static uint32_t stencil_slots(int stage, uint32_t *sint) {
     uint32_t m = 0;
     *sint = 0;
     if (!st.tpool) return 0;
+    static int nomemo = -1;
+    if (nomemo < 0) nomemo = ENV("LARECOMP_VK_NO_SLOT_MEMO") != NULL;
+    static struct { const NvnDescPool *pool; uint32_t tic, gen; int kind; } memo[4096];
     for (int s = 0; s < 32; s++) {
         uint64_t h = st.tex[stage][s];
         uint32_t tic = h & 0xFFFFF;
         if (!h || tic >= (uint32_t)st.tpool->count) continue;
-        NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
-        if (!e->tex) continue;
-        if (!renderer_format_has_stencil(e->tex->format)) {
-            int k = vk_view_int_kind(e->tex, &e->view, e->has_view);
-            if (k == 1) m |= 1u << s;
-            if (k == 2) *sint |= 1u << s;
-            continue;
+        int k;
+        __typeof__(memo[0]) *c = &memo[tic & 4095];
+        if (!nomemo && c->pool == st.tpool && c->tic == tic && c->gen == exec_gen) k = c->kind;
+        else {
+            NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
+            k = e->tex ? slot_kind(e) : 0;
+            *c = (__typeof__(*c)){st.tpool, tic, exec_gen, k};
         }
-        if ((e->has_view && (e->view.setmask & 16) ? e->view.ds_mode : e->tex->ds_mode) == 1) m |= 1u << s;
+        if (k == 1) m |= 1u << s;
+        if (k == 2) *sint |= 1u << s;
     }
     return m;
 }
@@ -3205,7 +3373,8 @@ static void fixed_state(FixedState *f, bool flip_x, bool flip_y, bool native, Vk
 
 // A draw of a handful of vertices - a full-screen pass: post-processing, a menu's backdrop, the composite into the
 // window image - whose shader or pipeline is still being built is waited for (a few ms, once) rather than skipped:
-// skipping one of those left the whole frame black (Pokémon Z-A: a black flash as a menu opened or closed).
+// skipping one of those left the whole frame black (Pokémon Z-A: a black flash as a menu opened or closed). Not an
+// effect's (blended() / scene_quad(), below): it waits as a scene draw.
 // Scene draws wait a little too: a pipeline already in the caches (cache/vk_pipelines.bin, the driver's, the SPIR-V
 // one) is built in 1-2 ms, but skipping the draw took the object off the screen for a whole frame - every time a
 // scene came into view, and at different places each run, as the builds' timing varies (trees, buildings, tables
@@ -3213,8 +3382,11 @@ static void fixed_state(FixedState *f, bool flip_x, bool flip_y, bool native, Vk
 // (LARECOMP_VK_SCENE_WAIT_MS, 0: skip at once); past that it's skipped as before - shaders never built before (a
 // moment's pop-in the first time instead of a hitch).
 // One that isn't built within 2 s isn't waited for again (it was 2 s per frame: a black screen at 0.5 fps on a
-// player's PC as a battle began), and the log says what the shader threads were doing.
+// player's PC as a battle began), and the log says what the shader threads were doing. A full-screen draw runs its
+// own build if it's still queued (run_queued_now): it waits for that build, not for every one queued before it.
 static bool wait_scene(_Atomic int *state) {
+    if (atomic_load(state) == 0) queued_job(state, false);  // (its build next: skipped for a frame or two, not until
+                                                             // the whole queue is done; 2: failed, nothing queued)
     static double budget_ms = -1;
     if (budget_ms < 0) budget_ms = ENV("LARECOMP_VK_SCENE_WAIT_MS") ? atof(ENV("LARECOMP_VK_SCENE_WAIT_MS")) : 6;
     static uint64_t frame = ~0ull, spent_ns;
@@ -3227,19 +3399,50 @@ static bool wait_scene(_Atomic int *state) {
     while (atomic_load(state) == 0 && (now = SDL_GetTicksNS()) - t0 < left) SDL_DelayPrecise(100000);
     spent_ns += now - t0;
     stat_scene_wait_ns += now - t0;
+    cum_build_wait += now - t0;
     return atomic_load(state) == 1;
 }
-static bool wait_built(_Atomic int *state, const CmdRec *r) {
+// Not a full-screen pass, though a handful of vertices: Z-A's move effects are such quads; waited for like a full-screen
+// pass, each new one stopped the frame for its build, one after another (a battle: 200-1200 ms frames, the other
+// builds' threads idle). Skipped, an effect is missing for a frame, never a black frame:
+// - blended into every colour target: drawn over what is there (not with ONE / ZERO: that blend is a plain write);
+// - a quad (4-6 vertices) tested against the scene's depth: in the world, behind what is in front of it (in a recorded
+//   battle most of the wait: sparks, decals, masks; the full-screen ones are triangles of 3, or not depth tested).
+static bool scene_quad(const CmdRec *r) {
+    return r->x[2] > 3 && st.ds[0] && st.rt.depth && compare_fn(st.ds[2]) != VK_COMPARE_OP_ALWAYS;
+}
+static bool blended(void) {
+    int n = 0;
+    for (int i = 0; i < st.rt.ncolor; i++) {
+        if (!st.rt.color[i]) continue;
+        if (!((st.color_state[0] >> i) & 1) || rt_kind(st.rt.color[i]->format) ||
+            blend_factor(st.blend[i][2]) == VK_BLEND_FACTOR_ZERO) return false;
+        n++;
+    }
+    return n > 0;
+}
+static bool wait_built(_Atomic int *state, const CmdRec *r, bool indexed, bool pipe) {
     if (atomic_load(state) == 1) return true;
-    if (r->x[2] > 6) return wait_scene(state);
+    static int wait_all = -1;  // LARECOMP_VK_WAIT_ALL_SMALL=1: every draw of up to 6 vertices waits, as before
+    if (wait_all < 0) wait_all = ENV("LARECOMP_VK_WAIT_ALL_SMALL") != NULL;
+    if (r->x[2] > 6 || (!wait_all && (blended() || scene_quad(r)))) return wait_scene(state);
     static _Atomic int *gave_up[64];
     static int ngave_up;
     for (int i = 0; i < ngave_up; i++) if (gave_up[i] == state) return false;
     uint64_t t0 = SDL_GetTicksNS();
-    while (atomic_load(state) == 0 && SDL_GetTicksNS() - t0 < 2000000000ull) SDL_Delay(1);
+    while (atomic_load(state) == 0 && SDL_GetTicksNS() - t0 < 2000000000ull)
+        if (!run_queued_now(state)) SDL_Delay(1);  // (a program: its translation, then its compile)
     uint64_t now = SDL_GetTicksNS();
-    static int n;
-    if (n++ < 20) LOG("[vk] full-screen draw waited %.1f ms for its shader / pipeline\n", (now - t0) / 1e6);
+    cum_build_wait += now - t0;
+    static int n;  // (from 5 ms: the first 20 of any length were all at startup, under 2 ms)
+    if (now - t0 >= 5000000ull && n++ < 60) {  // (what the draw is: which draws are worth a wait)
+        const NvnTexture *t = st.rt.ncolor ? st.rt.color[0] : NULL;
+        LOG("[vk] full-screen draw waited %.1f ms for its %s (%llu vertices x%u, blend %#x, depth test %d, %d targets "
+            "%ux%u fmt %#x, viewport %.0fx%.0f, vs %llx fs %llx)\n", (now - t0) / 1e6, pipe ? "pipeline" : "shaders",
+            (unsigned long long)r->x[2], (uint32_t)r->x[indexed ? 6 : 4], st.color_state[0], st.ds[0] && st.rt.depth,
+            st.rt.ncolor, t ? t->width : 0, t ? t->height : 0, t ? t->format : 0, st.viewport[0][2], st.viewport[0][3],
+            (unsigned long long)st.program->stages[0].code_addr, (unsigned long long)st.program->stages[1].code_addr);
+    }
     if (atomic_load(state) == 0) {
         if (ngave_up < 64) gave_up[ngave_up++] = state;
         uint64_t tt = atomic_load(&translator_t0), longest = 0;
@@ -3297,7 +3500,7 @@ static void draw_(CmdRec *r, bool indexed) {
         }
     }
     Prog *pr = get_program(st.program, &vkey, &fkey);
-    if (!pr || !wait_built(&pr->state, r)) { stat_skipped_here(); return; }
+    if (!pr || !wait_built(&pr->state, r, indexed, false)) { stat_skipped_here(); return; }
     {   // Stretched-geometry guard: a vertex shader reading attributes past a one-attribute layout (position only) is
         // drawing with another draw's layout - its mesh spreads across the sky (Z-A: 36-byte vertices read as 12).
         // Skipped until the cause is found; LARECOMP_SKIP_BAD_LAYOUT=0 draws them.
@@ -3452,9 +3655,9 @@ static void draw_(CmdRec *r, bool indexed) {
         pp->k = k;
         pipe_tab[pslot].key = ph;
         pipe_tab[pslot].pipe = pp;
-        run_job(build_pipeline, pp);
+        run_job(build_pipeline, pp, &pp->state);
     }
-    if (!wait_built(&pp->state, r)) { stat_skipped_here(); return; }
+    if (!wait_built(&pp->state, r, indexed, true)) { stat_skipped_here(); return; }
     ss_enabled();
     if (ss_need(SS_PIPE, ss.pipe == pp->pipe)) { ss.pipe = pp->pipe; vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe); }
     uint64_t prof_td_ = prof ? SDL_GetTicksNS() : 0;
@@ -3786,6 +3989,15 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
         st.viewport[0][0], st.viewport[0][1], st.viewport[0][2], st.viewport[0][3], pr->vi->attr_mask, st.color_state[0], st.ds[0],
         st.ds[1], st.ds[2], st.poly[0], st.poly[1], st.channel_mask, st.poly[3], st.poly_offset[0], st.poly_offset[1],
         st.poly_offset[2]);
+    // the vertex layout - stretched geometry is a mesh read with another layout: attribute <i>:f<format>/s<stream>+<offset>
+    // (those the shader reads), stream <s>:<address>+<size>/<stride>
+    LOG("[draw]   layout %d attribs:", st.nattrib);
+    for (int i = 0; i < st.nattrib && i < 16; i++)
+        if (pr->vi->attr_mask >> i & 1) LOG(" %d:f%02x/s%u+%u", i, st.attrib[i] & 0xFF, (st.attrib[i] >> 8) & 0x1F, st.attrib[i] >> 13);
+    LOG(" | streams");
+    for (int s = 0; s < st.nstream && s < 16; s++)
+        if (st.vbuf[s].addr) LOG(" %d:%llx+%llx/%u", s, (unsigned long long)st.vbuf[s].addr, (unsigned long long)st.vbuf[s].size, st.stream[s][0]);
+    LOG("\n");
     if (ENV("LARECOMP_DEBUG_DATA")) {  // vertex streams 0-1 and fragment cbufs: the first floats
         for (int s = 0; s < 2; s++) {
             if (!st.vbuf[s].addr) continue;
@@ -4837,6 +5049,7 @@ static void exec_list(uint64_t handle, int depth) {
             if (fence_flush) renderer_flush();
             extern void nvn_sync_set_seq(uint64_t guest, uint64_t seq);
             if (r->x[1]) nvn_sync_set_seq(r->x[1], renderer_fence_seq());
+            list_fenced = true;
             break;
         }
         case CMD_REPORT_COUNTER: {
@@ -4896,13 +5109,37 @@ static void exec_list(uint64_t handle, int depth) {
     }
 }
 
-void backend_execute(uint64_t handle) {
-    PROF_T0();
+// submit: end the submission after this list (else it goes on into the next list's)
+static void execute_one(uint64_t handle, bool submit) {
+    extern void plat_sample_focus(void);  // (runtime/platform.h: LARECOMP_SAMPLE_EXEC samples this thread)
+    plat_sample_focus();
+    exec_gen++;
+    uint64_t t0 = SDL_GetTicksNS(), w0 = tl_wait_ns;
     exec_list(handle, 0);
-    PROF_ADD(prof_exec);
-    if (prof) cum_exec += SDL_GetTicksNS() - prof_t0_;
+    uint64_t dt = SDL_GetTicksNS() - t0;
+    cum_exec += dt;
+    cum_wait += tl_wait_ns - w0;
+    if (prof) prof_exec += dt;
     static int sync_submit = -1;
     if (sync_submit < 0) sync_submit = ENV("LARECOMP_SYNC_SUBMIT") ? 1 : 0;
+    static long batch_draws = -1;
+    if (batch_draws < 0) batch_draws = ENV("LARECOMP_VK_BATCH_DRAWS") ? atol(ENV("LARECOMP_VK_BATCH_DRAWS")) : 400;
     if (sync_submit) renderer_flush();
-    else renderer_submit();
+    else if (submit || list_fenced || cum_draws - submit_draws >= (uint64_t)batch_draws) renderer_submit();
+    else if (xm_back_n) { vk_end_pass(); xm_copy_back(vk_cmd()); }  // (as a submission's end does: a later list may read it)
+    list_fenced = false;
+}
+
+void backend_execute(uint64_t handle) { execute_one(handle, true); }
+
+// The game hands its command lists over a frame at a time (Pokémon Z-A: ~100 in one nvnQueueSubmitCommands): they go
+// to the GPU in a few submissions instead of one each. ~80 submissions a frame cost ~20 % of the render thread
+// (vkQueueSubmit, a new command buffer and its state, the vertex cache's write-tracking query, a ring slot each).
+// A submission still ends after a list with a fence in it (a waiter on another thread must not find it pending, as
+// before), after LARECOMP_VK_BATCH_DRAWS draws (default 400: the GPU starts on the frame while the rest is
+// translated), and with the call. LARECOMP_VK_SUBMIT_EACH=1: one submission per list, as before.
+void backend_execute_batch(const uint64_t *handles, int n) {
+    static int each = -1;
+    if (each < 0) each = ENV("LARECOMP_VK_SUBMIT_EACH") != NULL;
+    for (int i = 0; i < n; i++) execute_one(handles[i], each || i == n - 1);
 }

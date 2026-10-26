@@ -694,7 +694,8 @@ PATCHES[PROMPT_POS_SITE] = _prompt_pos
 # max(that, the vsyncs that really passed) as the frame's step. Through rt_za_frame_cfg the 60 fps option makes it 0:
 # a present every vsync and a 1/60 s step - the world keeps its speed.
 ZA_BUILDS = {'7222e13ecf6adb32': 0x70019e37a8,  # 1.0.0
-             '8a1c86c437394b69': 0x7001b29cf8}  # 2.0.0 (Mega Dimension; the same function)
+             '8a1c86c437394b69': 0x7001b29cf8,  # 2.0.0 (Mega Dimension; the same function)
+             'b1f12fd919eae86a': 0x7001b296d8}  # 2.0.2
 
 
 def _za_frame_cfg(gen, a):

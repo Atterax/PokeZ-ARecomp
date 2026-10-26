@@ -138,6 +138,7 @@ enum {
 // renderer backend (runtime/nvn/metal.m)
 void backend_init(void);
 void backend_execute(uint64_t handle);            // run a recorded command list
+void backend_execute_batch(const uint64_t *handles, int n);  // the lists of one nvnQueueSubmitCommands
 void backend_present(NvnTexture *tex);            // show a texture in the window
 void backend_texture_destroyed(NvnTexture *tex);
 void backend_pool_written(uint64_t addr, uint64_t size);

@@ -89,6 +89,7 @@ static const uint8_t BUILD_ID[8] = {0xae, 0x16, 0xf7, 0x1e, 0x00, 0x2a, 0xf8, 0x
 static const struct { uint8_t id[8]; const char *version; } ZA_BUILDS[] = {
     {{0x72, 0x22, 0xe1, 0x3e, 0xcf, 0x6a, 0xdb, 0x32}, "1.0.0"},
     {{0x8a, 0x1c, 0x86, 0xc4, 0x37, 0x39, 0x4b, 0x69}, "2.0.0"},
+    {{0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a}, "2.0.2"},
 };
 // the version of a main module's build id: NULL = not one we know
 static const char *build_version(const uint8_t id[8]) {
@@ -250,7 +251,8 @@ static void set_failure(int k, const std::string &detail = "") {
         "Choose the folder that holds your Pok\xc3\xa9mon Legends Z-A dump (.xci / .nsp) and your prod.keys.",
         "Pok\xc3\xa9mon Legends Z-A's base game isn't among those files. Choose the folder with your own dump.",
         "Make sure there's about 12 GB free and try again.",
-        "ZA Recomp runs versions 1.0.0 and 2.0.0 of the game (base game, or base game + the 2.0.0 update).",
+        "ZA Recomp runs versions 1.0.0, 2.0.0 and 2.0.2 of the game (base game, or base game + the 2.0.0 or 2.0.2 "
+        "update).",
         "Some files are missing. Choose the folder again; if it happens again, dump the game again.",
         "Make sure there's about 4 GB free and try again. If it keeps happening, report it on GitHub.",
         "Put the prod.keys (and title.keys) dumped from your own Switch in the folder with the game files. Any file "
@@ -1709,8 +1711,8 @@ extern "C" void launcher_run(const char *root) {
                     dl->AddLine(ImVec2(x + u * 0.35f, cy + u * 0.35f), ImVec2(x + u, cy - u * 0.4f), g, fs * 0.11f);
                 };
                 std::string src_d = "The folder with your own dump of Pok\xc3\xa9mon Legends Z-A for Nintendo Switch: the "
-                                    "base game (.xci or .nsp), optionally the 2.0.0 update and the DLC (.nsp), and the "
-                                    "prod.keys from your console. The game isn't included with ZA Recomp.";
+                                    "base game (.xci or .nsp), optionally the 2.0.0 or 2.0.2 update and the DLC (.nsp), "
+                                    "and the prod.keys from your console. The game isn't included with ZA Recomp.";
                 if (!src.empty()) src_d += "\n\nChosen: " + src;
                 // the step that's running / its result, under the rows and in the Set up row's explanation
                 const std::string &job_line = job;

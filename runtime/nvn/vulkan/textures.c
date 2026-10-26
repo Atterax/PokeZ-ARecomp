@@ -772,6 +772,7 @@ static void upload_pending(TexBackend *b) {
 }
 
 uint64_t prof_tex_checks, prof_tex_samples, prof_tex_full, prof_tex_full_bytes, prof_tex_dyn, prof_tex_watch_skips;
+uint64_t prof_tex_watch_written, prof_tex_watch_unknown, prof_tex_watch_gpu;  // (checks the page tracking couldn't skip: why)
 static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (!t->addr || t->target == 10) return;
     uint64_t frame = vk_frame_counter();
@@ -789,7 +790,12 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     static int always_full = -1;
     if (always_full < 0) always_full = ENV("LARECOMP_TEX_FULLHASH") ? 1 : 0;
     bool full = b->dynamic || !b->uploaded || always_full;
-    bool periodic = frame - b->full_frame >= 120 && full_hash_budget >= total;  // (safety net: a full hash now and then)
+    // (safety net: a full hash now and then. Every 600 frames - 10 s at 60 fps: since the page tracking covers the textures
+    // outside the guest memory window too (exec.c pages_changed_outside), it rehashed up to 150 MB a second, finding
+    // nothing. LARECOMP_TEX_RECHECK=<frames>: another interval)
+    static long recheck = -1;
+    if (recheck < 0) recheck = ENV("LARECOMP_TEX_RECHECK") ? atol(ENV("LARECOMP_TEX_RECHECK")) : 600;
+    bool periodic = frame - b->full_frame >= (uint64_t)recheck && full_hash_budget >= total;
     if (!full && periodic) { full = true; full_hash_budget -= total; }
     if (!b->tp) b->tp = texpatch_identify(t) + 1;  // (button prompts / Hero Mode icon: re-uploaded when their look changes)
     bool restyle = b->tp > 0 && b->uploaded && b->tp_gen != texpatch_generation();
@@ -798,14 +804,18 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     // ~2.4 MB a frame in the overworld). The periodic full hash stays as a safety net. LARECOMP_VK_TEX_WATCH=0: off.
     static int watch = -1;
     if (watch < 0) { const char *e = ENV("LARECOMP_VK_TEX_WATCH"); watch = !e || atoi(e) != 0; }
+    bool tracked_clean = false;  // (the tracking said unwritten: a full hash that finds a change means it missed one)
     if (watch && !always_full) {
         extern int vk_pages_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now);
         uint32_t now = 0;
         int ch = vk_pages_changed(t->addr, total, b->wgen, &now);
+        if (ch > 0) prof_tex_watch_written++;
+        else if (ch < 0) prof_tex_watch_unknown++, prof_tex_watch_gpu += ch == -2;
         if (ch >= 0) {
             b->wgen = now;
             if (!ch && b->uploaded && !restyle) {
                 if (!periodic) { prof_tex_watch_skips++; return; }
+                tracked_clean = true;
                 if (b->dynamic) full_hash_budget -= total;  // (the others took theirs above)
             }
         }
@@ -820,6 +830,12 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     b->full_frame = frame;
     b->sample_hash = fnv_sample(mem, total);
     if (b->uploaded && h == b->data_hash && !restyle) return;
+    if (tracked_clean && h != b->data_hash) {
+        static int nmiss;
+        if (nmiss++ < 20)
+            LOG("[tex] %llx+%llx changed although its pages show no write since the last check (the safety net caught it)\n",
+                (unsigned long long)t->addr, (unsigned long long)total);
+    }
     if (b->uploaded && h != b->data_hash) b->dynamic = true;
     if (b->tp > 0) b->tp_gen = texpatch_generation();
     b->data_hash = h;

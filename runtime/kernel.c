@@ -111,6 +111,10 @@ static bool kwait(int64_t timeout_ns, const struct timespec *ts) {
 typedef struct { uint64_t addr, size; uint32_t type, perm; } Region;
 static Region regions[1024];
 static int nregions;
+// The table's lock: the game maps memory and asks what is mapped from several threads at once (an insert's memmove
+// under a concurrent one lost regions; a QueryMemory during it read a wrong answer). Its own lock, not g_klock: a
+// shared memory's on_map callback may take that one.
+static pthread_mutex_t g_mlock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t heap_size;
 static uint64_t tls_next = TLS_BASE;
 uint64_t kernel_heap_size(void) { return heap_size; }  // bytes from HEAP_BASE set by SetHeapSize
@@ -118,17 +122,21 @@ uint64_t kernel_heap_size(void) { return heap_size; }  // bytes from HEAP_BASE s
 // what others keep in their heap. Its size (0: none), *addr its start.
 uint64_t kernel_phys_largest(uint64_t *addr) {
     uint64_t best = 0;
+    pthread_mutex_lock(&g_mlock);
     for (int i = 0; i < nregions; i++)
         if (regions[i].type == 7 && regions[i].size > best) { best = regions[i].size; *addr = regions[i].addr; }
+    pthread_mutex_unlock(&g_mlock);
     return best;
 }
 // Writable guest data regions (heap, mapped/physical memory, module .data): for debug/runtime memory scans.
 int kernel_data_regions(uint64_t *addr, uint64_t *size, int max) {
     int n = 0;
+    pthread_mutex_lock(&g_mlock);
     for (int i = 0; i < nregions && n < max; i++)
         if ((regions[i].perm & 2) && regions[i].type != 0xB && regions[i].type != 0xC) {
             addr[n] = regions[i].addr; size[n] = regions[i].size; n++;
         }
+    pthread_mutex_unlock(&g_mlock);
     return n;
 }
 
@@ -285,15 +293,15 @@ static KThread *thread_new(uint64_t entry, uint64_t arg, uint64_t stack_top, int
     t->entry = entry;
     t->prio = prio;
     t->core = core < 0 ? 0 : core;
-    t->id = next_thread_id++;
     t->cpu.x[0] = arg;
     t->cpu.sp = stack_top & ~15ull;
     t->cpu.excl_addr = ~0ull;
+    t->cpu.thread = t;
+    pthread_mutex_lock(&g_klock);  // (threads create threads at once: two must never get the same id / TLS)
+    t->id = next_thread_id++;
     t->tlr = tls_next;
     tls_next += 0x200;
     t->cpu.tpidrro = t->tlr;
-    t->cpu.thread = t;
-    pthread_mutex_lock(&g_klock);
     t->anext = g_threads;
     g_threads = t;
     pthread_mutex_unlock(&g_klock);
@@ -303,7 +311,12 @@ static KThread *thread_new(uint64_t entry, uint64_t arg, uint64_t stack_top, int
 static void thread_start(KThread *t) {
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 256ull << 20);  // guest recursion runs on the host stack
+    // guest recursion runs on the host stack: 256 MB. On Windows the exe's own stack reservation (Makefile --stack):
+    // a size asked of winpthreads is committed up front - 256 MB of commit charge per guest thread, 12 GB in Z-A
+    // (Windows refused other programs memory, "make sure there is 4GB free"), where the reservation commits as used
+#ifndef _WIN32
+    pthread_attr_setstacksize(&attr, 256ull << 20);
+#endif
     t->started = true;
     pthread_create(&t->host, &attr, thread_main, t);
     pthread_attr_destroy(&attr);
@@ -320,6 +333,14 @@ KThread *kernel_create_main_thread(uint64_t entry, uint64_t stack_size, int prio
 void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t x4) {
     t->cpu.x[0] = x0; t->cpu.x[1] = x1; t->cpu.x[2] = x2; t->cpu.x[3] = x3; t->cpu.x[4] = x4;
     thread_start(t);  // the host main thread goes on to run the window event loop
+}
+
+int kernel_live_threads(void) {  // (the "[mem]" log line: guest threads started and not finished)
+    int n = 0;
+    pthread_mutex_lock(&g_klock);
+    for (KThread *t = g_threads; t; t = t->anext) n += t->started && !t->finished;
+    pthread_mutex_unlock(&g_klock);
+    return n;
 }
 
 uint32_t kernel_current_thread_handle(void) { return t_cur ? t_cur->handle : 0; }
@@ -668,9 +689,11 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     case 0x01: {  // SetHeapSize
         uint64_t size = x[1];
         if (size > HEAP_MAX) { x[0] = R_OUT_OF_RESOURCE; break; }
+        pthread_mutex_lock(&g_mlock);
         heap_size = size;
         region_remove(HEAP_BASE);
         if (size) region_add(HEAP_BASE, size, 5, 3);
+        pthread_mutex_unlock(&g_mlock);
         x[0] = R_OK;
         x[1] = HEAP_BASE;
         break;
@@ -678,16 +701,22 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     case 0x02: case 0x03: x[0] = R_OK; break;  // SetMemoryPermission / SetMemoryAttribute
     case 0x04:  // MapMemory(dst, src, size): src is inaccessible while mapped, so copying is equivalent
         memcpy((void *)x[0], (void *)x[1], x[2]);
+        pthread_mutex_lock(&g_mlock);
         region_add(x[0], x[2], 0xB, 3);
+        pthread_mutex_unlock(&g_mlock);
         x[0] = R_OK;
         break;
     case 0x05:  // UnmapMemory(dst, src, size): copy back
         memcpy((void *)x[1], (void *)x[0], x[2]);
+        pthread_mutex_lock(&g_mlock);
         region_remove(x[0]);
+        pthread_mutex_unlock(&g_mlock);
         x[0] = R_OK;
         break;
     case 0x06:  // QueryMemory(out_info, _, addr)
+        pthread_mutex_lock(&g_mlock);
         query_memory(x[2], x[0]);
+        pthread_mutex_unlock(&g_mlock);
         x[0] = R_OK;
         x[1] = 0;
         break;
@@ -763,12 +792,19 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         KSharedMem *s = (KSharedMem *)o;
         memset((void *)x[1], 0, x[2]);
         s->guest_addr = x[1];  // HLE services write straight into the guest's mapping
+        pthread_mutex_lock(&g_mlock);
         region_add(x[1], x[2], 6, 3);
+        pthread_mutex_unlock(&g_mlock);
         if (s->on_map) s->on_map(s);
         x[0] = R_OK;
         break;
     }
-    case 0x14: region_remove(x[1]); x[0] = R_OK; break;  // UnmapSharedMemory
+    case 0x14:  // UnmapSharedMemory
+        pthread_mutex_lock(&g_mlock);
+        region_remove(x[1]);
+        pthread_mutex_unlock(&g_mlock);
+        x[0] = R_OK;
+        break;
     case 0x15: {  // CreateTransferMemory(_, addr, size, perm)
         KTransferMem *t = calloc(1, sizeof *t);
         t->obj.type = KOBJ_TMEM;
@@ -829,8 +865,8 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     }
     case 0x26:  // Break
         if (x[0] & 0x80000000u) { LOG("[kernel] Break notification %llx\n", x[0]); x[0] = R_OK; break; }
-        if (x[2] == 4) {  // an abort: info is the failed Result (module, description)
-            uint32_t rc = LD32(x[1]);
+        if (x[2] == 4 && x[1] >= GUEST_LO && x[1] < GUEST_HI) {  // an abort: info is the failed Result (module, description)
+            uint32_t rc = LD32(x[1]);  // (no info pointer: reading address 0 crashed here, hiding the abort's own report)
             LOG("[kernel] abort on result 0x%x (%u-%u)\n", rc, 2000 + (rc & 0x1FF), (rc >> 9) & 0x1FFF);
         }
         {   // the guest's call chain (frame records: [fp] = caller's fp, [fp + 8] = return address)
@@ -879,21 +915,24 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     }
     case 0x2C:  // MapPhysicalMemory(addr, size)
         if (ENV("LARECOMP_LOG_VAMM")) LOG("[kernel] MapPhysicalMemory %llx +%llx\n", x[0], x[1]);
-        {
-            if (used_memory() && phys_limit && used_memory() + phys_new_bytes(x[0], x[1]) > APP_MEMORY) {
-                static int nlog;
-                if (nlog++ < 4) LOG("[kernel] MapPhysicalMemory %llx +%llx: LimitReached (used %llu MB)\n", x[0], x[1],
-                                    (unsigned long long)(used_memory() >> 20));
-                x[0] = R_LIMIT_REACHED;
-                break;
-            }
+        pthread_mutex_lock(&g_mlock);
+        if (used_memory() && phys_limit && used_memory() + phys_new_bytes(x[0], x[1]) > APP_MEMORY) {
+            pthread_mutex_unlock(&g_mlock);
+            static int nlog;
+            if (nlog++ < 4) LOG("[kernel] MapPhysicalMemory %llx +%llx: LimitReached (used %llu MB)\n", x[0], x[1],
+                                (unsigned long long)(used_memory() >> 20));
+            x[0] = R_LIMIT_REACHED;
+            break;
         }
         phys_map(x[0], x[1]);
+        pthread_mutex_unlock(&g_mlock);
         x[0] = R_OK;
         break;
     case 0x2D:  // UnmapPhysicalMemory(addr, size)
         if (ENV("LARECOMP_LOG_VAMM")) LOG("[kernel] UnmapPhysicalMemory %llx +%llx\n", x[0], x[1]);
+        pthread_mutex_lock(&g_mlock);
         phys_unmap(x[0], x[1]);
+        pthread_mutex_unlock(&g_mlock);
         x[0] = R_OK;
         break;
     case 0x34: x[0] = svc_wait_for_address(x[0], (uint32_t)x[1], (int32_t)x[2], (int64_t)x[3]); break;

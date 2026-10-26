@@ -76,6 +76,7 @@ void input_reset(void) {
 }
 
 volatile int g_debug_frame_request;  // F9: dump the next frame's passes (build/pass_*.png) + draw log
+volatile int g_shot_request;         // F10: the game image -> screenshots/shot_<frame>.png
 
 // Events a test pushes (LARECOMP_HOST_INPUT type: / sdlkey: / sdlpad:) carry this device id: they go the whole way, menu first.
 #define TEST_DEVICE 0x7E57u
@@ -208,6 +209,7 @@ void input_handle_event(const SDL_Event *e) {
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP:
         if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F9 && !e->key.repeat) g_debug_frame_request = 1;
+        if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F10 && !e->key.repeat) g_shot_request = 1;
         if (e->key.scancode < SDL_SCANCODE_COUNT) keys_down[e->key.scancode] = e->type == SDL_EVENT_KEY_DOWN;
         recompute_keyboard();
         break;
@@ -241,8 +243,43 @@ void input_handle_event(const SDL_Event *e) {
 // Scripted input for testing: LARECOMP_INPUT="frame:BUTTON:frames,..." (BUTTON = A,B,X,Y,L,R,ZL,ZR,PLUS,
 // MINUS,LEFT,UP,RIGHT,DOWN, or STICK_UP/DOWN/LEFT/RIGHT, RSTICK_UP/DOWN/LEFT/RIGHT, STICK_<degrees>: full tilt at
 // that angle, 0 = right, 90 = up).
+// "frame:ls:<x>/<y>:frames" / "frame:rs:<x>/<y>:frames" hold a stick there (-32767..32767, y up).
 static _Atomic uint64_t script_buttons;
 static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
+static const char *const input_names[] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS",
+                                          "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
+
+// LARECOMP_RECORD_INPUT=<file>: what the player holds, frame by frame, written as LARECOMP_INPUT replays it - a battle
+// played once from a save, then played again by a test (tools/za/perf-win.sh IN=@<file>) as often as needed.
+// Sticks in steps of 256 with a dead zone (a resting controller's drift would make an entry every frame).
+static FILE *rec_f;
+static uint64_t rec_start, rec_held;
+static int32_t rec_v[4];
+static void rec_write(uint64_t frame) {  // what was held from rec_start to this frame
+    if (frame <= rec_start) return;
+    unsigned long long s = rec_start, n = frame - rec_start;
+    for (int i = 0; i < 16; i++) if (rec_held >> i & 1) fprintf(rec_f, "%llu:%s:%llu,", s, input_names[i], n);
+    if (rec_v[0] || rec_v[1]) fprintf(rec_f, "%llu:ls:%d/%d:%llu,", s, rec_v[0], rec_v[1], n);
+    if (rec_v[2] || rec_v[3]) fprintf(rec_f, "%llu:rs:%d/%d:%llu,", s, rec_v[2], rec_v[3], n);
+    fflush(rec_f);
+}
+static void rec_at_exit(void) {  // (what is still held as the game closes)
+    extern uint64_t renderer_present_count(void);
+    rec_write(renderer_present_count());
+}
+static void record_input(uint64_t frame, uint64_t b, const int32_t st_[4]) {
+    static int on = -1;
+    if (on < 0 && (on = getenv("LARECOMP_RECORD_INPUT") && (rec_f = fopen(getenv("LARECOMP_RECORD_INPUT"), "w"))))
+        atexit(rec_at_exit);
+    if (!on) return;
+    int32_t q[4];
+    for (int a = 0; a < 4; a++) q[a] = abs(st_[a]) < 4000 ? 0 : abs(st_[a]) > 32767 - 256 ? st_[a] : st_[a] / 256 * 256;
+    b &= 0xFFFF;
+    if (b == rec_held && !memcmp(q, rec_v, sizeof q)) return;
+    rec_write(frame);
+    rec_start = frame, rec_held = b;
+    memcpy(rec_v, q, sizeof rec_v);
+}
 
 // Tests of the bindings, through them like a real player:
 // LARECOMP_HOST_INPUT="frame:key:<SDL key name>:frames,frame:pad:<button>:frames,..." holds a host key / controller
@@ -399,31 +436,59 @@ void input_frame(uint64_t frame) {
     host_test_frame(frame);
     const char *spec = getenv("LARECOMP_INPUT");
     if (!spec) return;
-    static const char *const names[] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS",
-                                        "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
-    uint64_t b = 0;
-    int32_t lx = 0, ly = 0, rx = 0, ry = 0;
-    static char buf[16384];  // (long scripted sessions: the perf walk is ~4 KB)
-    snprintf(buf, sizeof buf, "%s", spec);
-    for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
-        unsigned long start = 0, len = 10;
-        char name[32] = "";
-        if (sscanf(tok, "%lu:%31[A-Z_0-9]:%lu", &start, name, &len) < 2) continue;
-        if (frame < start || frame >= start + len) continue;
-        if (!strcmp(name, "STICK_UP")) ly = 32767;
-        else if (!strcmp(name, "STICK_DOWN")) ly = -32767;
-        else if (!strcmp(name, "STICK_LEFT")) lx = -32767;
-        else if (!strcmp(name, "STICK_RIGHT")) lx = 32767;
-        else if (!strcmp(name, "RSTICK_UP")) ry = 32767;
-        else if (!strcmp(name, "RSTICK_DOWN")) ry = -32767;
-        else if (!strcmp(name, "RSTICK_LEFT")) rx = -32767;
-        else if (!strcmp(name, "RSTICK_RIGHT")) rx = 32767;
-        else if (!strncmp(name, "STICK_", 6) && name[6] >= '0' && name[6] <= '9') {
-            double r = atoi(name + 6) * 3.14159265358979 / 180;
-            lx = (int32_t)lround(cos(r) * 32767), ly = (int32_t)lround(sin(r) * 32767);
+    // (parsed once: a recording (LARECOMP_RECORD_INPUT) is thousands of entries; a later entry's axis wins)
+    typedef struct { uint64_t start, len, b; int32_t v[4]; uint8_t set; } Ev;  // (v: lx ly rx ry, set: which of them)
+    static Ev *ev;
+    static int nev = -1;
+    if (nev < 0) {
+        char *buf = NULL;
+        if (spec[0] == '@') {  // @<file>: the entries in a file (a recording: past the 32 KB a variable can hold)
+            FILE *sf = fopen(spec + 1, "rb");
+            long n = 0;
+            if (sf && !fseek(sf, 0, SEEK_END) && (n = ftell(sf)) >= 0 && !fseek(sf, 0, SEEK_SET) && (buf = malloc(n + 1)))
+                buf[fread(buf, 1, n, sf)] = 0;
+            if (sf) fclose(sf);
+            LOG("[input] script %s: %s\n", spec + 1, buf ? "read" : "not found");
         }
-        for (int i = 0; i < 16; i++) if (!strcmp(name, names[i])) b |= 1ull << i;
+        if (!buf) buf = strdup(spec[0] == '@' ? "" : spec);
+        int cap = 0;
+        nev = 0;
+        for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
+            unsigned long start = 0, len = 10;
+            char name[32] = "";
+            int x = 0, y = 0;
+            Ev e = {0};
+            if (sscanf(tok, "%lu:ls:%d/%d:%lu", &start, &x, &y, &len) >= 3) e.set = 3, e.v[0] = x, e.v[1] = y;
+            else if (sscanf(tok, "%lu:rs:%d/%d:%lu", &start, &x, &y, &len) >= 3) e.set = 12, e.v[2] = x, e.v[3] = y;
+            else if (sscanf(tok, "%lu:%31[A-Z_0-9]:%lu", &start, name, &len) < 2) continue;
+            else if (!strcmp(name, "STICK_UP")) e.set = 2, e.v[1] = 32767;
+            else if (!strcmp(name, "STICK_DOWN")) e.set = 2, e.v[1] = -32767;
+            else if (!strcmp(name, "STICK_LEFT")) e.set = 1, e.v[0] = -32767;
+            else if (!strcmp(name, "STICK_RIGHT")) e.set = 1, e.v[0] = 32767;
+            else if (!strcmp(name, "RSTICK_UP")) e.set = 8, e.v[3] = 32767;
+            else if (!strcmp(name, "RSTICK_DOWN")) e.set = 8, e.v[3] = -32767;
+            else if (!strcmp(name, "RSTICK_LEFT")) e.set = 4, e.v[2] = -32767;
+            else if (!strcmp(name, "RSTICK_RIGHT")) e.set = 4, e.v[2] = 32767;
+            else if (!strncmp(name, "STICK_", 6) && name[6] >= '0' && name[6] <= '9') {
+                double r = atoi(name + 6) * 3.14159265358979 / 180;
+                e.set = 3, e.v[0] = (int32_t)lround(cos(r) * 32767), e.v[1] = (int32_t)lround(sin(r) * 32767);
+            } else
+                for (int i = 0; i < 16; i++) if (!strcmp(name, input_names[i])) e.b |= 1ull << i;
+            e.start = start, e.len = len;
+            if (nev == cap) ev = realloc(ev, (cap = cap ? cap * 2 : 64) * sizeof *ev);
+            ev[nev++] = e;
+        }
+        free(buf);
     }
+    uint64_t b = 0;
+    int32_t v[4] = {0};
+    for (int i = 0; i < nev; i++) {
+        const Ev *e = &ev[i];
+        if (frame < e->start || frame >= e->start + e->len) continue;
+        b |= e->b;
+        for (int a = 0; a < 4; a++) if (e->set >> a & 1) v[a] = e->v[a];
+    }
+    int32_t lx = v[0], ly = v[1], rx = v[2], ry = v[3];
     {  // test hooks steering the stick (runtime/hle/doorjump.c LARECOMP_DOORJUMP_TEST)
         extern int32_t g_test_lx, g_test_ly;
         extern uint64_t g_test_stick_until;
@@ -490,6 +555,10 @@ static void fill_state(Cpu *c) {
     int32_t mrx, mry;
     mouse_stick(&mrx, &mry);
     int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx + mrx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry + mry) + script_ry);
+    {
+        extern uint64_t renderer_present_count(void);
+        record_input(renderer_present_count(), b, (int32_t[4]){lx, ly, rx, ry});  // (before mirror mode swaps them)
+    }
     extern bool mirror_input(void);  // mirror mode, the world on screen (runtime/hle/mirror.c): left and right swap
     bool mirrored = !menu && mirror_input();
     if (mirrored) {

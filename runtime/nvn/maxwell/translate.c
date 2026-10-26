@@ -13,8 +13,12 @@
 // half-float packing, subgroup shuffles, barriers, discard, declarations and entry point) are emitted per dialect.
 // The MSL text is byte-identical to the MSL-only translator (tools/test_translate.c checks it).
 #if defined(_WIN32)
+#include <direct.h>  // _mkdir
 #include <malloc.h>  // alloca
+#else
+#include <sys/stat.h>  // mkdir
 #endif
+#include <dirent.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -2342,25 +2346,15 @@ static bool brx_table_labels(const uint8_t *code, size_t i, size_t end, const ui
     return n > 0;
 }
 
-ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, const ShaderKey *key) {
-    ShaderInfo *info = calloc(1, sizeof *info);
-    info->stage = stage;
-    Ctx *c = calloc(1, sizeof *c);
-    c->info = info;
-    c->key = key;
-    c->stage = stage;
-    c->ipa_mode = -1;
-    c->glsl = key && key->glsl;
-    const uint8_t *sph = blob + 0x30;
-    const uint8_t *code = blob + 0x80;
-    // compute programs have no SPH: code starts at the blob, or (newer SDKs, e.g. Pokémon Z-A's 19) after a 0x100-byte
-    // header whose first word is 0x12345679
-    if (stage == STAGE_COMPUTE) code = *(const uint32_t *)blob == 0x12345679 ? blob + 0x100 : blob;
-    if (stage == STAGE_FRAGMENT) {
-        c->omap_target = *(const uint32_t *)(sph + 0x48);
-        c->omap_depth = (*(const uint32_t *)(sph + 0x4C) >> 1) & 1;
-    }
-    // find the end: the last EXIT followed by self-branch padding, or max_size
+// compute programs have no SPH: code starts at the blob, or (newer SDKs, e.g. Pokémon Z-A's 19) after a 0x100-byte
+// header whose first word is 0x12345679
+static const uint8_t *code_start(const uint8_t *blob, int stage) {
+    if (stage == STAGE_COMPUTE) return *(const uint32_t *)blob == 0x12345679 ? blob + 0x100 : blob;
+    return blob + 0x80;
+}
+
+// the program's length in instruction words: the last EXIT followed by self-branch padding, or max_size
+static size_t code_end(const uint8_t *blob, const uint8_t *code, size_t max_size) {
     size_t n = (max_size - (code - blob)) / 8;
     if (n > 65536) n = 65536;
     size_t end = 0;
@@ -2371,6 +2365,25 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         if (w == 0 && i > 4) break;
         end = i + 1;
     }
+    return end;
+}
+
+static ShaderInfo *translate(const uint8_t *blob, size_t max_size, int stage, const ShaderKey *key) {
+    ShaderInfo *info = calloc(1, sizeof *info);
+    info->stage = stage;
+    Ctx *c = calloc(1, sizeof *c);
+    c->info = info;
+    c->key = key;
+    c->stage = stage;
+    c->ipa_mode = -1;
+    c->glsl = key && key->glsl;
+    const uint8_t *sph = blob + 0x30;
+    const uint8_t *code = code_start(blob, stage);
+    if (stage == STAGE_FRAGMENT) {
+        c->omap_target = *(const uint32_t *)(sph + 0x48);
+        c->omap_depth = (*(const uint32_t *)(sph + 0x4C) >> 1) & 1;
+    }
+    size_t end = code_end(blob, code, max_size);
     // collect branch targets (labels)
     uint8_t *label = calloc(end + 4, 1);
     label[1] = 1;
@@ -2583,6 +2596,101 @@ void maxwell_free(ShaderInfo *s) {
 
 void maxwell_disassemble(const uint8_t *code, size_t max_size, int stage, void *file) {
     (void)code; (void)max_size; (void)stage; (void)file;
+}
+
+// Disk cache of translations: cache/maxwell/<key>.bin, the ShaderInfo and its source. A known program then costs a
+// file read instead of a translation - ~4 ms each, and the first frame of an area or an effect can wait for dozens of
+// them in a row (vulkan/exec.c wait_built), every session: the SPIR-V and pipeline caches only cover the steps after
+// this one. The key: this file's build, the stage, max_size, the guest memory window baked into the source, the
+// ShaderKey and the program's bytes to its end. Another build of the translator empties the folder first (its
+// translations would never be read again: cache/maxwell/build names the one they're from). A program with a BRX (its
+// jump table is read from past the code) or a header past max_size, and the debug switches, go uncached. On when the
+// runtime sets maxwell_disk_cache (not in the tools and tests); LARECOMP_NO_TRANSLATE_CACHE=1: off.
+// (called under the runtime's translate lock, as the translator itself)
+bool maxwell_disk_cache;
+static const char cache_build[] = __DATE__ " " __TIME__;
+
+static uint64_t fnv(uint64_t h, const void *p, size_t n) {
+    for (size_t i = 0; i < n; i++) { h ^= ((const uint8_t *)p)[i]; h *= 0x100000001B3ull; }
+    return h;
+}
+
+// the folder, emptied when its translations are from another build
+static void cache_open(void) {
+#ifdef _WIN32
+    _mkdir("cache"), _mkdir("cache/maxwell");
+#else
+    mkdir("cache", 0755), mkdir("cache/maxwell", 0755);
+#endif
+    char had[sizeof cache_build] = {0};
+    FILE *f = fopen("cache/maxwell/build", "rb");
+    if (f) { if (fread(had, 1, sizeof had, f) != sizeof had) had[0] = 0; fclose(f); }
+    if (!memcmp(had, cache_build, sizeof had)) return;
+    DIR *d = opendir("cache/maxwell");
+    for (struct dirent *e; d && (e = readdir(d));) {
+        char path[300];
+        snprintf(path, sizeof path, "cache/maxwell/%s", e->d_name);
+        if (strstr(e->d_name, ".bin")) remove(path);
+    }
+    if (d) closedir(d);
+    if ((f = fopen("cache/maxwell/build", "wb"))) { fwrite(cache_build, 1, sizeof cache_build, f); fclose(f); }
+}
+
+static uint64_t cache_key(const uint8_t *blob, size_t max_size, int stage, const ShaderKey *key) {
+    static int on = -1;
+    if (on < 0) {
+        on = maxwell_disk_cache && !getenv("LARECOMP_NO_TRANSLATE_CACHE") && !getenv("LARECOMP_NO_DISCARD") &&
+             !getenv("LARECOMP_LANE_COMPUTE_ONLY") && !getenv("LARECOMP_BRX_ALL_LABELS") && !getenv("LARECOMP_SAVE_MSL");
+        if (on) cache_open();
+    }
+    if (!on || !key || maxwell_dbg_code || maxwell_dbg_vs) return 0;
+    const uint8_t *code = code_start(blob, stage);
+    if (max_size <= (size_t)(code - blob)) return 0;
+    size_t end = code_end(blob, code, max_size);
+    for (size_t i = 0; i < end; i++)
+        if ((((const uint64_t *)code)[i] & 0xfff0000000000000ull) == 0xe250000000000000ull) return 0;  // BRX
+    uint64_t v[4] = {(uint64_t)stage, max_size, maxwell_gmem_base, maxwell_gmem_size};
+    uint64_t h = fnv(fnv(fnv(0xcbf29ce484222325ull, cache_build, sizeof cache_build), v, sizeof v), key, sizeof *key);
+    h = fnv(h, blob, (size_t)(code - blob) + end * 8);
+    return h ? h : 1;
+}
+
+static ShaderInfo *cache_load(uint64_t h) {
+    char path[64];
+    snprintf(path, sizeof path, "cache/maxwell/%016llx.bin", (unsigned long long)h);
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    ShaderInfo *info = malloc(sizeof *info);
+    uint32_t len = 0;
+    char *src = NULL;
+    bool ok = fread(info, sizeof *info, 1, f) == 1 && fread(&len, 4, 1, f) == 1 && len < (64u << 20) &&
+              (src = malloc(len + 1)) && fread(src, 1, len, f) == len;
+    fclose(f);
+    if (!ok) { free(info); free(src); return NULL; }
+    src[len] = 0;
+    info->msl = src;
+    return info;
+}
+
+static void cache_store(uint64_t h, const ShaderInfo *info) {
+    char path[64], tmp[96];
+    snprintf(path, sizeof path, "cache/maxwell/%016llx.bin", (unsigned long long)h);
+    snprintf(tmp, sizeof tmp, "%s.%p", path, (const void *)info);
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return;
+    uint32_t len = (uint32_t)strlen(info->msl);
+    bool ok = fwrite(info, sizeof *info, 1, f) == 1 && fwrite(&len, 4, 1, f) == 1 && fwrite(info->msl, 1, len, f) == len;
+    ok = fclose(f) == 0 && ok;  // (a full disk can fail only at the flush)
+    if (!ok || rename(tmp, path) != 0) remove(tmp);  // (written meanwhile by another thread: theirs is the same)
+}
+
+ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, const ShaderKey *key) {
+    uint64_t h = cache_key(blob, max_size, stage, key);
+    ShaderInfo *info = h ? cache_load(h) : NULL;
+    if (info) return info;
+    info = translate(blob, max_size, stage, key);
+    if (h && info->msl) cache_store(h, info);
+    return info;
 }
 
 ShaderInfo *maxwell_empty_fragment(void) {

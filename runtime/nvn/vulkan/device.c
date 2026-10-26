@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "../../paths.h"
+#include "../../platform.h"
 #include "../../settings.h"
 #include "../../ui/menu.h"
 #include "vk.h"
@@ -695,6 +696,7 @@ static void black_probe(TexBackend *b, const void *tex, uint64_t frame) {
 }
 
 void backend_present(NvnTexture *t) {
+    uint64_t t_enter = SDL_GetTicksNS();
     g_last_presented = t;
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
@@ -721,6 +723,11 @@ void backend_present(NvnTexture *t) {
         OutScale os;
         output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, -1, &os);
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh, shape = os.shape;
+        static double logged_sx, logged_sy;
+        if (sx != logged_sx || sy != logged_sy) {
+            logged_sx = sx, logged_sy = sy;
+            LOG("[scale] internal resolution %.0fx%.0f (x%.2f, window %.0fx%.0f)\n", 1920 * sx, 1080 * sy, sy, dw, dh);
+        }
         // interiors / dungeons: their 16:9 centre, or the part inside a room wider than one screen
         extern void widescreen_present_crop(uint64_t, double, float *, double *, double *, double *, double *);
         float crop[4];  // uv origin and size
@@ -743,8 +750,8 @@ void backend_present(NvnTexture *t) {
     } else {
         renderer_submit();
     }
-    extern void vk_prof_frame(uint64_t frame, uint64_t present_ns);
-    vk_prof_frame(total_frames, SDL_GetTicksNS() - t0);
+    extern void vk_hitch_frame(uint64_t frame, uint64_t present_ns);
+    vk_hitch_frame(total_frames, SDL_GetTicksNS() - t_enter);
     frames++;
     total_frames++;
     g_frame_counter++;
@@ -805,6 +812,15 @@ void backend_present(NvnTexture *t) {
             if (*next == ',') next++;
         }
     }
+    extern volatile int g_shot_request;  // F10 (runtime/hle/input.c)
+    if (g_shot_request) {
+        g_shot_request = 0;
+        char path[256];
+        mkdir("screenshots", 0755);
+        snprintf(path, sizeof path, "screenshots/shot_%05llu.png", (unsigned long long)total_frames);
+        renderer_save_texture_tex(b, path);
+        LOG("[shot] frame %llu -> %s\n", (unsigned long long)total_frames, path);
+    }
     static long shot_from = -1;
     if (shot_from < 0) { const char *e = ENV("LARECOMP_SCREENSHOT_FROM"); shot_from = e ? atol(e) : 0; }
     if (shot_every && total_frames % shot_every == 0 && (long)total_frames >= shot_from) {
@@ -829,6 +845,27 @@ void backend_present(NvnTexture *t) {
         max_gap = 0;
         frames = 0;
         last_fps_time = now;
+    }
+    // once a minute, what the process holds (a leak: which side grows over a long session) - the guest's memory, the
+    // rest of the process (the renderer's host-side caches, the driver), and the renderer's GPU allocations
+    static double last_mem;
+    uint64_t proc, guest;
+    if (now - last_mem >= 60 && plat_mem_usage(&proc, &guest)) {
+        last_mem = now;
+        VkPhysicalDeviceMemoryProperties mp;
+        vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
+        VmaBudget bud[VK_MAX_MEMORY_HEAPS];
+        vmaGetHeapBudgets(g_vk.vma, bud);
+        uint64_t dev = 0, host = 0, nalloc = 0;
+        for (uint32_t i = 0; i < mp.memoryHeapCount; i++) {
+            *(mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? &dev : &host) += bud[i].statistics.blockBytes;
+            nalloc += bud[i].statistics.allocationCount;
+        }
+        extern int kernel_live_threads(void);
+        LOG("[mem] t=%.0f process %llu MB: guest %llu MB + host %llu MB (%d guest threads) | GPU allocations %llu MB device, "
+            "%llu MB host (%llu)\n", now, (unsigned long long)(proc >> 20), (unsigned long long)(guest >> 20),
+            (unsigned long long)((proc - guest) >> 20), kernel_live_threads(), (unsigned long long)(dev >> 20),
+            (unsigned long long)(host >> 20), (unsigned long long)nalloc);
     }
 }
 

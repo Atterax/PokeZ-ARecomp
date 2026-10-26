@@ -132,8 +132,13 @@ NVN(nvnQueueSubmitCommands) {
     int n = (int)A(1);
     const uint64_t *handles = AP(2);
     exec_lock_take();
-    for (int i = 0; i < n; i++) backend_execute(handles[i]);
+    backend_execute_batch(handles, n);
     exec_lock_give();
+    static uint64_t calls, lists, multi;  // LARECOMP_LOG_SUBMITS=1 (debug): how the game hands its lists over
+    calls++, lists += n, multi += n > 1;
+    if (ENV("LARECOMP_LOG_SUBMITS") && calls % 2000 == 0)
+        LOG("[submits] %llu calls, %llu lists (%llu calls with more than one)\n", (unsigned long long)calls,
+            (unsigned long long)lists, (unsigned long long)multi);
 }
 NVN(nvnQueueFlush) { (void)c; static int seen_; if (!seen_++ && ENV("LARECOMP_LOG_NOOP")) LOG("[nvn] no-op called: nvnQueueFlush\n"); }
 NVN(nvnQueueFinish) { (void)c; renderer_sync(); }

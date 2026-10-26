@@ -23,3 +23,5 @@ __pycache__/
 /textures/
 /mods/
 /tools/hdtools/
+# Claude Code: machine-specific notes
+CLAUDE.local.md

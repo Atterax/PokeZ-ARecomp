@@ -2690,6 +2690,9 @@ void renderer_reset(void) {
     st_defaults();
 }
 
+void backend_execute(uint64_t handle);
+void backend_execute_batch(const uint64_t *handles, int n) { for (int i = 0; i < n; i++) backend_execute(handles[i]); }
+
 void backend_execute(uint64_t handle) {
     @autoreleasepool {
         exec_list(handle, 0);
