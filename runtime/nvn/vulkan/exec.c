@@ -2335,7 +2335,9 @@ static VkDescriptorBufferInfo gfast_info(void) {
 // mods/MaxLOD). Instead the sessions write a device-local mirror of the arena (XFB_BUFFER_INDEX), the vertex streams
 // inside parts written that way read it (guest_direct), and at each session's end the parts written are copied back
 // to the heap (one small DMA transfer), for anything else that reads them there. Ranges outside the mirror's 64 MB
-// window go to the heap as before. LARECOMP_VK_XFB_MIRROR=0: off.
+// window go to the heap as before. LARECOMP_VK_XFB_MIRROR=0: off, =1: on. Off by default on AMD GPUs (#22: an RX 9070 XT
+// lost the device on an invalid GPU read in exactly these skinning draws, with robust access on and submissions made
+// one at a time) - their transform feedback goes to the heap's import as before the mirror.
 #define XM_SIZE (64ull << 20)
 #define XM_CHUNK 256ull
 static VkBuffer xm_buf;
@@ -2352,7 +2354,11 @@ static uint64_t stat_xm_fallback;
 
 static bool xm_on(void) {
     static int on = -1;
-    if (on < 0) { const char *e = ENV("LARECOMP_VK_XFB_MIRROR"); on = !e || atoi(e) != 0; }
+    if (on < 0) {
+        const char *e = ENV("LARECOMP_VK_XFB_MIRROR");
+        on = e ? atoi(e) != 0 : g_vk.props.vendorID != 0x1002;
+        if (!on && !e) LOG("[vk] transform feedback mirror off on this AMD GPU (LARECOMP_VK_XFB_MIRROR=1: on)\n");
+    }
     return on && g_vk.host_import;
 }
 
@@ -2385,7 +2391,7 @@ static bool xm_prepare(void) {
             LOG("[vk] transform feedback mirror at %llx (+%llu MB)\n", (unsigned long long)xm_lo, (unsigned long long)(XM_SIZE >> 20));
         }
         if ((xfb_addr[b] & 3) || !xm_inside(xfb_addr[b], xfb_size[b])) { stat_xm_fallback++; return false; }
-        if (gmem_lo && !GM_IN(xfb_addr[b], xfb_size[b])) {
+        if (!GM_IN(xfb_addr[b], xfb_size[b])) {  // (also with the whole heap imported: the mirror may reach past its end)
             static int nl;
             if (nl++ < 8) LOG("[gmem] transform feedback buffer %llx is outside the import window\n", (unsigned long long)xfb_addr[b]);
             stat_xm_fallback++;
