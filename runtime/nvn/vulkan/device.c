@@ -132,6 +132,8 @@ static void pick_device(void) {
 }
 
 static bool g_fault_ext;
+static PFN_vkWaitForPresentKHR g_present_wait;  // (VK_KHR_present_wait: present_watch)
+static bool g_present_fifo;  // (present_watch gave up on the default present mode)
 static bool g_ckpt;
 static PFN_vkCmdSetCheckpointNV p_set_ckpt;
 
@@ -217,16 +219,24 @@ static void create_device(void) {
     // the device on an invalid read in a battle, where NVIDIA reads on). LARECOMP_VK_ROBUST2=0 leaves it off.
     bool x_rb2 = !(ENV("LARECOMP_VK_ROBUST2") && !atoi(ENV("LARECOMP_VK_ROBUST2"))) &&
                  has_ext(ep, ne, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
+    // Whether the window really shows the frames presented (present_watch). LARECOMP_NO_PRESENT_WATCH=1: not checked
+    bool x_pw = !ENV("LARECOMP_NO_PRESENT_WATCH") && has_ext(ep, ne, VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
+                has_ext(ep, ne, VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)
     VkPhysicalDeviceRobustness2FeaturesEXT have_rb2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
+    VkPhysicalDevicePresentWaitFeaturesKHR have_pw = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR,
+                                                      .pNext = x_rb2 ? &have_rb2 : NULL};
+    VkPhysicalDevicePresentIdFeaturesKHR have_pid = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR, .pNext = &have_pw};
     VkPhysicalDeviceVulkan12Features have12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-                                               .pNext = x_rb2 ? &have_rb2 : NULL};
+                                               .pNext = x_pw ? (void *)&have_pid : x_rb2 ? (void *)&have_rb2 : NULL};
     VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &have12};
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
     x_rb2 = x_rb2 && have.features.robustBufferAccess && have_rb2.robustBufferAccess2 && have_rb2.robustImageAccess2;
     if (x_rb2) ext[n_ext++] = VK_EXT_ROBUSTNESS_2_EXTENSION_NAME;
+    x_pw = x_pw && have_pid.presentId && have_pw.presentWait;
+    if (x_pw) ext[n_ext++] = VK_KHR_PRESENT_ID_EXTENSION_NAME, ext[n_ext++] = VK_KHR_PRESENT_WAIT_EXTENSION_NAME;
     if (!have12.shaderOutputLayer) LOG("[vk] warning: no shaderOutputLayer (vertex shaders choosing the render target layer)\n");
     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT div = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT,
@@ -238,6 +248,11 @@ static void create_device(void) {
     VkPhysicalDeviceRobustness2FeaturesEXT rb2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT,
                                                   .robustBufferAccess2 = VK_TRUE, .robustImageAccess2 = VK_TRUE, .pNext = tail};
     if (x_rb2) tail = &rb2;
+    VkPhysicalDevicePresentIdFeaturesKHR pid = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR, .presentId = VK_TRUE,
+                                                .pNext = tail};
+    VkPhysicalDevicePresentWaitFeaturesKHR pw = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR,
+                                                 .presentWait = VK_TRUE, .pNext = &pid};
+    if (x_pw) tail = &pw;
     VkPhysicalDeviceVulkan13Features f13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
                                             .dynamicRendering = VK_TRUE, .synchronization2 = VK_TRUE, .subgroupSizeControl = VK_TRUE,
                                             .shaderDemoteToHelperInvocation = VK_TRUE, .shaderTerminateInvocation = VK_TRUE,
@@ -333,6 +348,8 @@ static void create_device(void) {
         g_vkc.render_pass ? "no (render passes)" : "yes", g_vkc.sync1 ? "no (Vulkan 1.0 barriers)" : "yes",
         g_vkc.no_eds1 ? "no (in the pipelines)" : "yes", g_vkc.no_eds2 ? "no (in the pipelines)" : "yes");
     LOG("[vk] robust buffer / image access 2: %s\n", x_rb2 ? "yes" : "no");
+    g_present_wait = x_pw ? (PFN_vkWaitForPresentKHR)vkGetDeviceProcAddr(g_vk.dev, "vkWaitForPresentKHR") : NULL;
+    LOG("[vk] present watch: %s\n", g_present_wait ? "yes" : "no (no VK_KHR_present_wait)");
 
     // (VMA's commands from the driver too, as above)
     VmaVulkanFunctions vf = {.vkGetInstanceProcAddr = vkGetInstanceProcAddr, .vkGetDeviceProcAddr = vkGetDeviceProcAddr};
@@ -387,6 +404,7 @@ void vk_pipeline_cache_save(void) {
 
 // ================================================================== swapchain
 static VkPresentModeKHR present_mode(void) {
+    if (g_present_fifo) return VK_PRESENT_MODE_FIFO_KHR;  // (present_watch: the display stopped taking the frames twice)
     // MAILBOX by default: the game paces itself (vi.c's emulated 60 Hz vsync), and with FIFO every submission
     // queued behind the one waiting for a window image, so the game's fence waits followed the presentation engine:
     // a throttled / captured / busy compositor slowed the whole game (4-21 fps with the GPU mostly idle; mailbox:
@@ -564,6 +582,69 @@ static int shot_thread(void *arg) {
     return 0;
 }
 
+// A window that stops showing the frames (#15: a GTX 1660 Super's window froze after about an hour while the game went
+// on presenting at 30 fps - sound on, F1's menu never seen; every present returned VK_SUCCESS). Checked with
+// VK_KHR_present_wait while the window has the focus: nothing shown for 3 s gets a new swapchain, and if that happens
+// again within a minute, FIFO presents for the rest of the session. LARECOMP_PRESENT_WATCH_ANY=1: also unfocused /
+// hidden windows (a test: a hidden window shows nothing).
+static void present_watch(uint64_t id) {
+    static uint64_t probe, probe_ns, last_fix_ns;
+    static int any = -1;
+    if (!g_present_wait) return;
+    if (any < 0) any = ENV("LARECOMP_PRESENT_WATCH_ANY") != NULL;
+    uint64_t now = SDL_GetTicksNS();
+    SDL_WindowFlags f = SDL_GetWindowFlags(window);
+    if (!any && (!(f & SDL_WINDOW_INPUT_FOCUS) || (f & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_OCCLUDED | SDL_WINDOW_HIDDEN)))) {
+        probe = 0;  // (a covered or minimised window may rightly show nothing)
+        return;
+    }
+    if (!probe) { probe = id; probe_ns = now; return; }
+    VkResult r = g_present_wait(g_vk.dev, g_vk.swapchain, probe, 0);
+    if (r == VK_SUCCESS) { probe = 0; return; }
+    if (r != VK_TIMEOUT) {
+        LOG("[vk] present wait %d: new swapchain\n", r);
+        probe = 0;
+        recreate_swapchain();
+        return;
+    }
+    if (now - probe_ns < 3000000000ull) return;
+    bool again = last_fix_ns && now - last_fix_ns < 60000000000ull;
+    LOG("[vk] the window showed nothing for 3 s (present %llu not shown, now %llu): %s\n", (unsigned long long)probe,
+        (unsigned long long)id, again && !g_present_fifo ? "FIFO presents from now on" : "new swapchain");
+    if (again) g_present_fifo = true;
+    last_fix_ns = now;
+    probe = 0;
+    recreate_swapchain();
+}
+
+// The window thread (ui_run) away from its event loop: Windows then shows a frozen copy of the window that takes the
+// keyboard and the pads, while the game and its sound go on (#15). Said in the log with the call it is stuck in.
+static _Atomic uint64_t ui_beat;  // (when ui_run last came back to its event loop)
+static const char *_Atomic ui_stage;
+#ifdef _WIN32
+__declspec(dllimport) int __stdcall IsHungAppWindow(void *hwnd);
+#endif
+static void ui_watch(void) {
+    static bool stuck, hung;
+    static uint64_t next;
+    uint64_t now = SDL_GetTicksNS(), b = atomic_load(&ui_beat);
+    if (!b || now < next) return;
+    next = now + 500000000ull;
+    if (now - b > 2000000000ull) {
+        if (!stuck) LOG("[ui] the window thread has been away for %.1f s (in %s)\n", (now - b) / 1e9, atomic_load(&ui_stage));
+        stuck = true;
+    } else if (stuck) {
+        LOG("[ui] the window thread is back\n");
+        stuck = false;
+    }
+#ifdef _WIN32
+    void *hwnd = SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
+    bool h = hwnd && IsHungAppWindow(hwnd);
+    if (h != hung) LOG("[ui] Windows %s the window as not responding\n", h ? "shows" : "no longer shows");
+    hung = h;
+#endif
+}
+
 // End rendering into the window image and present it. shot_path: also save the window image as PNG.
 void vk_frame_end(const char *shot_path) {
     if (!cur_frame.ok) return;
@@ -576,10 +657,16 @@ void vk_frame_end(const char *shot_path) {
     if (!done_sem[img]) done_sem[img] = binary_semaphore();
     uint64_t seq = vk_pending_seq();
     vk_submit_extra(cur_frame.acquired, done_sem[img], VK_NULL_HANDLE);
-    VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &done_sem[img],
+    static uint64_t present_id;  // (VK_KHR_present_id: increasing over all swapchains)
+    uint64_t id = ++present_id;
+    VkPresentIdKHR pid = {.sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR, .swapchainCount = 1, .pPresentIds = &id};
+    VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .pNext = g_present_wait ? &pid : NULL,
+                           .waitSemaphoreCount = 1, .pWaitSemaphores = &done_sem[img],
                            .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) recreate_swapchain();
+    else if (r == VK_SUCCESS) present_watch(id);
+    ui_watch();
     cur_frame.ok = false;
     if (shot_path) {
         // (the PNG is encoded on a thread of its own: done here it held the frame ~250 ms - a periodic hitch with
@@ -935,17 +1022,28 @@ int ui_run(void) {
     for (;;) {
         if (rt_reboot_requested()) return rt_reboot_requested();  // (runtime/main.c tears the game down)
         SDL_Event e;
+        atomic_store(&ui_beat, SDL_GetTicksNS());
+        atomic_store(&ui_stage, "waiting for events");
         while (SDL_WaitEventTimeout(&e, 16)) {
+            atomic_store(&ui_beat, SDL_GetTicksNS());
             if (e.type == SDL_EVENT_QUIT) {
                 LOG("window closed\n");
                 exit(0);
             }
             extern bool input_user_blocked(const SDL_Event *e);
             if (input_user_blocked(&e)) continue;  // scripted test runs: the real keyboard / mouse / pads do nothing (as metal.m)
+            atomic_store(&ui_stage, "menu_handle_event");
             if (menu_handle_event(&e)) continue;
+            atomic_store(&ui_stage, "input_handle_event");
             input_handle_event(&e);
+            atomic_store(&ui_stage, "waiting for events");
         }
+        static int stall = -1;  // (test: LARECOMP_TEST_UI_STALL=<s>: the window thread away for 8 s, that long after start)
+        if (stall < 0) stall = ENV("LARECOMP_TEST_UI_STALL") ? atoi(ENV("LARECOMP_TEST_UI_STALL")) : 0;
+        if (stall > 0 && SDL_GetTicks() > stall * 1000ull) { stall = 0; atomic_store(&ui_stage, "LARECOMP_TEST_UI_STALL"); SDL_Delay(8000); }
+        atomic_store(&ui_stage, "menu_apply_window_requests");
         menu_apply_window_requests(window);
+        atomic_store(&ui_stage, "input_mouse_update");
         input_mouse_update(window);
     }
 }
