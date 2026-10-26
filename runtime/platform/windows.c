@@ -521,3 +521,39 @@ int plat_rename(const char *from, const char *to) {
     set_errno_win(GetLastError());
     return -1;
 }
+
+// A hash of what the screen shows in the window's client area (32x18 samples of the composed desktop), while it is the
+// foreground window: runtime/nvn/vulkan/device.c screen_watch tells a window that stopped showing the game's frames.
+bool plat_window_screen_hash(void *hwnd, uint32_t *out) {
+    HWND w = (HWND)hwnd;
+    if (!w || GetForegroundWindow() != w || IsIconic(w)) return false;
+    RECT rc;
+    if (!GetClientRect(w, &rc) || rc.right < 64 || rc.bottom < 36) return false;
+    POINT o = {0, 0};
+    ClientToScreen(w, &o);
+    HDC sdc = GetDC(NULL);
+    if (!sdc) return false;
+    HDC mdc = CreateCompatibleDC(sdc);
+    BITMAPINFO bi = {.bmiHeader = {.biSize = sizeof(BITMAPINFOHEADER), .biWidth = 32, .biHeight = -18, .biPlanes = 1,
+                                   .biBitCount = 32, .biCompression = BI_RGB}};
+    void *bits = NULL;
+    HBITMAP bm = mdc ? CreateDIBSection(mdc, &bi, DIB_RGB_COLORS, &bits, NULL, 0) : NULL;
+    bool ok = false;
+    if (bm) {
+        HGDIOBJ old = SelectObject(mdc, bm);
+        SetStretchBltMode(mdc, COLORONCOLOR);
+        ok = StretchBlt(mdc, 0, 0, 32, 18, sdc, o.x, o.y, rc.right, rc.bottom, SRCCOPY) != 0;
+        GdiFlush();
+        if (ok) {
+            uint32_t h = 2166136261u;
+            const uint8_t *p = bits;
+            for (int i = 0; i < 32 * 18 * 4; i++) h = (h ^ p[i]) * 16777619u;
+            *out = h;
+        }
+        SelectObject(mdc, old);
+        DeleteObject(bm);
+    }
+    if (mdc) DeleteDC(mdc);
+    ReleaseDC(NULL, sdc);
+    return ok;
+}

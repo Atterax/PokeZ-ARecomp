@@ -293,3 +293,5 @@ int plat_rename(const char *from, const char *to) {
     if (!access(to, F_OK)) { errno = EEXIST; return -1; }
     return rename(from, to);
 }
+
+bool plat_window_screen_hash(void *hwnd, uint32_t *out) { (void)hwnd, (void)out; return false; }  // (Windows only)

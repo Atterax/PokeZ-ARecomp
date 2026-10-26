@@ -134,6 +134,8 @@ static void pick_device(void) {
 static bool g_fault_ext;
 static PFN_vkWaitForPresentKHR g_present_wait;  // (VK_KHR_present_wait: present_watch)
 static bool g_present_fifo;  // (present_watch gave up on the default present mode)
+static _Atomic uint32_t g_img_changes;  // (probe_check: the game's presented image changed - screen_watch)
+static _Atomic bool g_screen_stale;     // (screen_watch -> vk_frame_end: the window stopped showing the frames)
 static bool g_ckpt;
 static PFN_vkCmdSetCheckpointNV p_set_ckpt;
 
@@ -582,22 +584,62 @@ static int shot_thread(void *arg) {
     return 0;
 }
 
+// The window stopped showing the frames: a new swapchain, and if that happens again within a minute, FIFO presents
+// for the rest of the session.
+static void present_recover(const char *why) {
+    static uint64_t last_fix_ns;
+    static int fifo_tries;
+    uint64_t now = SDL_GetTicksNS();
+    if (g_present_fifo && fifo_tries++ >= 3) {  // (with FIFO too: nothing more to try - no new swapchain every 3 s)
+        if (fifo_tries == 4) LOG("[vk] the window still shows nothing new (%s): left as is\n", why);
+        return;
+    }
+    bool again = last_fix_ns && now - last_fix_ns < 60000000000ull;
+    LOG("[vk] the window showed nothing new for 3 s (%s): %s\n", why,
+        again && !g_present_fifo ? "FIFO presents from now on" : "new swapchain");
+    if (again) g_present_fifo = true;
+    last_fix_ns = now;
+    recreate_swapchain();
+}
+
+// What the screen really shows (#15, v0.1.8: the window froze again with the presents reported as shown - the
+// compositor kept an old image of the window): once a second, a hash of the desktop over the window (platform:
+// Windows, foreground window only). The game's image changing all along while the screen's stays the same for 3 s:
+// present_recover. LARECOMP_NO_SCREEN_WATCH=1: off; LARECOMP_TEST_SCREEN_STALE=1: a screen that never changes
+// (also hidden / unfocused windows: tests the recovery).
+bool plat_window_screen_hash(void *hwnd, uint32_t *out);  // (runtime/platform: false = can't tell)
+static int screen_watch(void *arg) {
+    (void)arg;
+    bool test = ENV("LARECOMP_TEST_SCREEN_STALE") != NULL, have = false;
+    uint32_t last_scr = 0, last_img = 0;
+    int stale = 0;
+    for (;;) {
+        SDL_Delay(1000);
+        void *hwnd = SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
+        uint32_t scr = 0, img = atomic_load(&g_img_changes);
+        if (!test && !plat_window_screen_hash(hwnd, &scr)) { have = false, stale = 0; continue; }
+        stale = have && scr == last_scr && img - last_img >= 5 ? stale + 1 : 0;  // (the game's image moving meanwhile)
+        have = true, last_scr = scr, last_img = img;
+        if (stale >= 3) { atomic_store(&g_screen_stale, true); stale = 0; }
+    }
+    return 0;
+}
+
 // A window that stops showing the frames (#15: a GTX 1660 Super's window froze after about an hour while the game went
 // on presenting at 30 fps - sound on, F1's menu never seen; every present returned VK_SUCCESS). Checked with
 // VK_KHR_present_wait while the window has the focus: nothing shown for 3 s gets a new swapchain, and if that happens
 // again within a minute, FIFO presents for the rest of the session. LARECOMP_PRESENT_WATCH_ANY=1: also unfocused /
 // hidden windows (a test: a hidden window shows nothing).
 static void present_watch(uint64_t id) {
-    static uint64_t probe, probe_ns, last_fix_ns;
+    static uint64_t probe, probe_ns;
     static int any = -1;
     if (!g_present_wait) return;
     if (any < 0) any = ENV("LARECOMP_PRESENT_WATCH_ANY") != NULL;
     uint64_t now = SDL_GetTicksNS();
     SDL_WindowFlags f = SDL_GetWindowFlags(window);
-    if (!any && (!(f & SDL_WINDOW_INPUT_FOCUS) || (f & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_OCCLUDED | SDL_WINDOW_HIDDEN)))) {
-        probe = 0;  // (a covered or minimised window may rightly show nothing)
-        return;
-    }
+    if (!any && (f & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN))) { probe = 0; return; }
+    // (a window in the background may rightly show nothing: only said in the log, at most 10 times)
+    bool focused = any || ((f & SDL_WINDOW_INPUT_FOCUS) && !(f & SDL_WINDOW_OCCLUDED));
     if (!probe) { probe = id; probe_ns = now; return; }
     VkResult r = g_present_wait(g_vk.dev, g_vk.swapchain, probe, 0);
     if (r == VK_SUCCESS) { probe = 0; return; }
@@ -608,13 +650,17 @@ static void present_watch(uint64_t id) {
         return;
     }
     if (now - probe_ns < 3000000000ull) return;
-    bool again = last_fix_ns && now - last_fix_ns < 60000000000ull;
-    LOG("[vk] the window showed nothing for 3 s (present %llu not shown, now %llu): %s\n", (unsigned long long)probe,
-        (unsigned long long)id, again && !g_present_fifo ? "FIFO presents from now on" : "new swapchain");
-    if (again) g_present_fifo = true;
-    last_fix_ns = now;
+    if (!focused) {
+        static int n;
+        if (n++ < 10) LOG("[vk] the window showed nothing for 3 s without the focus (present %llu not shown) - left as is\n",
+                          (unsigned long long)probe);
+        probe = 0;
+        return;
+    }
+    char why[96];
+    snprintf(why, sizeof why, "present %llu not shown, now %llu", (unsigned long long)probe, (unsigned long long)id);
     probe = 0;
-    recreate_swapchain();
+    present_recover(why);
 }
 
 // The window thread (ui_run) away from its event loop: Windows then shows a frozen copy of the window that takes the
@@ -667,6 +713,13 @@ void vk_frame_end(const char *shot_path) {
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) recreate_swapchain();
     else if (r == VK_SUCCESS) present_watch(id);
     ui_watch();
+    static bool sw_started;
+    if (!sw_started) {
+        sw_started = true;
+        SDL_Thread *t = ENV("LARECOMP_NO_SCREEN_WATCH") ? NULL : SDL_CreateThread(screen_watch, "screenwatch", NULL);
+        if (t) SDL_DetachThread(t);
+    }
+    if (atomic_exchange(&g_screen_stale, false)) present_recover("the screen kept an old image of the window");
     cur_frame.ok = false;
     if (shot_path) {
         // (the PNG is encoded on a thread of its own: done here it held the frame ~250 ms - a periodic hitch with
@@ -740,6 +793,35 @@ static void probe_check(Probe *p) {
             (unsigned long long)(p->frame - probe_dark_since));
     if (mean < 3 && prev >= 3) probe_dark_since = p->frame;
     prev = mean, prev_frame = p->frame, prev_tex = p->tex;
+    // [freeze]: the game's own image the same for 10 s (a menu or a still screen can be; #15: tells "the game stopped
+    // drawing" from "the window stopped showing what it draws")
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < 32 * 18 * 4; i++) h = (h ^ px[i]) * 16777619u;
+    static uint32_t last_h;
+    static uint64_t same_ns, same_frame;
+    static bool frozen;
+    static int nf;
+    uint64_t now = SDL_GetTicksNS();
+    {   // (screen_watch: only a change of 10% or more of the samples - one a screen grab can't miss)
+        static uint8_t prev_px[32 * 18 * 4];
+        int moved = 0;
+        for (int i = 0; i < 32 * 18; i++) {
+            int d = 0;
+            for (int c = 0; c < 3; c++) d += abs((int)px[4 * i + c] - prev_px[4 * i + c]);
+            moved += d > 24;
+        }
+        memcpy(prev_px, px, sizeof prev_px);
+        if (moved >= 32 * 18 / 10) atomic_fetch_add(&g_img_changes, 1);
+    }
+    if (h != last_h || !same_ns) {
+        if (frozen && nf <= 30) LOG("[freeze] the game's image changes again at frame %llu\n", (unsigned long long)p->frame);
+        frozen = false, last_h = h, same_ns = now, same_frame = p->frame;
+    } else if (!frozen && now - same_ns > 10000000000ull) {
+        frozen = true;
+        if (nf++ < 30)
+            LOG("[freeze] the game's image hasn't changed for 10 s (frames %llu-%llu, mean %.1f, texture %p %ux%u)\n",
+                (unsigned long long)same_frame, (unsigned long long)p->frame, mean, p->tex, p->w, p->h);
+    }
 }
 
 static void black_probe(TexBackend *b, const void *tex, uint64_t frame) {
@@ -1016,6 +1098,28 @@ void backend_clear_window(void) {
     if (g_vk.dev && vk_frame_begin(black)) vk_frame_end(NULL);
 }
 
+// [window]: what happens to the window (focus, minimised, covered, display) - #15: a window that stops responding
+static void window_event_log(const SDL_Event *e) {
+    static int n;
+    const char *what = NULL;
+    switch (e->type) {
+    case SDL_EVENT_WINDOW_FOCUS_GAINED: what = "focus gained"; break;
+    case SDL_EVENT_WINDOW_FOCUS_LOST: what = "focus lost"; break;
+    case SDL_EVENT_WINDOW_MINIMIZED: what = "minimised"; break;
+    case SDL_EVENT_WINDOW_RESTORED: what = "restored"; break;
+    case SDL_EVENT_WINDOW_MAXIMIZED: what = "maximised"; break;
+    case SDL_EVENT_WINDOW_SHOWN: what = "shown"; break;
+    case SDL_EVENT_WINDOW_HIDDEN: what = "hidden"; break;
+    case SDL_EVENT_WINDOW_OCCLUDED: what = "covered"; break;
+    case SDL_EVENT_WINDOW_DISPLAY_CHANGED: what = "moved to another display"; break;
+    case SDL_EVENT_WINDOW_ENTER_FULLSCREEN: what = "fullscreen"; break;
+    case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN: what = "windowed"; break;
+    case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED: what = "resized"; break;
+    default: return;
+    }
+    if (n++ < 300) LOG("[window] %s (t=%.1f)\n", what, SDL_GetTicks() / 1000.0);
+}
+
 int ui_run(void) {
     ui_window_init();
     atomic_store(&ui_ready, true);
@@ -1026,6 +1130,7 @@ int ui_run(void) {
         atomic_store(&ui_stage, "waiting for events");
         while (SDL_WaitEventTimeout(&e, 16)) {
             atomic_store(&ui_beat, SDL_GetTicksNS());
+            window_event_log(&e);
             if (e.type == SDL_EVENT_QUIT) {
                 LOG("window closed\n");
                 exit(0);

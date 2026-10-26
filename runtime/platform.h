@@ -70,6 +70,9 @@ const char *plat_symbol(uint64_t pc, uint64_t *offset);
 void plat_print_backtrace(void);
 void plat_fatal_notice(void);  // a fatal error is about to end the process: tell the user (Windows release: message box)
 void plat_crash_handler_install(void);  // per thread where the OS needs it (alternate signal stack)
+// What the screen shows in a window (Windows: a hash of 32x18 samples of the desktop over its client area, while it
+// is the foreground window; false: can't tell)
+bool plat_window_screen_hash(void *hwnd, uint32_t *out);
 // Called by the crash handler (runtime/dispatch.c): true = fault handled (watchpoint), resume.
 bool rt_fault_watch(uint64_t fault_addr, uint64_t host_pc);
 void rt_fault_report(const char *what, uint64_t fault_addr, uint64_t host_pc, uint64_t host_lr) __attribute__((noreturn));
