@@ -461,14 +461,15 @@ static void tab_display(void) {
     {   // Pokémon Z-A's frame mode (runtime/hle/framepace.c rt_za_frame_cfg): applies from the next frame
         extern bool g_za_frame_hook, g_fps60_fell_back;
         if (g_za_frame_hook) {
-            int fr = g_settings.fps60 ? 1 : 0;
-            static const char *rates[] = {"30 fps (Switch)", "60 fps (experimental)"};
-            if (opt_choice("Frame rate", &fr, rates, 2, 0,
+            int fr = g_settings.fps60 ? (g_settings.fps60_lock ? 2 : 1) : 0;
+            static const char *rates[] = {"30 fps (Switch)", "60 fps (experimental)", "60 fps (always)"};
+            if (opt_choice("Frame rate", &fr, rates, 3, 0,
                            "30 fps: as on the Switch (recommended). 60 fps (experimental): the game presents every vsync "
                            "and steps its world 1/60 s a frame - smoother, but it needs a fast CPU: the game counts "
                            "frames, not time, so below 60 fps everything moves in slow motion. When this PC doesn't "
-                           "keep 60, ZA Recomp goes back to 30 by itself (choose 60 again to retry)."))
-                g_settings.fps60 = fr == 1;
+                           "keep 60, ZA Recomp goes back to 30 by itself (choose 60 again to retry). 60 fps (always): "
+                           "never goes back to 30 - the game slows down whenever the frame rate drops below 60."))
+                g_settings.fps60 = fr >= 1, g_settings.fps60_lock = fr == 2;
             if (g_settings.fps60 && g_fps60_fell_back)
                 ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "Running at 30 fps: this PC didn't keep 60 fps.");
         }

@@ -65,6 +65,7 @@ typedef struct {
     int tunic;           // index into g_tunic_colours (0 = Default: the game's / the seed's own)
     int hearts;          // index into g_heart_colours (0 = Default red)
     char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
+    bool fps60_lock;  // with fps60: stays at 60 even when this PC can't hold it (slow motion below; runtime/hle/framepace.c)
 } Settings;
 
 enum { N_TUNIC_COLOURS = 13, N_HEART_COLOURS = 9 };

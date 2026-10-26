@@ -49,7 +49,8 @@ uint32_t rt_frame_steps(uint32_t interval) {
 // = 58% speed; the CPU-side game code couldn't keep up, an RTX 4060 waiting half the time). So the setting backs off
 // by itself: presented below FPS60_MIN for FPS60_SLOW_S seconds in a row (after FPS60_WARM_S to settle - shaders
 // building right after the switch), the game goes back to 30 fps for the rest of the session and the overlay says so
-// (menu_notice). Choosing 60 again in F1 tries again. LARECOMP_FPS=30: as is; LARECOMP_FPS=60: 60, no backing off.
+// (menu_notice). Choosing 60 again in F1 tries again. LARECOMP_FPS=30: as is; LARECOMP_FPS=60 or F1's "60 fps (always)"
+// (fps60_lock): 60, no backing off - for players who'd rather have some slow motion than 30 fps.
 // Seconds spent building shaders count neither way (#22: an RX 9070 XT with a cold pipeline cache had three 1-2 s
 // shader stalls in a battle and went back to 30 for the session, holding 60 otherwise).
 #include "../settings.h"
@@ -64,11 +65,13 @@ static bool fps60_holds(void) {
     extern void menu_notice(const char *text, int seconds);
     static int last_setting = -1, warm, slow;
     static uint64_t t0, p0;
-    if (last_setting != (int)g_settings.fps60) {  // (chosen again in F1: a new try)
-        last_setting = g_settings.fps60;
+    int setting = g_settings.fps60 | g_settings.fps60_lock << 1;
+    if (last_setting != setting) {  // (chosen again in F1: a new try)
+        last_setting = setting;
         g_fps60_fell_back = false, warm = slow = 0, t0 = 0;
     }
     if (!g_settings.fps60 || g_fps60_fell_back) return false;
+    if (g_settings.fps60_lock) return true;
     uint64_t now = plat_now_ns(), pc = renderer_present_count();
     if (!t0) { t0 = now, p0 = pc; return true; }
     if (now - t0 < 1000000000ull) return true;
