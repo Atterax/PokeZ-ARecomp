@@ -213,12 +213,20 @@ static void create_device(void) {
     // (LARECOMP_VK_DEVLOST_TRACE: the last draw / dispatch reached, from the driver)
     g_ckpt = ENV("LARECOMP_VK_DEVLOST_TRACE") && has_ext(ep, ne, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
     if (g_ckpt) ext[n_ext++] = VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME;
+    // Shader reads past the buffer / image they were given: zeros instead of a GPU page fault (#22: an RX 9070 XT lost
+    // the device on an invalid read in a battle, where NVIDIA reads on). LARECOMP_VK_ROBUST2=0 leaves it off.
+    bool x_rb2 = !(ENV("LARECOMP_VK_ROBUST2") && !atoi(ENV("LARECOMP_VK_ROBUST2"))) &&
+                 has_ext(ep, ne, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)
-    VkPhysicalDeviceVulkan12Features have12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    VkPhysicalDeviceRobustness2FeaturesEXT have_rb2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
+    VkPhysicalDeviceVulkan12Features have12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+                                               .pNext = x_rb2 ? &have_rb2 : NULL};
     VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &have12};
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
+    x_rb2 = x_rb2 && have.features.robustBufferAccess && have_rb2.robustBufferAccess2 && have_rb2.robustImageAccess2;
+    if (x_rb2) ext[n_ext++] = VK_EXT_ROBUSTNESS_2_EXTENSION_NAME;
     if (!have12.shaderOutputLayer) LOG("[vk] warning: no shaderOutputLayer (vertex shaders choosing the render target layer)\n");
     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT div = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT,
@@ -227,6 +235,9 @@ static void create_device(void) {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT, .customBorderColors = VK_TRUE,
         .customBorderColorWithoutFormat = VK_TRUE, .pNext = g_vk.divisor ? &div : NULL};
     void *tail = g_vk.custom_border ? (void *)&cbc : g_vk.divisor ? (void *)&div : NULL;
+    VkPhysicalDeviceRobustness2FeaturesEXT rb2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT,
+                                                  .robustBufferAccess2 = VK_TRUE, .robustImageAccess2 = VK_TRUE, .pNext = tail};
+    if (x_rb2) tail = &rb2;
     VkPhysicalDeviceVulkan13Features f13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
                                             .dynamicRendering = VK_TRUE, .synchronization2 = VK_TRUE, .subgroupSizeControl = VK_TRUE,
                                             .shaderDemoteToHelperInvocation = VK_TRUE, .shaderTerminateInvocation = VK_TRUE,
@@ -321,6 +332,7 @@ static void create_device(void) {
         VK_API_VERSION_MAJOR(g_vkc.api), VK_API_VERSION_MINOR(g_vkc.api), ENV("LARECOMP_VK_COMPAT") ? " (LARECOMP_VK_COMPAT)" : "",
         g_vkc.render_pass ? "no (render passes)" : "yes", g_vkc.sync1 ? "no (Vulkan 1.0 barriers)" : "yes",
         g_vkc.no_eds1 ? "no (in the pipelines)" : "yes", g_vkc.no_eds2 ? "no (in the pipelines)" : "yes");
+    LOG("[vk] robust buffer / image access 2: %s\n", x_rb2 ? "yes" : "no");
 
     // (VMA's commands from the driver too, as above)
     VmaVulkanFunctions vf = {.vkGetInstanceProcAddr = vkGetInstanceProcAddr, .vkGetDeviceProcAddr = vkGetDeviceProcAddr};

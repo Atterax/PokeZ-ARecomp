@@ -2568,7 +2568,7 @@ static void vc_free_dead(bool all) {
 static bool vc_drop(VcEnt *e) {  // (freed once the submissions that may read it are done)
     if (vc_ndead == VC_DEAD) { vk_wait_seq(vk_pending_seq() - 1); vc_free_dead(false); }
     if (vc_ndead == VC_DEAD) return false;  // (all read by the pending submission: keep it)
-    vc_dead[vc_ndead].b = e->buf; vc_dead[vc_ndead].m = e->mem; vc_dead[vc_ndead++].seq = e->used_seq;
+    vc_dead[vc_ndead].b = e->buf; vc_dead[vc_ndead].m = e->mem; vc_dead[vc_ndead++].seq = e->used_seq + VK_DEAD_MARGIN;
     vc_bytes -= e->hi - e->lo;
     memset(e, 0, sizeof *e);
     return true;

@@ -151,6 +151,9 @@ extern VkG g_vk;
 VkCommandBuffer vk_cmd(void);         // current command buffer (outside any rendering unless exec.c began one)
 VkCommandBuffer vk_upload_cmd(void);  // upload command buffer of the pending submission
 uint64_t vk_pending_seq(void);        // number the pending submission will get
+// Resources the guest is done with are destroyed this many submissions after the last one that may use them: a
+// destroyed buffer / image still read by the GPU is a page fault and a lost device on AMD (#22), NVIDIA reads on
+#define VK_DEAD_MARGIN 2
 uint64_t vk_completed_seq(void);
 void vk_wait_seq(uint64_t seq);
 void vk_full_barrier(VkCommandBuffer cb);

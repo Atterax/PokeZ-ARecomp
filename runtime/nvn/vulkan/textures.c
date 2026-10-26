@@ -375,7 +375,7 @@ static void create_image(NvnTexture *t, TexBackend *b) {
 
 static void defer(Dead d) {
     if (ndead == cap_dead) { cap_dead = cap_dead ? cap_dead * 2 : 256; dead = realloc(dead, cap_dead * sizeof *dead); }
-    d.seq = vk_pending_seq();
+    d.seq = vk_pending_seq() + VK_DEAD_MARGIN;
     dead[ndead++] = d;
 }
 
