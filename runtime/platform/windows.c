@@ -565,36 +565,62 @@ static void samp_add(uint64_t rip, uint32_t tid) {
 // LARECOMP_SAMPLE_EXEC=1 (with LARECOMP_SAMPLE): only the thread running the game's command lists (plat_sample_focus,
 // from runtime/nvn/vulkan/exec.c), ~1 kHz, each sample its whole call stack (RtlVirtualUnwind) -> build/stacks.txt:
 // "M <base> <size> <module path>" lines, then one "S <rip> <caller> <caller's caller> ..." line per sample
-// (tools/za/stacks.py: self and inclusive time per function).
+// (tools/za/stacks.py: self and inclusive time per function). LARECOMP_SAMPLE_EXEC=all: every thread instead, a stack
+// only when it runs (not waiting inside ntdll / KernelBase / win32u) - who does the work while the game is held up.
 static volatile DWORD g_focus_tid;
 void plat_sample_focus(void) { if (!g_focus_tid) g_focus_tid = GetCurrentThreadId(); }
 #define STK_DEPTH 24
 static DWORD WINAPI stack_sampler(double dur) {
-    while (!g_focus_tid) Sleep(10);
-    HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, g_focus_tid);
-    if (!h) return 0;
-    size_t cap = (size_t)(dur * 1100) + 64, n = 0;
+    bool all = !strcmp(getenv("LARECOMP_SAMPLE_EXEC"), "all");
+    HANDLE hs[256];
+    int nh = 0;
+    if (all) {
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        THREADENTRY32 te = {.dwSize = sizeof te};
+        for (BOOL ok = Thread32First(snap, &te); ok && nh < 256; ok = Thread32Next(snap, &te))
+            if (te.th32OwnerProcessID == GetCurrentProcessId() && te.th32ThreadID != GetCurrentThreadId())
+                if ((hs[nh] = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, te.th32ThreadID))) nh++;
+        CloseHandle(snap);
+    } else {
+        while (!g_focus_tid) Sleep(10);
+        if ((hs[0] = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, g_focus_tid))) nh = 1;
+    }
+    if (!nh) return 0;
+    uint64_t wait_lo[3] = {0}, wait_hi[3] = {0};  // (all: the modules a waiting thread sits in)
+    static const char *const wait_mods[3] = {"ntdll.dll", "KernelBase.dll", "win32u.dll"};
+    for (int i = 0; i < 3; i++) {
+        MODULEINFO mi;
+        HMODULE m = GetModuleHandleA(wait_mods[i]);
+        if (m && K32GetModuleInformation(GetCurrentProcess(), m, &mi, sizeof mi))
+            wait_lo[i] = (uint64_t)(uintptr_t)mi.lpBaseOfDll, wait_hi[i] = wait_lo[i] + mi.SizeOfImage;
+    }
+    size_t cap = (size_t)(dur * 1100) * (all ? 8 : 1) + 64, n = 0;
     uint64_t (*stk)[STK_DEPTH] = calloc(cap, sizeof *stk);
     ULONGLONG end = GetTickCount64() + (ULONGLONG)(dur * 1000);
     while (GetTickCount64() < end && n < cap) {
-        CONTEXT c = {.ContextFlags = CONTEXT_FULL};
-        if (SuspendThread(h) == (DWORD)-1) break;
-        if (GetThreadContext(h, &c)) {  // (unwound while it is suspended: its stack can't change)
-            for (int d = 0; d < STK_DEPTH && c.Rip; d++) {
-                stk[n][d] = c.Rip;
-                DWORD64 base;
-                PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(c.Rip, &base, NULL);
-                if (!fe) { c.Rip = *(const DWORD64 *)(uintptr_t)c.Rsp; c.Rsp += 8; continue; }  // (a leaf: no frame)
-                void *hd;
-                DWORD64 ef;
-                RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Rip, fe, &c, &hd, &ef, NULL);
+        for (int t = 0; t < nh && n < cap; t++) {
+            HANDLE h = hs[t];
+            CONTEXT c = {.ContextFlags = CONTEXT_FULL};
+            if (SuspendThread(h) == (DWORD)-1) continue;
+            bool waiting = false;
+            if (GetThreadContext(h, &c)) {  // (unwound while it is suspended: its stack can't change)
+                for (int i = 0; all && i < 3; i++) waiting |= c.Rip >= wait_lo[i] && c.Rip < wait_hi[i];
+                for (int d = 0; !waiting && d < STK_DEPTH && c.Rip; d++) {
+                    stk[n][d] = c.Rip;
+                    DWORD64 base;
+                    PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(c.Rip, &base, NULL);
+                    if (!fe) { c.Rip = *(const DWORD64 *)(uintptr_t)c.Rsp; c.Rsp += 8; continue; }  // (a leaf: no frame)
+                    void *hd;
+                    DWORD64 ef;
+                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Rip, fe, &c, &hd, &ef, NULL);
+                }
+                if (!waiting) n++;
             }
-            n++;
+            ResumeThread(h);
         }
-        ResumeThread(h);
         Sleep(1);
     }
-    CloseHandle(h);
+    for (int t = 0; t < nh; t++) CloseHandle(hs[t]);
     FILE *f = fopen("build/stacks.txt", "w");
     if (f) {
         HMODULE mods[512];

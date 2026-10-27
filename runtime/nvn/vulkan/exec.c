@@ -1737,13 +1737,22 @@ static const VkDynamicState DYN[] = {
 #define NDYN (sizeof DYN / sizeof DYN[0])
 // The dynamic states the pipelines take: without extended dynamic state 1 / 2 (vk.h VkCompat), their states (DYN[7..14],
 // DYN[15..16]) go into the pipelines instead.
+// (made once, but by whichever builds come first - Pokémon Z-A's startup shader preparation starts dozens on the
+// workers at once: each fills its own copy and stores the same values, then the count. The shared count it counted up
+// before ran past the array when two threads filled it together - garbage dynamic states, an NVIDIA driver crash in
+// vkCreateGraphicsPipelines about 1 start in 6)
 static const VkDynamicState *dyn_states(uint32_t *n) {
-    static VkDynamicState d[sizeof DYN / sizeof DYN[0]];
-    static uint32_t nd;
-    if (!nd)
-        for (uint32_t i = 0; i < sizeof DYN / sizeof DYN[0]; i++)
-            if (!(g_vkc.no_eds1 && i >= 7 && i <= 14) && !(g_vkc.no_eds2 && i >= 15)) d[nd++] = DYN[i];
-    *n = nd;
+    static VkDynamicState d[NDYN];
+    static _Atomic uint32_t nd;
+    uint32_t c = atomic_load(&nd);
+    if (!c) {
+        VkDynamicState t[NDYN];
+        for (uint32_t i = 0; i < NDYN; i++)
+            if (!(g_vkc.no_eds1 && i >= 7 && i <= 14) && !(g_vkc.no_eds2 && i >= 15)) t[c++] = DYN[i];
+        memcpy(d, t, sizeof t);
+        atomic_store(&nd, c);
+    }
+    *n = c;
     return d;
 }
 
