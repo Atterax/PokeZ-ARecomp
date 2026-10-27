@@ -41,6 +41,7 @@ extern "C" {
 #include "settings.h"
 #include "input_bind.h"
 void controls_bindings_draw(float scale);  // ui/controls_ui.mm
+void input_mouse_release(SDL_Window *w);   // runtime/hle/input.c
 void ui_window_init(void);
 SDL_Window *ui_window(void);
 #ifdef __APPLE__
@@ -1709,6 +1710,7 @@ extern "C" void launcher_run(const char *root) {
     ui_window_init();
     SDL_Window *win = ui_window();
     g_launcher_win = win;
+    input_mouse_release(win);  // (back from the game: its mouse camera held the cursor)
 #ifdef __APPLE__
     CAMetalLayer *layer = (__bridge CAMetalLayer *)ui_metal_layer();
     id<MTLDevice> dev = (__bridge id<MTLDevice>)ui_metal_device();
