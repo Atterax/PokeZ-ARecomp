@@ -434,6 +434,10 @@ void backend_texture_destroyed(NvnTexture *t) {
     if (b) {
         extern void vk_alias_texture_destroyed(NvnTexture *t);  // (exec.c copy aliases: a source's contents handed over)
         vk_alias_texture_destroyed(t);
+        extern void vk_exec_texture_destroyed(NvnTexture *t);  // (exec.c: bound render targets and snapshots forget it)
+        vk_exec_texture_destroyed(t);
+        extern void vk_device_texture_destroyed(NvnTexture *t);  // (device.c: the last presented texture)
+        vk_device_texture_destroyed(t);
         hd_forget(t);
         live_remove(b);
         destroy_image(b);

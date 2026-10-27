@@ -758,6 +758,7 @@ uint64_t vk_frame_counter(void) { return g_frame_counter; }
 static float g_shot_crop[4] = {0, 0, 1, 1};
 static double last_fps_time;
 static NvnTexture *g_last_presented;
+void vk_device_texture_destroyed(NvnTexture *t) { if (g_last_presented == t) g_last_presented = NULL; }  // (textures.c)
 
 const float *vk_shot_crop(void) { return g_shot_crop; }
 
