@@ -7,6 +7,7 @@
 
 #include "../hle.h"
 #include "../input_bind.h"
+#include "../settings.h"
 
 _Static_assert(PADB_LTRIGGER == SDL_GAMEPAD_BUTTON_COUNT, "trigger pseudo-buttons follow SDL's buttons");
 
@@ -111,6 +112,18 @@ int bind_label_family(void) {
     bool any = ids && n > 0;
     SDL_free(ids);
     return any ? input_family_of_type(t) : 0;
+}
+
+// What "Auto" button icons stand for right now (PROMPTS_*, never AUTO), by the same rule runtime/hle/pl.c
+// pl_prompt_set uses at boot: a Steam Deck (unless a PlayStation pad is on it) its own; no controller the keyboard's;
+// else the controller's family. (The menus' "Auto (...)" names this.)
+int bind_prompts_auto(void) {
+    extern int settings_on_steam_deck(void);  // runtime/settings.c
+    bool pad = SDL_HasGamepad();
+    int fam = pad ? bind_label_family() : 0;
+    if (settings_on_steam_deck() && fam != 2) return PROMPTS_STEAMDECK;
+    if (!pad) return PROMPTS_KEYBOARD;
+    return fam == 1 ? PROMPTS_XBOX : fam == 2 ? PROMPTS_PLAYSTATION : PROMPTS_NINTENDO;
 }
 
 static void result(int kind, int dev, int slot, int other);
