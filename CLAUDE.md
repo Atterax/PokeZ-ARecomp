@@ -8,8 +8,13 @@ Machine-specific paths (game files, install folder) are in `CLAUDE.local.md` whe
 
 ## Where things are
 
-- `tools/gen.py`, `lifter.py`, `analyze.py`, `passes.py`, `patches.py`, `simd_c.py`: the generator, which turns ARM64
-  into C. Players' machines run it from the start screen (`runtime/gamebuild.c`).
+- `tools/gen.py`, `lifter.py`, `analyze.py`, `patches.py`, `simd_c.py`, `flagfuse.py`, `za_patches.py`: the generator,
+  which turns ARM64 into C. Players' machines run it from the start screen (`runtime/gamebuild.c`). `flagfuse.py`
+  fuses a compare with its branch when nothing else reads the flags (a flag-liveness pass; Z-A's battle-loading freeze
+  1.36 s -> 0.6 s). (`tools/passes.py` is a log summarizer, not part of the generator.)
+- Dev rebuild of the game code: `cd tools && PYTHONUTF8=1 ../build/gen-venv/Scripts/python.exe gen.py main
+  ../testroot/extracted/exefs/main 0x7000000000 ../generated/main --simd c` (and `sdk ... 0x7008000000 ../generated/sdk
+  --hle ../runtime/hle/hle_symbols.txt`), then `make ... build/za-dist/lasgame.dll` (~20 min).
 - `runtime/kernel.c`: threads, mutexes and condvars, the address arbiter, the memory map, SVCs.
 - `runtime/services/fs.c`: the RomFS, the mod layers (`mods/<name>/romfs`, with `arc/data.trpfd` unlisting) and the
   save files (`save/save_0/`).
@@ -86,8 +91,8 @@ One-time setup: `tools/setup_windows.ps1` (MSYS2 UCRT64 toolchain). Fast exe reb
   - `LARECOMP_RENDER_THREAD=0` (translate on the game thread), `LARECOMP_VK_RECORDER=0`, `LARECOMP_VK_NO_SET_REUSE=1`,
     `LARECOMP_VK_NO_KEY_MEMO=1`, `LARECOMP_VK_NO_CBUF_LEAN=1`
   - `LARECOMP_VK_PAGES_OUTSIDE=0`, `LARECOMP_VK_NO_SLOT_MEMO=1`
-- Unit and fuzz tests exist (`tools/test_translate.sh`, `test_vk_pipelines.sh`, `test_lift.py`, `test_simd.py`) but
-  there is no CI. Most checks are real game runs.
+- Unit and fuzz tests exist (`tools/test_translate.sh`, `test_vk_pipelines.sh`, `test_lift.py`, `test_simd.py`,
+  `test_flagfuse.py`) but there is no CI. Most checks are real game runs.
 
 ## Rules
 

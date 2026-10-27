@@ -17,6 +17,7 @@ from collections import Counter
 import unicorn as uc
 from unicorn import arm64_const as A
 
+import flagfuse
 from analyze import eh_frame_functions
 from lifter import Insn, Lifter, Unsupported, bits, emit_asm_batch, hx, sext
 from nso import Nso, R_AARCH64_RELATIVE
@@ -446,12 +447,25 @@ class Module:
                     if not entry <= t < end:
                         raise ValueError(f'hook {a:#x}: target {t:#x} is outside its function')
                     labels.add(t)
+        # compare + branch pairs whose flags nothing else reads: one `if` (tools/flagfuse.py). Not where entries hide.
+        fuse = {}
+        if not (all_labels or rando_here or hooks_here or any(a in PATCHES for a in range(entry, end, 4))):
+            fuse = flagfuse.plan({a: self.lift(a) for a in range(entry, end, 4)}, entry, end, labels, tables)
+            self.stats['flag_fused'] += len(fuse)
         last = None
         for a in range(entry, end, 4):
             ins = self.lift(a)
             if a in labels:
                 flush()
                 out.append(f'L_{a:x}:;')
+            if a - 4 in fuse:  # (the branch: in its compare's statement)
+                last = 'bcond'
+                continue
+            if a in fuse:
+                flush()
+                out.append('    ' + fuse[a].replace('{JUMP}', jump(self.lift(a + 4).target)))
+                last = 'bcond'
+                continue
             if a - self.base in RANDO_CODE:  # randomizer patch site: the active seed picks the instruction
                 flush()
                 out.append(f'    {{ extern uint32_t rando_word(uint64_t); uint32_t rw = rando_word({hx(a)});')
