@@ -31,6 +31,7 @@ extern "C" void vk_overlay_end(void *window_cmd, void *cmd);
 extern "C" {
 #include "../hle.h"
 #include "../settings.h"
+extern int g_game_is_la;  // runtime/kernel.c: Link's Awakening (its own tabs: randomizer, warp, cheats...)
 #include "menu.h"
 void input_reset(void);
 void save_editor_draw(float scale);  // save_editor.mm
@@ -47,6 +48,8 @@ bool rando_tab_took_back(void);  // rando_tab.mm: B went back from the Triforce 
 #include "../input_bind.h"
 #include "../paths.h"
 }
+
+#define TR(en, pt) UI_TR(en, pt)  // (runtime/settings.h: English, or Portuguese as the start screen's PT | EN)
 
 // ------------------------------------------------------------------ state shared with the main thread
 static std::atomic<bool> g_open{false};
@@ -311,37 +314,46 @@ void menu_tabs_focus(bool first_tab) {
 }
 int g_tab_request_ext = -1;
 
+// ZA Recomp's look, as its start screen: night blue panels, gold for what's selected, teal for headings
 static void style_init(void) {
     ImGuiStyle &s = ImGui::GetStyle();
     ImGui::StyleColorsDark();
-    s.WindowRounding = 14; s.FrameRounding = 8; s.GrabRounding = 8; s.TabRounding = 8; s.ChildRounding = 10;
+    s.WindowRounding = 18; s.FrameRounding = 10; s.GrabRounding = 10; s.TabRounding = 10; s.ChildRounding = 14;
+    s.PopupRounding = 14;
     s.WindowPadding = ImVec2(28, 24); s.FramePadding = ImVec2(14, 8); s.ItemSpacing = ImVec2(14, 12);
-    s.WindowBorderSize = 0; s.ScrollbarSize = 18;
+    s.WindowBorderSize = 1; s.PopupBorderSize = 1; s.ScrollbarSize = 16; s.TabBarBorderSize = 1;
     ImVec4 *c = s.Colors;
-    ImVec4 gold(0.93f, 0.76f, 0.33f, 1), gold_dim(0.62f, 0.49f, 0.20f, 1), green(0.15f, 0.36f, 0.25f, 1);
-    c[ImGuiCol_WindowBg] = ImVec4(0.06f, 0.09f, 0.08f, 0.94f);
-    c[ImGuiCol_ChildBg] = ImVec4(0.09f, 0.13f, 0.11f, 0.85f);
-    c[ImGuiCol_PopupBg] = ImVec4(0.07f, 0.10f, 0.09f, 0.98f);
-    c[ImGuiCol_Text] = ImVec4(0.96f, 0.94f, 0.88f, 1);
-    c[ImGuiCol_TextDisabled] = ImVec4(0.62f, 0.64f, 0.58f, 1);
-    c[ImGuiCol_FrameBg] = ImVec4(0.13f, 0.19f, 0.16f, 1);
-    c[ImGuiCol_FrameBgHovered] = green;
-    c[ImGuiCol_FrameBgActive] = ImVec4(0.19f, 0.45f, 0.31f, 1);
-    c[ImGuiCol_Button] = ImVec4(0.14f, 0.22f, 0.18f, 1);
-    c[ImGuiCol_ButtonHovered] = green;
-    c[ImGuiCol_ButtonActive] = ImVec4(0.21f, 0.50f, 0.34f, 1);
-    c[ImGuiCol_Header] = green;
-    c[ImGuiCol_HeaderHovered] = ImVec4(0.19f, 0.45f, 0.31f, 1);
-    c[ImGuiCol_HeaderActive] = ImVec4(0.21f, 0.50f, 0.34f, 1);
-    c[ImGuiCol_Tab] = ImVec4(0.12f, 0.18f, 0.15f, 1);
-    c[ImGuiCol_TabHovered] = green;
-    c[ImGuiCol_TabSelected] = ImVec4(0.21f, 0.44f, 0.31f, 1);
+    ImVec4 gold(0.95f, 0.71f, 0.27f, 1), gold_dim(0.62f, 0.47f, 0.18f, 1), glass(1, 1, 1, 0.07f), glass_hi(1, 1, 1, 0.13f);
+    c[ImGuiCol_WindowBg] = ImVec4(0.03f, 0.07f, 0.12f, 0.95f);
+    c[ImGuiCol_ChildBg] = ImVec4(0.05f, 0.10f, 0.16f, 0.80f);
+    c[ImGuiCol_PopupBg] = ImVec4(0.04f, 0.09f, 0.15f, 0.98f);
+    c[ImGuiCol_Border] = ImVec4(1, 1, 1, 0.10f);
+    c[ImGuiCol_Text] = ImVec4(0.93f, 0.95f, 0.96f, 1);
+    c[ImGuiCol_TextDisabled] = ImVec4(0.62f, 0.70f, 0.76f, 1);
+    c[ImGuiCol_FrameBg] = glass;
+    c[ImGuiCol_FrameBgHovered] = glass_hi;
+    c[ImGuiCol_FrameBgActive] = ImVec4(0.95f, 0.71f, 0.27f, 0.25f);
+    c[ImGuiCol_Button] = glass;
+    c[ImGuiCol_ButtonHovered] = ImVec4(0.95f, 0.71f, 0.27f, 0.30f);
+    c[ImGuiCol_ButtonActive] = ImVec4(0.95f, 0.71f, 0.27f, 0.50f);
+    c[ImGuiCol_Header] = glass_hi;
+    c[ImGuiCol_HeaderHovered] = ImVec4(0.95f, 0.71f, 0.27f, 0.22f);
+    c[ImGuiCol_HeaderActive] = ImVec4(0.95f, 0.71f, 0.27f, 0.38f);
+    c[ImGuiCol_Tab] = ImVec4(1, 1, 1, 0.04f);
+    c[ImGuiCol_TabHovered] = ImVec4(1, 1, 1, 0.12f);
+    c[ImGuiCol_TabSelected] = ImVec4(0.95f, 0.71f, 0.27f, 0.20f);
     c[ImGuiCol_TabSelectedOverline] = gold;
+    c[ImGuiCol_TabDimmed] = c[ImGuiCol_Tab];
+    c[ImGuiCol_TabDimmedSelected] = c[ImGuiCol_TabSelected];
     c[ImGuiCol_CheckMark] = gold;
     c[ImGuiCol_SliderGrab] = gold_dim;
     c[ImGuiCol_SliderGrabActive] = gold;
     c[ImGuiCol_NavCursor] = gold;
-    c[ImGuiCol_Separator] = ImVec4(0.30f, 0.36f, 0.30f, 1);
+    c[ImGuiCol_Separator] = ImVec4(1, 1, 1, 0.10f);
+    c[ImGuiCol_TableHeaderBg] = ImVec4(1, 1, 1, 0.06f);
+    c[ImGuiCol_TableRowBgAlt] = ImVec4(1, 1, 1, 0.03f);
+    c[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_ScrollbarGrab] = ImVec4(1, 1, 1, 0.14f);
     c[ImGuiCol_TitleBg] = c[ImGuiCol_TitleBgActive] = c[ImGuiCol_WindowBg];
 }
 
@@ -409,50 +421,66 @@ static void drain_events(ImGuiIO &io) {
     }
 }
 
+static bool menu_la_tabs = true;  // tabs_body: Link's Awakening's tabs and rows are shown (false: ZA Recomp's own set)
 extern "C" void renderer_get_scale(float *sx, float *sy);
 extern "C" int input_pad_family(void);  // runtime/hle/input.c
 extern "C" double output_scale_dynamic_factor(void);
 
 static void tab_display(void) {
     float scale = ImGui::GetFontSize() / 34;
+    bool la = g_game_is_la && menu_la_tabs;  // (Link's Awakening's own rows)
     opt_begin("##video", scale);
-    opt_section("Display");
-    const char *aspects[] = {"Unlocked", "Original 16:9"};
-    opt_choice("Aspect ratio", &g_settings.aspect, aspects, 2, ASPECT_UNLOCKED,
-               "Unlocked: the view fills the window, so wider (or taller) windows show more of the island - up to "
-               "ultrawide; houses and dungeons keep their framing. Original 16:9: the game's own framing, with bars.");
+    opt_section(TR("Display", "Tela"));
+    const char *aspects[] = {TR("Unlocked", "Livre"), TR("Original 16:9", "16:9 original")};
+    opt_choice(TR("Aspect ratio", "Proporção"), &g_settings.aspect, aspects, 2, ASPECT_UNLOCKED,
+               TR("Unlocked: the view fills the window, so wider (or taller) windows show more of the world - up to "
+                  "ultrawide. Original 16:9: the game's own framing, with bars.",
+                  "Livre: a imagem ocupa a janela toda, então janelas mais largas (ou mais altas) mostram mais do mundo "
+                  "- até ultrawide. 16:9 original: o enquadramento do próprio jogo, com barras."));
     bool fs = g_settings.fullscreen;
-    if (opt_toggle("Fullscreen", &fs, false, "Fills the screen. Also: F11, Alt+Enter or Cmd+Ctrl+F.")) {
+    if (opt_toggle(TR("Fullscreen", "Tela cheia"), &fs, false,
+                   TR("Fills the screen. Also: F11, Alt+Enter or Cmd+Ctrl+F.", "Ocupa a tela toda. Também: F11, Alt+Enter ou Cmd+Ctrl+F."))) {
         g_settings.fullscreen = fs;
         g_want_fullscreen_apply.store(true);
     }
-    opt_toggle("Show FPS", &g_settings.show_fps, false, "Shows the frame rate in the top right corner.");
+    opt_toggle(TR("Show FPS", "Mostrar FPS"), &g_settings.show_fps, false,
+               TR("Shows the frame rate in the top right corner.", "Mostra a taxa de quadros no canto superior direito."));
     {   // Pokémon Z-A's frame mode (runtime/hle/framepace.c rt_za_frame_cfg): applies from the next frame
         extern bool g_za_frame_hook, g_fps60_fell_back;
         if (g_za_frame_hook) {
             int fr = g_settings.fps60 ? (g_settings.fps60_lock ? 2 : 1) : 0;
-            static const char *rates[] = {"30 fps (Switch)", "60 fps (experimental)", "60 fps (always)"};
-            if (opt_choice("Frame rate", &fr, rates, 3, 0,
-                           "30 fps: as on the Switch (recommended). 60 fps (experimental): the game presents every vsync "
-                           "and steps its world 1/60 s a frame - smoother, but it needs a fast CPU: the game counts "
-                           "frames, not time, so below 60 fps everything moves in slow motion. When this PC doesn't "
-                           "keep 60, ZA Recomp goes back to 30 by itself (choose 60 again to retry). 60 fps (always): "
-                           "never goes back to 30 - the game slows down whenever the frame rate drops below 60."))
+            const char *rates[] = {TR("30 fps (Switch)", "30 fps (Switch)"), TR("60 fps (experimental)", "60 fps (experimental)"),
+                                   TR("60 fps (always)", "60 fps (sempre)")};
+            if (opt_choice(TR("Frame rate", "Taxa de quadros"), &fr, rates, 3, 0,
+                           TR("30 fps: as on the Switch (recommended). 60 fps (experimental): the game presents every vsync "
+                              "and steps its world 1/60 s a frame - smoother, but it needs a fast CPU: the game counts "
+                              "frames, not time, so below 60 fps everything moves in slow motion. When this PC doesn't "
+                              "keep 60, ZA Recomp goes back to 30 by itself (choose 60 again to retry). 60 fps (always): "
+                              "never goes back to 30 - the game slows down whenever the frame rate drops below 60.",
+                              "30 fps: como no Switch (recomendado). 60 fps (experimental): o jogo mostra um quadro a cada "
+                              "vsync e avança o mundo 1/60 s por quadro - mais fluido, mas pede uma CPU rápida: o jogo conta "
+                              "quadros, não tempo, então abaixo de 60 fps tudo fica em câmera lenta. Quando este PC não "
+                              "segura 60, o ZA Recomp volta para 30 sozinho (escolha 60 de novo para tentar outra vez). "
+                              "60 fps (sempre): nunca volta para 30 - o jogo fica lento quando a taxa cai abaixo de 60.")))
                 g_settings.fps60 = fr >= 1, g_settings.fps60_lock = fr == 2;
             if (g_settings.fps60 && g_fps60_fell_back)
-                ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "Running at 30 fps: this PC didn't keep 60 fps.");
+                ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s",
+                                   TR("Running at 30 fps: this PC didn't keep 60 fps.", "Rodando a 30 fps: este PC não segurou 60 fps."));
         }
     }
-    opt_toggle("Anisotropic filtering 16x", &g_settings.aniso16, false,
-               "Sharper ground and walls at a distance and at grazing angles (applies to textures loaded afterwards).");
+    opt_toggle(TR("Anisotropic filtering 16x", "Filtro anisotrópico 16x"), &g_settings.aniso16, false,
+               TR("Sharper ground and walls at a distance and at grazing angles (applies to textures loaded afterwards).",
+                  "Chão e paredes mais nítidos de longe e em ângulos rasos (vale para texturas carregadas depois)."));
     {   // Pokémon Z-A's dynamic resolution (runtime/nvn/vulkan/exec.c vk_counter_mode)
         extern bool g_za_frame_hook;
         if (g_za_frame_hook) {
             int dr = g_settings.game_drs ? 1 : 0;
-            static const char *drs[] = {"Off (full)", "Game's"};
-            if (opt_choice("Dynamic resolution", &dr, drs, 2, 0,
-                           "Off: the game always renders at its full resolution - sharp. Game's: as on the Switch, it "
-                           "lowers the resolution (to about 55%) whenever it thinks the GPU is busy."))
+            const char *drs[] = {TR("Off (full)", "Desligada (cheia)"), TR("Game's", "Do jogo")};
+            if (opt_choice(TR("Dynamic resolution", "Resolução dinâmica"), &dr, drs, 2, 0,
+                           TR("Off: the game always renders at its full resolution - sharp. Game's: as on the Switch, it "
+                              "lowers the resolution (to about 55%) whenever it thinks the GPU is busy.",
+                              "Desligada: o jogo sempre renderiza na resolução cheia - nítido. Do jogo: como no Switch, ele "
+                              "baixa a resolução (para uns 55%) quando acha que a GPU está ocupada.")))
                 g_settings.game_drs = dr == 1;
         }
     }
@@ -460,28 +488,35 @@ static void tab_display(void) {
         extern bool g_za_frame_hook;
         if (g_za_frame_hook) {
             int hh = g_settings.opmode;
-            static const char *modes[] = {"Auto (handheld on a Steam Deck)", "Docked (1080p)", "Handheld (720p)"};
-            if (opt_choice("Game mode", &hh, modes, 3, 0,
-                           "The mode the game believes it runs in, from the next start. Handheld: the game draws 720p and lighter "
-                           "effects, like on the Switch's own screen - far less for the GPU (a Steam Deck: ~25 fps instead of ~12). "
-                           "Docked: 1080p. Auto picks handheld on a Steam Deck."))
+            const char *modes[] = {TR("Auto (handheld on a Steam Deck)", "Auto (portátil no Steam Deck)"),
+                                   TR("Docked (1080p)", "Na base (1080p)"), TR("Handheld (720p)", "Portátil (720p)")};
+            if (opt_choice(TR("Game mode", "Modo do jogo"), &hh, modes, 3, 0,
+                           TR("The mode the game believes it runs in, from the next start. Handheld: the game draws 720p and lighter "
+                              "effects, like on the Switch's own screen - far less for the GPU (a Steam Deck: ~25 fps instead of ~12). "
+                              "Docked: 1080p. Auto picks handheld on a Steam Deck.",
+                              "O modo em que o jogo acha que está, a partir do próximo início. Portátil: o jogo desenha em 720p "
+                              "com efeitos mais leves, como na tela do Switch - bem menos trabalho para a GPU (no Steam Deck: "
+                              "~25 fps em vez de ~12). Na base: 1080p. Auto escolhe portátil no Steam Deck.")))
                 g_settings.opmode = hh;
         }
     }
     {   // HD texture pack (textures/hd: runtime/nvn/vulkan/textures.c hd_switch, tools/za/hd_pack.py): switches at once
         int tx = g_settings.tex_hd ? 1 : 0;
-        static const char *tex[] = {"Original", "HD"};
-        if (opt_choice("Textures", &tx, tex, 2, 1,
-                       "Original: the game's own. HD: the HD texture pack (textures/hd), where it has a texture - "
-                       "sharper, more GPU memory."))
+        const char *tex[] = {TR("Original", "Originais"), "HD"};
+        if (opt_choice(TR("Textures", "Texturas"), &tx, tex, 2, 1,
+                       TR("Original: the game's own. HD: the HD texture pack (textures/hd), where it has a texture - "
+                          "sharper, more GPU memory.",
+                          "Originais: as do próprio jogo. HD: o pacote de texturas HD (textures/hd), onde ele tiver a "
+                          "textura - mais nítido, usa mais memória da GPU.")))
             g_settings.tex_hd = tx == 1;
     }
 
-    opt_section("Rendering");
+    opt_section(TR("Rendering", "Renderização"));
     // display order -> RES_* (the ini / enum order predates the menu order)
     // (up to 4x: 7680 x 4320, 8K - more only ran out of GPU memory, and sat next to 75% in the list)
     // (Match display in the middle: left from it 75% / 50% / 25%, right Dynamic then 1x-4x; user 2026-10-11)
-    static const char *res[] = {"25%", "50%", "75%", "Match display", "Dynamic", "1x", "1.5x (experimental)", "2x", "3x", "4x"};
+    const char *res[] = {"25%", "50%", "75%", TR("Match display", "Igual à tela"), TR("Dynamic", "Dinâmica"), "1x",
+                         TR("1.5x (experimental)", "1.5x (experimental)"), "2x", "3x", "4x"};
     static const int res_mode[] = {RES_Q25, RES_Q50, RES_Q75, RES_MATCH, RES_DYNAMIC, 1, RES_X15, 2, 3, 4};
     enum { RES_MATCH_AT = 3 };
     enum { NRES = sizeof res_mode / sizeof res_mode[0] };
@@ -493,48 +528,65 @@ static void tab_display(void) {
         }
         float sx, sy;
         renderer_get_scale(&sx, &sy);
-        char d[400];
-        int n = snprintf(d, sizeof d, "How sharp the 3D image is. Match display: your screen's own resolution. Dynamic: "
-                                  "as sharp as your GPU keeps at full speed. 1x-4x: the Switch's 1080p times that%s. "
-                                  "75%% / 50%% / 25%%: a share of the display, for slower machines. Only 1x-4x are "
-                                  "exact: at the other sizes (1.5x, Match display, Dynamic, the shares) some objects "
-                                  "can vanish for a moment - being fixed.\n\nRendering at "
-                                  "%.0f x %.0f.", g_gpu_integrated ? " (1x: 720p on this GPU)" : "", 1920.0 * sx, 1080.0 * sy);
+        char d[700];
+        int n = snprintf(d, sizeof d, TR("How sharp the 3D image is. Match display: your screen's own resolution. Dynamic: "
+                                         "as sharp as your GPU keeps at full speed. 1x-4x: the Switch's 1080p times that%s. "
+                                         "75%% / 50%% / 25%%: a share of the display, for slower machines. Only 1x-4x are "
+                                         "exact: at the other sizes (1.5x, Match display, Dynamic, the shares) some objects "
+                                         "can vanish for a moment - being fixed.\n\nRendering at %.0f x %.0f.",
+                                         "O quão nítida é a imagem 3D. Igual à tela: a resolução da sua própria tela. "
+                                         "Dinâmica: o mais nítido que a sua GPU aguenta a toda velocidade. 1x-4x: o 1080p do "
+                                         "Switch vezes isso%s. 75%% / 50%% / 25%%: uma parte da tela, para máquinas mais "
+                                         "fracas. Só 1x-4x são exatas: nos outros tamanhos (1.5x, Igual à tela, Dinâmica, "
+                                         "as partes) alguns objetos podem sumir por um instante - sendo corrigido.\n\n"
+                                         "Renderizando em %.0f x %.0f."),
+                         g_gpu_integrated ? TR(" (1x: 720p on this GPU)", " (1x: 720p nesta GPU)") : "", 1920.0 * sx, 1080.0 * sy);
         if (g_settings.res_mode == RES_DYNAMIC)
-            snprintf(d + n, sizeof d - n, " Dynamic: %.0f%% of the display right now.", output_scale_dynamic_factor() * 100);
-        if (opt_choice("Internal resolution", &ri, res, NRES, rdef, d, false))
+            snprintf(d + n, sizeof d - n, TR(" Dynamic: %.0f%% of the display right now.", " Dinâmica: %.0f%% da tela agora."),
+                     output_scale_dynamic_factor() * 100);
+        if (opt_choice(TR("Internal resolution", "Resolução interna"), &ri, res, NRES, rdef, d, false))
             g_settings.res_mode = res_mode[ri], g_settings.res_auto = false;
     }
     {   // each OS's own upscaler next to bilinear (UPSCALE_SHARP: MetalFX on macOS, AMD FSR 1 on Windows)
 #ifdef __APPLE__
-        static const char *ups[] = {"Bilinear", "MetalFX"};
-        const char *ud = "How the image is scaled up to the window when it renders at a lower resolution. MetalFX: Apple's "
-                         "upscaler, sharper. Bilinear: plain and soft.";
+        const char *ups[] = {TR("Bilinear", "Bilinear"), "MetalFX"};
+        const char *ud = TR("How the image is scaled up to the window when it renders at a lower resolution. MetalFX: Apple's "
+                            "upscaler, sharper. Bilinear: plain and soft.",
+                            "Como a imagem é ampliada para a janela quando renderiza numa resolução menor. MetalFX: o "
+                            "upscaler da Apple, mais nítido. Bilinear: simples e suave.");
 #else
-        static const char *ups[] = {"Bilinear", "AMD FSR 1"};
-        const char *ud = "How the image is scaled up to the window when it renders at a lower resolution. AMD FSR 1: "
-                         "edge-aware upscaling and sharpening, sharper. Bilinear: plain and soft.";
+        const char *ups[] = {TR("Bilinear", "Bilinear"), "AMD FSR 1"};
+        const char *ud = TR("How the image is scaled up to the window when it renders at a lower resolution. AMD FSR 1: "
+                            "edge-aware upscaling and sharpening, sharper. Bilinear: plain and soft.",
+                            "Como a imagem é ampliada para a janela quando renderiza numa resolução menor. AMD FSR 1: "
+                            "ampliação que respeita as bordas, com nitidez - mais nítido. Bilinear: simples e suave.");
 #endif
         int ui = g_settings.upscaler == UPSCALE_BILINEAR ? 0 : 1;
-        char udm[512];
+        char udm[700];
         if (g_settings.res_mode == RES_MATCH) {  // (renders at the window's size: nothing to scale up)
-            snprintf(udm, sizeof udm, "%s\n\nNot used at Match display: the game already renders at your display's resolution.", ud);
+            snprintf(udm, sizeof udm, "%s\n\n%s", ud,
+                     TR("Not used at Match display: the game already renders at your display's resolution.",
+                        "Não é usado em Igual à tela: o jogo já renderiza na resolução da sua tela."));
             ud = udm;
             opt_disable_next();
         }
         if (opt_choice("Upscaler", &ui, ups, 2, g_default_upscaler == UPSCALE_BILINEAR ? 0 : 1, ud))
             g_settings.upscaler = ui ? UPSCALE_SHARP : UPSCALE_BILINEAR, g_settings.upscaler_auto = false;
     }
-    static const char *aa[] = {"Off", "SMAA"};
+    const char *aa[] = {TR("Off", "Desligado"), "SMAA"};
     opt_choice("Anti-aliasing", &g_settings.antialias, aa, 2, AA_OFF,
-               "Smooths jagged edges of the game image before it is scaled to the window. SMAA: finds the edges and "
-               "blends only along them, so textures stay sharp. Most useful at a lower internal resolution.");
+               TR("Smooths jagged edges of the game image before it is scaled to the window. SMAA: finds the edges and "
+                  "blends only along them, so textures stay sharp. Most useful at a lower internal resolution.",
+                  "Suaviza as bordas serrilhadas da imagem antes de ela ser ampliada para a janela. SMAA: acha as bordas "
+                  "e mistura só ao longo delas, então as texturas continuam nítidas. Ajuda mais numa resolução interna menor."));
 
-    opt_section("Game");
-    opt_toggle("Remove blur", &g_settings.blur_removal, false,
-               "Turns off the tilt-shift blur at the top and bottom of the screen.");
-    opt_toggle("Hide Hero Mode icon", &g_settings.hide_hero_icon, false,
-               "Hides the Hero Mode emblem in the corner of the screen while playing a Hero Mode file.");
+    if (la) {
+        opt_section("Game");
+        opt_toggle("Remove blur", &g_settings.blur_removal, false,
+                   "Turns off the tilt-shift blur at the top and bottom of the screen.");
+        opt_toggle("Hide Hero Mode icon", &g_settings.hide_hero_icon, false,
+                   "Hides the Hero Mode emblem in the corner of the screen while playing a Hero Mode file.");
+    }
     opt_end();
 }
 
@@ -599,15 +651,17 @@ static void tab_cosmetics(void) {
 
 static void tab_audio(void) {
     opt_begin("##audio", ImGui::GetFontSize() / 34);
-    opt_section("Sound");
+    opt_section(TR("Sound", "Som"));
     float pct = roundf(g_settings.volume * 100);
-    if (opt_slider("Volume", &pct, 0, 200, 5, 100, "%g%%",
-                   "The game's volume. 100% is the game's own level; above it, louder."))
+    if (opt_slider(TR("Volume", "Volume"), &pct, 0, 200, 5, 100, "%g%%",
+                   TR("The game's volume. 100% is the game's own level; above it, louder.",
+                      "O volume do jogo. 100% é o nível do próprio jogo; acima disso, mais alto.")))
         g_settings.volume = pct / 100.0f;
-    opt_toggle("Room reverb", &g_settings.reverb, true,
-               "The game's echo in caves, dungeons and big rooms.");
-    opt_toggle("Movie audio", &g_settings.movie_audio, true,
-               "Sound in the game's movies (the opening and the ending). Applies the next time a movie starts.");
+    opt_toggle(TR("Room reverb", "Eco dos ambientes"), &g_settings.reverb, true,
+               TR("The game's echo in caves, buildings and big rooms.", "O eco do jogo em cavernas, prédios e salas grandes."));
+    opt_toggle(TR("Movie audio", "Som dos vídeos"), &g_settings.movie_audio, true,
+               TR("Sound in the game's movies. Applies the next time a movie starts.",
+                  "O som dos vídeos do jogo. Vale a partir do próximo vídeo."));
     opt_end();
 }
 
@@ -618,18 +672,21 @@ static void tab_quit(float scale, bool in_game) {
     static int ask;  // 0: the two choices; 1: start screen?; 2: desktop?
     if (ask && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
         ask = 0;
-    const char *lost = in_game ? "\n\nProgress since your last save is lost." : "";
-    char d1[200], d2[200];
-    snprintf(d1, sizeof d1, "Leaves the game and goes back to the ZA Recomp start screen.%s", lost);
-    snprintf(d2, sizeof d2, "Closes ZA Recomp.%s", lost);
+    const char *lost = in_game ? TR("\n\nProgress since your last save is lost.", "\n\nO progresso desde o último save se perde.") : "";
+    char d1[300], d2[300];
+    snprintf(d1, sizeof d1, "%s%s", TR("Leaves the game and goes back to the ZA Recomp start screen.",
+                                       "Sai do jogo e volta para a tela inicial do ZA Recomp."), lost);
+    snprintf(d2, sizeof d2, "%s%s", TR("Closes ZA Recomp.", "Fecha o ZA Recomp."), lost);
     opt_begin("##quit", scale);
-    opt_section("Quit");
+    opt_section(TR("Quit", "Sair"));
     if (!ask) {
         if (!in_game) opt_disable_next();  // (already on it)
-        if (opt_action("Quit to Start Screen", "", in_game ? d1 : "You're on the start screen.")) ask = 1;
-        if (opt_action("Quit to Desktop", "", d2)) ask = 2;
+        if (opt_action(TR("Quit to Start Screen", "Sair para a tela inicial"), "",
+                       in_game ? d1 : TR("You're on the start screen.", "Você já está na tela inicial."))) ask = 1;
+        if (opt_action(TR("Quit to Desktop", "Sair para a área de trabalho"), "", d2)) ask = 2;
     } else {
-        if (opt_action(ask == 1 ? "Yes, quit to Start Screen" : "Yes, quit to Desktop", "", ask == 1 ? d1 : d2)) {
+        if (opt_action(ask == 1 ? TR("Yes, quit to Start Screen", "Sim, sair para a tela inicial")
+                                : TR("Yes, quit to Desktop", "Sim, sair para a área de trabalho"), "", ask == 1 ? d1 : d2)) {
             settings_save();
             if (ask == 1) {
                 rt_request_reboot(2);
@@ -641,8 +698,44 @@ static void tab_quit(float scale, bool in_game) {
             }
             ask = 0;
         }
-        if (opt_action("Cancel", "", "Stays where you are.")) ask = 0;
+        if (opt_action(TR("Cancel", "Cancelar"), "", TR("Stays where you are.", "Continua onde está."))) ask = 0;
     }
+    opt_end();
+}
+
+// Pokémon Z-A's Game page: the button icons the game shows, its text language, and how to reach this menu
+static void tab_game(void) {
+    opt_begin("##game", ImGui::GetFontSize() / 34);
+    opt_section(TR("Game", "Jogo"));
+    {
+        static const char *const fam[] = {"Nintendo", "Xbox", "PlayStation"};
+        char autol[64];
+        snprintf(autol, sizeof autol, "Auto (%s)", input_pad_family() == 1 && settings_on_steam_deck() ? "Steam Deck" : fam[input_pad_family() % 3]);
+        const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation", TR("Keyboard", "Teclado"), "Steam Deck"};
+        opt_choice(TR("Button icons", "Ícones dos botões"), &g_settings.prompts, names, 6, PROMPTS_AUTO,
+                   TR("The buttons the game shows in its prompts. Auto: the controller you use (the keyboard's keys "
+                      "without one). Applies from the next start.",
+                      "Os botões que o jogo mostra nas dicas. Auto: o controle que você usa (as teclas do teclado se "
+                      "não houver controle). Vale a partir do próximo início."));
+    }
+    {   // what the game is told the console's language is: its text follows this (runtime/settings.c)
+        char autol[64];
+        snprintf(autol, sizeof autol, "Auto (%s)", settings_language_name());
+        const char *names[N_LANGUAGES];
+        names[0] = autol;
+        for (int i = 1; i < N_LANGUAGES; i++) names[i] = g_language_names[i];
+        opt_choice(TR("Game language", "Idioma do jogo"), &g_settings.language, names, N_LANGUAGES, LANG_AUTO,
+                   TR("The game's text language, as its own system setting. Applies when the game restarts: Quit > "
+                      "Start Screen, then Play. (A translation mod, like a PT-BR one, goes in Mods on the start screen.)",
+                      "O idioma dos textos do jogo, como a configuração do próprio sistema. Vale quando o jogo reinicia: "
+                      "Sair > Tela inicial, depois Jogar. (Um mod de tradução, como o PT-BR, vai em Mods na tela inicial.)"));
+    }
+    opt_section(TR("This menu", "Este menu"));
+    opt_button(TR("Shortcuts", "Atalhos"),
+               TR("Open / close: F1, Esc, the controller's Home / Xbox / PlayStation button, or Back + Start.\n"
+                  "Change tabs: L / R (Q / E). Back: B (Esc).\nFullscreen: F11 or Alt+Enter.",
+                  "Abrir / fechar: F1, Esc, o botão Home / Xbox / PlayStation do controle, ou Back + Start.\n"
+                  "Trocar de aba: L / R (Q / E). Voltar: B (Esc).\nTela cheia: F11 ou Alt+Enter."));
     opt_end();
 }
 
@@ -704,7 +797,7 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
     ImGui::Begin("##kbd", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                                     ImGuiWindowFlags_AlwaysAutoResize);
     ImGui::PushFont(g_font_big);
-    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "Enter your name");
+    ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s", TR("Enter your name", "Digite seu nome"));
     ImGui::PopFont();
     static bool was_open, was_pad;
     bool pad = g_last_pad.load(), appearing = !was_open || pad != was_pad;  // (switching device: focus the new one)
@@ -718,7 +811,8 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
                          [](ImGuiInputTextCallbackData *d) -> int { return d->EventChar < 0x20 ? 1 : 0; });
         ImGui::PopFont();
         int units = kbd_cut(g_kbd_text, g_kbd_max);
-        ImGui::TextDisabled("Enter  confirm      Esc  cancel      (%d / %d)", units, g_kbd_max);
+        ImGui::TextDisabled(TR("Enter  confirm      Esc  cancel      (%d / %d)", "Enter  confirma      Esc  cancela      (%d / %d)"),
+                            units, g_kbd_max);
     } else {  // controller: on-screen keyboard (osk.mm, shared with our menus' text fields)
         int r = osk_keys(g_kbd_text, sizeof g_kbd_text, g_kbd_max, appearing, scale, g_font_big);
         if (r) g_kbd = r > 0 ? 2 : 3;  // (Start / + confirms in menu_handle_event too)
@@ -806,15 +900,26 @@ static void focus_check(bool down, bool up, bool any_down, int focused_tab, int 
 static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     // (id: the page; -1 = Prelaunch)
     struct Tab { const char *name; int id; bool on; };
-    Tab tabs[11];
+    Tab tabs[12];
     int ntabs = 0;
-    if (prelaunch) tabs[ntabs++] = {"Prelaunch", -1, true};
-    static const char *names[] = {"Video", "Audio", "Save Editor", "Randomizer", "Warp", "Cheats", "Gameplay",
-                                  "Cosmetics", "Controls", "Quit"};
-    static const int order[] = {8, 0, 1, 6, 7, 3, 5, 4, 2, 9};  // Controls, Video, Audio, Gameplay, Cosmetics, Randomizer,
-                                                                // Cheats, Warp, Save Editor, Quit (ids stay: test hooks)
-    for (int i : order)  // (Quit: in game only - the start screen has its own QUIT, and an eleventh tab cut names short)
-        if (i != 9 || !prelaunch) tabs[ntabs++] = {names[i], i, in_game || (i != 2 && i != 4 && i != 5)};
+    // Pokémon Z-A (ZA Recomp's start screen, or the game loaded): Controls, Video, Audio, Game, Quit. Link's Awakening
+    // keeps its own set (randomizer, cheats, warp, save editor...). (ids stay: test hooks)
+    menu_la_tabs = in_game && g_game_is_la;
+    if (prelaunch) tabs[ntabs++] = {TR("Files", "Arquivos"), -1, true};
+    if (!menu_la_tabs) {
+        const char *names[] = {TR("Controls", "Controles"), TR("Video", "Vídeo"), TR("Audio", "Áudio"), TR("Game", "Jogo"),
+                               TR("Quit", "Sair")};
+        static const int ids[] = {8, 0, 1, 10, 9};
+        for (int i = 0; i < 5; i++)
+            if (ids[i] != 9 || !prelaunch) tabs[ntabs++] = {names[i], ids[i], true};
+    } else {
+        static const char *names[] = {"Video", "Audio", "Save Editor", "Randomizer", "Warp", "Cheats", "Gameplay",
+                                      "Cosmetics", "Controls", "Quit"};
+        static const int order[] = {8, 0, 1, 6, 7, 3, 5, 4, 2, 9};  // Controls, Video, Audio, Gameplay, Cosmetics,
+                                                                    // Randomizer, Cheats, Warp, Save Editor, Quit
+        for (int i : order)  // (Quit: in game only - the start screen has its own QUIT, and an eleventh tab cut names short)
+            if (i != 9 || !prelaunch) tabs[ntabs++] = {names[i], i, in_game || (i != 2 && i != 4 && i != 5)};
+    }
     int cur = 0;  // g_tab / g_tab_request hold ids
     for (int i = 0; i < ntabs; i++) if (tabs[i].id == g_tab) cur = i;
     if (!tabs[cur].on) cur = 0;
@@ -870,8 +975,9 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
         for (int k = 0; k < ntabs; k++) {
             const Tab &t = tabs[k];
             ImGuiTabItemFlags f = g_tab_request == t.id && t.on ? ImGuiTabItemFlags_SetSelected : 0;
-            char lbl[64];
-            snprintf(lbl, sizeof lbl, prelaunch ? " %s " : "  %s  ", t.name);  // (ten tabs: tighter, so none is cut short)
+            char lbl[80];
+            // (the tab's id after ###: its label changes with the language, its selection mustn't)
+            snprintf(lbl, sizeof lbl, menu_la_tabs ? (prelaunch ? " %s ###t%d" : "  %s  ###t%d") : "   %s   ###t%d", t.name, t.id);
             ImGui::BeginDisabled(!t.on);  // (out of the game: Save Editor, Warp, Cheats)
             // focus (controller / keyboard): the tab lights up a little with a gold bar along its bottom, instead of
             // ImGui's outline (it sits 4 px outside the tab and the tab bar's clipping could cut its top off on macOS)
@@ -879,8 +985,8 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
             bool lit = focused_tab == t.id && ImGui::GetCurrentContext()->NavCursorVisible;
             ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));
             if (lit) {
-                ImGui::PushStyleColor(ImGuiCol_Tab, ImVec4(0.19f, 0.27f, 0.22f, 1));
-                ImGui::PushStyleColor(ImGuiCol_TabHovered, ImVec4(0.19f, 0.27f, 0.22f, 1));
+                ImGui::PushStyleColor(ImGuiCol_Tab, ImVec4(1, 1, 1, 0.14f));
+                ImGui::PushStyleColor(ImGuiCol_TabHovered, ImVec4(1, 1, 1, 0.14f));
             }
             if (g_focus_tab == -1 && !prelaunch) g_focus_tab = 8;  // (no Prelaunch in game: Controls, the first tab)
             bool focus_here = g_focus_tab == t.id || (g_focus_tab == -100 && t.id == g_tab);
@@ -897,7 +1003,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
                 ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
                 float h = 4 * scale > 2 ? 4 * scale : 2;
                 ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(a.x + 2, b.y - h), ImVec2(b.x - 2, b.y),
-                                                          IM_COL32(236, 194, 84, 255));  // (the menu's gold)
+                                                          IM_COL32(242, 181, 68, 255));  // (the menu's gold)
             }
             if (ImGui::IsItemFocused()) focused_tab = t.id;
             else if (focused_tab == t.id) focused_tab = -99;
@@ -928,6 +1034,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
                 case 7: tab_cosmetics(); break;
                 case 8: controls_tab_draw(scale); break;
                 case 9: tab_quit(scale, in_game); break;
+                case 10: tab_game(); break;
                 }
                 static const char *scroll_test = getenv("LARECOMP_MENU_SCROLL");  // test hook: page scroll, 0..1
                 if (scroll_test) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(scroll_test));
@@ -1102,8 +1209,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     }
 
     if (open) {
-        // dim the game behind the menu
-        ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 110));
+        // dim the game behind the menu (towards the start screen's night blue)
+        ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(4, 10, 19, 150));
         float w = fminf(io.DisplaySize.x * 0.9f, 1500 * scale), h = io.DisplaySize.y - 2 * 18 * scale;  // (all the height: a slim margin)
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
         ImGui::SetNextWindowSize(ImVec2(w, h), ImGuiCond_Always);
@@ -1113,8 +1220,21 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         ImGui::PushFont(g_menu_font);
         // header as on the start screen's Settings: the title, and a close X in the corner (B / Esc too). ("Title
         // screen" - rt_request_reboot(RT_REBOOT_TITLE) - is to find a new home; user 2026-10-11.)
+        {   // ZA Recomp's mark (a hexagon with a Z, as on the start screen), then the title
+            float u = ImGui::GetFontSize() * 1.15f / 30;
+            ImVec2 o = ImGui::GetCursorScreenPos();
+            o.y += ImGui::GetFontSize() * 0.35f;
+            auto Q = [&](float x, float y) { return ImVec2(o.x + x * u, o.y + y * u); };
+            ImDrawList *dl = ImGui::GetWindowDrawList();
+            ImVec2 hex[] = {Q(15, 2), Q(26, 8.5f), Q(26, 21.5f), Q(15, 28), Q(4, 21.5f), Q(4, 8.5f)};
+            dl->AddPolyline(hex, 6, IM_COL32(242, 181, 68, 255), ImDrawFlags_Closed, 2 * u);
+            ImVec2 z[] = {Q(10.5f, 10.5f), Q(19.5f, 10.5f), Q(10.5f, 19.5f), Q(19.5f, 19.5f)};
+            dl->AddPolyline(z, 4, IM_COL32(238, 243, 246, 255), 0, 2.4f * u);
+            ImGui::Dummy(ImVec2(32 * u, 1));
+            ImGui::SameLine();
+        }
         ImGui::PushFont(g_font_big);
-        ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "Settings");
+        ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s", TR("Settings", "Configurações"));
         ImGui::PopFont();
         {
             float bx = 44 * scale;
@@ -1124,7 +1244,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
             bool close = ImGui::InvisibleButton("##close", ImVec2(bx, bx), ImGuiButtonFlags_EnableNav);
             ImGui::PopStyleColor();
             bool hot = ImGui::IsItemHovered() || ImGui::IsItemFocused();
-            ImU32 col = hot ? IM_COL32(236, 194, 84, 255) : IM_COL32(220, 216, 205, 255);
+            ImU32 col = hot ? IM_COL32(242, 181, 68, 255) : IM_COL32(194, 209, 219, 255);
             float m = bx * 0.3f, t = (hot ? 3.0f : 2.4f) * scale * 1.5f;
             ImDrawList *dl = ImGui::GetWindowDrawList();
             if (hot) dl->AddRectFilled(p, ImVec2(p.x + bx, p.y + bx), IM_COL32(255, 255, 255, 20), 8 * scale);

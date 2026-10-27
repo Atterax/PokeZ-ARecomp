@@ -21,6 +21,7 @@ int settings_on_steam_deck(void);        // runtime/settings.c
 SDL_JoystickID input_active_pad(void);   // runtime/hle/input.c: the controller the game reads (0: none yet)
 void input_apply_background(void);
 }
+#define TR(en, pt) UI_TR(en, pt)  // (runtime/settings.h: the start screen's PT | EN)
 
 // ------------------------------------------------------------------ Configure inputs: what's on it
 enum { CAT_BUTTONS, CAT_TRIGGERS, CAT_STICKS, CAT_DPAD, N_CAT };
@@ -71,17 +72,21 @@ static void stick_draw() {
 }
 
 static void mouse_draw() {
-    ImGui::SeparatorText("Mouse");
-    static const char *const modes[] = {"Off", "Hold the right button", "Always (the window holds the cursor)"};
+    ImGui::SeparatorText(TR("Mouse", "Mouse"));
+    const char *const modes[] = {TR("Off", "Desligado"), TR("Hold the right button", "Segurando o botão direito"),
+                                 TR("Always (the window holds the cursor)", "Sempre (a janela prende o cursor)")};
     bool changed = false;
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
-    changed |= ImGui::Combo("Camera", &g_settings.mouse_camera, modes, 3);
+    changed |= ImGui::Combo(TR("Camera###cam", "Câmera###cam"), &g_settings.mouse_camera, modes, 3);
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
-    ImGui::SliderFloat("Camera speed", &g_settings.mouse_sens, 0.1f, 5.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+    ImGui::SliderFloat(TR("Camera speed###camspeed", "Velocidade da câmera###camspeed"), &g_settings.mouse_sens, 0.1f, 5.0f,
+                       "%.2f", ImGuiSliderFlags_Logarithmic);
     if (ImGui::IsItemDeactivatedAfterEdit()) changed = true;  // (saved once let go, not on every step of a drag)
     ImGui::PushTextWrapPos(0);
-    ImGui::TextDisabled("Always: while you play, the cursor is hidden and moving the mouse turns the camera; F1 or Esc "
-                        "(the menu) or switching windows gives the cursor back. The buttons below work only then.");
+    ImGui::TextDisabled("%s", TR("Always: while you play, the cursor is hidden and moving the mouse turns the camera; F1 or Esc "
+                                 "(the menu) or switching windows gives the cursor back. The buttons below work only then.",
+                                 "Sempre: enquanto você joga, o cursor some e mexer o mouse gira a câmera; F1 ou Esc (o menu) "
+                                 "ou trocar de janela devolve o cursor. Os botões abaixo só valem nesse modo."));
     ImGui::PopTextWrapPos();
     // the Switch buttons a mouse button can press: names and order as the table above
     static const int opts[] = {-1, BIND_A, BIND_B, BIND_X, BIND_Y, BIND_L, BIND_R, BIND_ZL, BIND_ZR, BIND_PLUS, BIND_MINUS,
@@ -96,9 +101,10 @@ static void mouse_draw() {
             ImGui::SetNextItemWidth(-FLT_MIN);
             char id[16];
             snprintf(id, sizeof id, "##mb%d", m);
-            if (ImGui::BeginCombo(id, g_bind_mouse[m] >= 0 ? bind_input_name(g_bind_mouse[m]) : "(none)")) {
+            const char *none = TR("(none)", "(nenhum)");
+            if (ImGui::BeginCombo(id, g_bind_mouse[m] >= 0 ? bind_input_name(g_bind_mouse[m]) : none)) {
                 for (int o : opts)
-                    if (ImGui::Selectable(o >= 0 ? bind_input_name(o) : "(none)", g_bind_mouse[m] == o)) {
+                    if (ImGui::Selectable(o >= 0 ? bind_input_name(o) : none, g_bind_mouse[m] == o)) {
                         g_bind_mouse[m] = (int16_t)o;
                         changed = true;
                     }
@@ -108,7 +114,10 @@ static void mouse_draw() {
         ImGui::EndTable();
     }
     ImGui::BeginDisabled(bind_mouse_is_default());
-    if (ImGui::Button("Reset mouse buttons to defaults")) { bind_mouse_reset(); changed = true; }
+    if (ImGui::Button(TR("Reset mouse buttons to defaults###mreset", "Voltar os botões do mouse ao padrão###mreset"))) {
+        bind_mouse_reset();
+        changed = true;
+    }
     ImGui::EndDisabled();
     if (changed) settings_save();
 }

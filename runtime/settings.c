@@ -138,16 +138,23 @@ void settings_load(void) {
     loaded = true;
     FILE *f = fopen(SETTINGS_FILE, "r");
     if (!f) return;
-    char line[256];
+    char line[1200];
     bool tip_key = false, aspect_key = false;
     while (fgets(line, sizeof line, f)) {
         line[strcspn(line, "\r\n")] = 0;
         char key[64];
-        char val[128] = {0};
-        int fields = sscanf(line, " %63[^= ] = %127[^\n]", key, val);
+        char val[1024] = {0};  // (1024: mods_order / mods_off list several folder names)
+        int fields = sscanf(line, " %63[^= ] = %1023[^\n]", key, val);
         if (fields < 1) continue;
         if (!strcmp(key, "rando_seed")) {
             strlcpy(g_settings.rando_seed, val, sizeof g_settings.rando_seed);
+            continue;
+        }
+        // (the start screen's keys: an empty value is valid - no mods off, no order)
+        if (!strcmp(key, "mods_order")) { strlcpy(g_settings.mods_order, val, sizeof g_settings.mods_order); continue; }
+        if (!strcmp(key, "mods_off")) { strlcpy(g_settings.mods_off, val, sizeof g_settings.mods_off); continue; }
+        if (!strcmp(key, "launcher_language")) {
+            g_settings.ui_lang = !strcmp(val, "pt") ? UI_LANG_PT : !strcmp(val, "en") ? UI_LANG_EN : UI_LANG_AUTO;
             continue;
         }
         if (fields != 2) continue;
@@ -324,7 +331,56 @@ void settings_save(void) {
     bind_settings_save(f);
     fprintf(f, "rando_seed = %s\n", g_settings.rando_seed);
     if (g_settings.rando_options[0]) fprintf(f, "rando_options = %s\n", g_settings.rando_options);
+    static const char *const ui_lang[] = {"auto", "en", "pt"};
+    fprintf(f, "launcher_language = %s\n", ui_lang[g_settings.ui_lang <= UI_LANG_PT ? g_settings.ui_lang : 0]);
+    fprintf(f, "mods_order = %s\nmods_off = %s\n", g_settings.mods_order, g_settings.mods_off);
     fclose(f);
+}
+
+#ifdef _WIN32
+__declspec(dllimport) unsigned short __stdcall GetUserDefaultUILanguage(void);
+#elif defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#endif
+// the system's display language is Portuguese (asked once)
+static bool system_is_portuguese(void) {
+    static int pt = -1;
+    if (pt >= 0) return pt;
+#ifdef _WIN32
+    pt = (GetUserDefaultUILanguage() & 0x3ff) == 0x16;  // (LANG_PORTUGUESE, any region)
+#elif defined(__APPLE__)
+    pt = 0;
+    CFArrayRef langs = CFLocaleCopyPreferredLanguages();
+    if (langs && CFArrayGetCount(langs) > 0) {
+        char b[16] = "";
+        CFStringGetCString((CFStringRef)CFArrayGetValueAtIndex(langs, 0), b, sizeof b, kCFStringEncodingUTF8);
+        pt = !strncmp(b, "pt", 2);
+    }
+    if (langs) CFRelease(langs);
+#else
+    pt = 0;
+    const char *const vars[] = {"LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"};
+    for (int i = 0; i < 4; i++) {
+        const char *e = getenv(vars[i]);
+        if (e && *e) { pt = !strncmp(e, "pt", 2); break; }
+    }
+#endif
+    return pt;
+}
+
+bool settings_ui_portuguese(void) {
+    return g_settings.ui_lang == UI_LANG_PT || (g_settings.ui_lang == UI_LANG_AUTO && system_is_portuguese());
+}
+
+bool settings_list_has(const char *list, const char *name) {
+    size_t n = strlen(name);
+    for (const char *p = list; p && *p;) {
+        const char *bar = strchr(p, '|');
+        size_t k = bar ? (size_t)(bar - p) : strlen(p);
+        if (k == n && !strncmp(p, name, n)) return true;
+        p = bar ? bar + 1 : NULL;
+    }
+    return false;
 }
 
 /// True on a Steam Deck (DMI vendor "Valve"): "Auto" button icons then use the Deck's own names (L1 R1 L2 R2 L3 R3).

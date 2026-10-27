@@ -464,6 +464,17 @@ int input_menu_family(SDL_JoystickID which) {
     return bind_label_family();
 }
 
+// Back on the start screen (runtime/ui/launcher.mm, also after the menu's Quit to Start Screen): the cursor is free
+// again - the game held it for the camera, and nothing calls input_mouse_update while the start screen is up
+void input_mouse_release(SDL_Window *w) {
+    if (!mouse_held) return;
+    SDL_SetWindowRelativeMouseMode(w, false);
+    mouse_held = false;
+    memset(mouse_down, 0, sizeof mouse_down);
+    recompute_mouse();
+    mouse_acc_x = mouse_acc_y = 0;
+    LOG("[input] mouse free (start screen)\n");
+}
 void input_handle_event(const SDL_Event *e) {
     static bool scanned;  // pads present at startup: their ADDED event may have gone to the start screen's loop
     if (!scanned) {
