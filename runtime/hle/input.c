@@ -58,9 +58,16 @@ static void recompute_pad(void) {
         if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000) host |= 1u << PADB_LTRIGGER;
         if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000) host |= 1u << PADB_RTRIGGER;
     }
+    // battle_abxy_position: Pokémon Z-A's moves are used only with ZL held and sit where the Switch's A/B/X/Y are,
+    // so with A/B/X/Y bound by letter (Xbox A = the Switch's A) they read swapped. While ZL is held those four go by
+    // position, as in the defaults; the rest of the game keeps the player's bindings (#26).
+    int zl = g_bind_pad[BIND_ZL];
+    bool by_pos = g_settings.battle_abxy_position && zl >= 0 && zl < PADB_HOST_COUNT && (host >> zl & 1);
     uint64_t b = 0;
-    for (int i = 0; i < BIND_PAD_COUNT; i++)
-        if (g_bind_pad[i] >= 0 && g_bind_pad[i] < PADB_HOST_COUNT && (host >> g_bind_pad[i] & 1)) b |= 1ull << i;
+    for (int i = 0; i < BIND_PAD_COUNT; i++) {
+        int h = by_pos && i <= BIND_Y ? bind_pad_default(i) : g_bind_pad[i];
+        if (h >= 0 && h < PADB_HOST_COUNT && (host >> h & 1)) b |= 1ull << i;
+    }
     pad_buttons = b;
     if (!pad || host_test) { pad_lx = test_lx, pad_ly = test_ly, pad_rx = pad_ry = 0; return; }
     pad_lx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);

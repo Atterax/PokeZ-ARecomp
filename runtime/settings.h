@@ -39,6 +39,7 @@ typedef struct {
     bool tex_hd, tex_dump;  // HD texture packs (textures/hd) on; dump the game's textures (textures/dump): vulkan/textures.c
     bool dpad_move;      // the d-pad (and arrow keys) move Link like the stick
     bool move_360;       // analog movement in any direction (the game snaps the stick to 8): runtime/hle/qol.c
+    bool battle_abxy_position;  // while ZL is held, the controller's A/B/X/Y go by position: runtime/hle/input.c
     int mouse_camera;    // MOUSE_CAM_*: how the mouse turns the camera (runtime/hle/input.c)
     float mouse_sens;    // mouse camera speed, 1 = default
     bool blur_removal;   // no tilt-shift blur at the top / bottom of the screen

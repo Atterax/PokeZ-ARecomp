@@ -657,6 +657,10 @@ static void tab_about(void) {
          "screen, then Play.");
     ImGui::Spacing();
     header("Controls");
+    toggle("Battle moves by position", &g_settings.battle_abxy_position);
+    hint("While ZL is held, the controller's A / B / X / Y go by position (the Switch's A on the right), so each move "
+         "is on the button where the game draws it. The rest of the game keeps the bindings below.");
+    ImGui::Spacing();
     controls_bindings_draw(ImGui::GetFontSize() / 34);
     ImGui::Spacing();
     header("Menu");
