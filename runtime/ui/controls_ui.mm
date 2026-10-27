@@ -20,31 +20,41 @@ int input_pad_family(void);              // runtime/hle/input.c
 int settings_on_steam_deck(void);        // runtime/settings.c
 SDL_JoystickID input_active_pad(void);   // runtime/hle/input.c: the controller the game reads (0: none yet)
 void input_apply_background(void);
+bool menu_la_rows(void);  // runtime/ui/menu.mm: Link's Awakening's rows shown (the game loaded is it)
 }
 #define TR(en, pt) UI_TR(en, pt)  // (runtime/settings.h: the start screen's PT | EN)
 
 // ------------------------------------------------------------------ Configure inputs: what's on it
 enum { CAT_BUTTONS, CAT_TRIGGERS, CAT_STICKS, CAT_DPAD, N_CAT };
-static const char *const k_cat_name[N_CAT] = {"Buttons", "Triggers", "Sticks", "D-pad"};
+static const char *cat_name(int c) {
+    switch (c) {
+    case CAT_BUTTONS: return TR("Buttons", "Botões");
+    case CAT_TRIGGERS: return TR("Triggers", "Gatilhos");
+    case CAT_STICKS: return TR("Sticks", "Analógicos");
+    default: return TR("D-pad", "Direcional");
+    }
+}
 static const char *const k_cat_hook[N_CAT] = {"buttons", "triggers", "sticks", "dpad"};  // (LARECOMP_CONTROLS_SUB)
 
 struct Bind { int slot; const char *label; const char *section; };  // section: a header before this row
 static int cat_rows(int cat, bool pad, Bind *out) {
     int n = 0;
     auto add = [&](int slot, const char *label, const char *section = NULL) { out[n++] = {slot, label, section}; };
+    const char *up = TR("Up", "Cima"), *down = TR("Down", "Baixo"), *left = TR("Left", "Esquerda"),
+               *right = TR("Right", "Direita");
     switch (cat) {
     case CAT_BUTTONS:
-        add(BIND_A, "A"), add(BIND_B, "B"), add(BIND_X, "X"), add(BIND_Y, "Y"), add(BIND_PLUS, "Plus"),
-            add(BIND_MINUS, "Minus");
+        add(BIND_A, "A"), add(BIND_B, "B"), add(BIND_X, "X"), add(BIND_Y, "Y"), add(BIND_PLUS, TR("Plus", "Mais")),
+            add(BIND_MINUS, TR("Minus", "Menos"));
         break;
     case CAT_TRIGGERS: add(BIND_L, "L"), add(BIND_R, "R"), add(BIND_ZL, "ZL"), add(BIND_ZR, "ZR"); break;
     case CAT_STICKS:  // (a controller's sticks stay its sticks: only their presses are buttons)
-        add(BIND_LSTICK, "Press", "Left stick");
-        if (!pad) add(BIND_LS_UP, "Up"), add(BIND_LS_DOWN, "Down"), add(BIND_LS_LEFT, "Left"), add(BIND_LS_RIGHT, "Right");
-        add(BIND_RSTICK, "Press", "Right stick");
-        if (!pad) add(BIND_RS_UP, "Up"), add(BIND_RS_DOWN, "Down"), add(BIND_RS_LEFT, "Left"), add(BIND_RS_RIGHT, "Right");
+        add(BIND_LSTICK, TR("Press", "Apertar"), TR("Left stick", "Analógico esquerdo"));
+        if (!pad) add(BIND_LS_UP, up), add(BIND_LS_DOWN, down), add(BIND_LS_LEFT, left), add(BIND_LS_RIGHT, right);
+        add(BIND_RSTICK, TR("Press", "Apertar"), TR("Right stick", "Analógico direito"));
+        if (!pad) add(BIND_RS_UP, up), add(BIND_RS_DOWN, down), add(BIND_RS_LEFT, left), add(BIND_RS_RIGHT, right);
         break;
-    case CAT_DPAD: add(BIND_UP, "Up"), add(BIND_DOWN, "Down"), add(BIND_LEFT, "Left"), add(BIND_RIGHT, "Right"); break;
+    case CAT_DPAD: add(BIND_UP, up), add(BIND_DOWN, down), add(BIND_LEFT, left), add(BIND_RIGHT, right); break;
     }
     return n;
 }
@@ -58,16 +68,23 @@ static int slot_cat(int slot) {
 
 // The mouse: how it turns the camera, how fast, and the Switch button each of its buttons presses (runtime/hle/input.c)
 static void stick_draw() {
-    ImGui::SeparatorText("Right stick");
+    ImGui::SeparatorText(TR("Right stick###rstick", "Analógico direito###rstick"));
     static const int deg[] = {0, 10, 15, 20, 25};
-    static const char *const names[] = {"Off", "10 degrees", "15 degrees", "20 degrees", "25 degrees"};
+    const char *const names[] = {TR("Off", "Desligado"), TR("10 degrees", "10 graus"), TR("15 degrees", "15 graus"),
+                                 TR("20 degrees", "20 graus"), TR("25 degrees", "25 graus")};
     int cur = 0;
     for (int i = 0; i < 5; i++) if (g_settings.rstick_snap == deg[i]) cur = i;
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
-    if (ImGui::Combo("Snap to axis", &cur, names, 5)) { g_settings.rstick_snap = deg[cur]; settings_save(); }
+    if (ImGui::Combo(TR("Snap to axis###snap", "Encaixar no eixo###snap"), &cur, names, 5)) {
+        g_settings.rstick_snap = deg[cur];
+        settings_save();
+    }
     ImGui::PushTextWrapPos(0);
-    ImGui::TextDisabled("Turning the camera sideways with the stick tilts it a little up or down when the stick isn't "
-                        "pushed exactly sideways. Within this angle of an axis the stick counts as on it.");
+    ImGui::TextDisabled("%s", TR("Turning the camera sideways with the stick tilts it a little up or down when the stick isn't "
+                                 "pushed exactly sideways. Within this angle of an axis the stick counts as on it.",
+                                 "Girar a câmera para o lado com o analógico inclina ela um pouco para cima ou para baixo quando "
+                                 "o analógico não está exatamente de lado. Dentro deste ângulo de um eixo, o analógico conta "
+                                 "como estando nele."));
     ImGui::PopTextWrapPos();
 }
 
@@ -135,13 +152,13 @@ static int list_devices(Device *d, int cap) {
     for (int i = 0; i < np && n < cap - 1; i++) {
         const char *nm = SDL_GetGamepadNameForID(ids[i]);
         d[n].id = ids[i], d[n].pad = true, d[n].fam = pad_fam(ids[i]);
-        snprintf(d[n].name, sizeof d[n].name, "%s", nm && *nm ? nm : "Controller");
+        snprintf(d[n].name, sizeof d[n].name, "%s", nm && *nm ? nm : TR("Controller", "Controle"));
         if (strlen(d[n].name) > 30) strcpy(d[n].name + 27, "...");  // (fits beside DEVICE)
         n++;
     }
     SDL_free(ids);
-    if (!n) d[n].id = 0, d[n].pad = true, d[n].fam = pad_fam(0), snprintf(d[n].name, sizeof d[n].name, "Controller"), n++;
-    d[n].id = 0, d[n].pad = false, d[n].fam = 0, snprintf(d[n].name, sizeof d[n].name, "Keyboard"), n++;
+    if (!n) d[n].id = 0, d[n].pad = true, d[n].fam = pad_fam(0), snprintf(d[n].name, sizeof d[n].name, "%s", TR("Controller", "Controle")), n++;
+    d[n].id = 0, d[n].pad = false, d[n].fam = 0, snprintf(d[n].name, sizeof d[n].name, "%s", TR("Keyboard", "Teclado")), n++;
     return n;
 }
 
@@ -228,25 +245,26 @@ static void configure_inputs(float scale) {
         g_focus = FOCUS_CAT;
 
     opt_begin("##configure", scale);
-    opt_section("Configure inputs");
+    opt_section(TR("Configure inputs", "Configurar comandos"));
     const char *names[9];
     for (int i = 0; i < nd; i++) names[i] = devs[i].name;
     int ndi = di;
-    if (opt_choice("Device", &ndi, names, nd, di, NULL)) {
+    if (opt_choice(TR("Device", "Dispositivo"), &ndi, names, nd, di, NULL)) {
         bind_capture_cancel();
         g_dev_pad = devs[ndi].pad, g_dev_id = devs[ndi].id, msg[0] = 0;
     }
     take_focus(FOCUS_DEVICE);
     for (int c = 0; c < N_CAT; c++) {
         if (g_in_right && c == g_cat) opt_mark_next();
-        bool open = opt_link(k_cat_name[c], NULL);
+        bool open = opt_link(cat_name(c), NULL);
         if (c == g_cat) take_focus(FOCUS_CAT);
         if (nav_on_item() && g_cat != c) g_cat = c, msg[0] = 0;  // (moving down the list shows each)
         if (open) { if (g_cat != c) msg[0] = 0; g_cat = c, g_focus = FOCUS_RIGHT; bind_capture_cancel(); }
     }
     if (bind_is_default(dev)) opt_disable_next();
-    if (opt_action("Restore default controls", "", g_dev_pad ? "Puts every controller button back to its default."
-                                                            : "Puts every key back to its default.")) {
+    if (opt_action(TR("Restore default controls", "Voltar os comandos ao padrão"), "",
+                   g_dev_pad ? TR("Puts every controller button back to its default.", "Volta cada botão do controle ao padrão.")
+                             : TR("Puts every key back to its default.", "Volta cada tecla ao padrão."))) {
         bind_capture_cancel();
         bind_reset(dev);
     }
@@ -259,14 +277,15 @@ static void configure_inputs(float scale) {
     } else {
         Bind rows[16];
         int n = cat_rows(g_cat, g_dev_pad, rows);
-        opt_section(k_cat_name[g_cat]);
+        opt_section(cat_name(g_cat));
         bool in_right = false;
         for (int i = 0; i < n; i++) {
             const Bind &b = rows[i];
             if (b.section) opt_section(b.section);
             bool waiting = cd == dev && cs == b.slot;
             char val[64];
-            if (waiting) snprintf(val, sizeof val, "%s...  %d", g_dev_pad ? "Press a button" : "Press a key", (ms + 999) / 1000);
+            if (waiting) snprintf(val, sizeof val, "%s...  %d", g_dev_pad ? TR("Press a button", "Aperte um botão")
+                                                                          : TR("Press a key", "Aperte uma tecla"), (ms + 999) / 1000);
             else snprintf(val, sizeof val, "%s", g_dev_pad ? bind_pad_label(g_bind_pad[b.slot], fam) : bind_key_label(g_bind_key[b.slot]));
             // the same button / key on two inputs (a hand-edited larecomp.ini): red
             const int16_t *t = g_dev_pad ? g_bind_pad : g_bind_key;
@@ -286,7 +305,7 @@ static void configure_inputs(float scale) {
             }
         }
         g_in_right = in_right;
-        if (cd == dev) ImGui::TextDisabled("Esc cancels.");
+        if (cd == dev) ImGui::TextDisabled("%s", TR("Esc cancels.", "Esc cancela."));
         else if (msg[0]) ImGui::TextDisabled("%s", msg);
     }
     opt_split_end();
@@ -323,50 +342,63 @@ extern "C" void controls_tab_draw(float scale) {
     }
 
     opt_begin("##controls", scale);
-    opt_section("Inputs");
-    if (opt_link("Configure inputs", "Choose the buttons and keys for the game. The menu always opens with F1, Esc, "
-                                     "Home or Back + Start, so no binding can lock you out.")) {
+    opt_section(TR("Inputs", "Comandos"));
+    if (opt_link(TR("Configure inputs", "Configurar comandos"),
+                 TR("Choose the buttons and keys for the game. The menu always opens with F1, Esc, Home or Back + Start, "
+                    "so no binding can lock you out.",
+                    "Escolha os botões e as teclas do jogo. O menu sempre abre com F1, Esc, Home ou Back + Start, então "
+                    "nenhum comando deixa você preso fora dele."))) {
         pick_device(keyboard_pressed());
         g_sub = true, g_focus = FOCUS_DEVICE, g_in_right = false;
     }
     take_focus(FOCUS_CONFIGURE);
-    if (opt_toggle("Allow background inputs", &g_settings.bg_input, false,
-                   "Controllers keep working while another window is in front. macOS may ask for Input Monitoring "
-                   "permission."))
+    if (opt_toggle(TR("Allow background inputs", "Comandos em segundo plano"), &g_settings.bg_input, false,
+                   TR("Controllers keep working while another window is in front. macOS may ask for Input Monitoring "
+                      "permission.", "Os controles continuam funcionando com outra janela na frente. O macOS pode pedir a "
+                      "permissão de Monitoramento de Entrada.")))
         input_apply_background();
 
-    opt_section("Movement");
-    opt_toggle("D-pad moves Link", &g_settings.dpad_move, false, "The d-pad moves Link like the control stick.");
-    opt_toggle("360-degree movement", &g_settings.move_360, false,
-               "Link walks in the exact direction of the stick instead of snapping to 8 directions.");
+    if (menu_la_rows()) {  // (Link's Awakening's movement hooks: runtime/hle/qol.c, nothing for Pokémon Z-A)
+        opt_section("Movement");
+        opt_toggle("D-pad moves Link", &g_settings.dpad_move, false, "The d-pad moves Link like the control stick.");
+        opt_toggle("360-degree movement", &g_settings.move_360, false,
+                   "Link walks in the exact direction of the stick instead of snapping to 8 directions.");
+    }
 
-    opt_section("Controller");
-    opt_toggle("Rumble", &g_settings.rumble, true, "Controller vibration.");
+    opt_section(TR("Controller", "Controle"));
+    opt_toggle(TR("Rumble", "Vibração"), &g_settings.rumble, true, TR("Controller vibration.", "A vibração do controle."));
     if (g_settings.rumble) {
         static const char *const pct[] = {"25%", "50%", "75%", "100%"};
         int i = g_settings.rumble_strength / 25 - 1;
         if (i < 0 || i > 3) i = 3;
         opt_indent(1);
-        if (opt_choice("Intensity", &i, pct, 4, 3, "How strong the vibration is.", false))
+        if (opt_choice(TR("Intensity", "Intensidade"), &i, pct, 4, 3,
+                       TR("How strong the vibration is.", "A força da vibração."), false))
             g_settings.rumble_strength = (i + 1) * 25;
         opt_indent(-1);
     }
-    opt_toggle("Controller light", &g_settings.controller_light, true, "The light bar shows Link's health.");
+    if (menu_la_rows())  // (the light bar shows Link's health: runtime/led.h)
+        opt_toggle("Controller light", &g_settings.controller_light, true, "The light bar shows Link's health.");
     {
         static const char *const fam[] = {"Nintendo", "Xbox", "PlayStation"};
         char autol[64];
         snprintf(autol, sizeof autol, "Auto (%s)", input_pad_family() == 1 && settings_on_steam_deck() ? "Steam Deck" : fam[input_pad_family() % 3]);
-        const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation", "Keyboard", "Steam Deck"};  // (Keyboard, Steam Deck: Z-A, from the next boot)
-        opt_choice("Button icons", &g_settings.prompts, names, 6, PROMPTS_AUTO,
-                   "The button icons the game shows. Auto: the connected controller's (the keyboard's with none).");
+        const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation", TR("Keyboard", "Teclado"), "Steam Deck"};  // (Keyboard, Steam Deck: Z-A, from the next boot)
+        opt_choice(TR("Button icons", "Ícones dos botões"), &g_settings.prompts, names, 6, PROMPTS_AUTO,
+                   TR("The button icons the game shows. Auto: the connected controller's (the keyboard's with none). "
+                      "Applies from the next start.",
+                      "Os ícones de botões que o jogo mostra. Auto: os do controle conectado (os do teclado se não houver "
+                      "controle). Vale a partir do próximo início."));
     }
-    opt_toggle("Battle moves by position", &g_settings.battle_abxy_position, false,
-               "While ZL is held, the controller's A / B / X / Y go by position (the Switch's A on the right), so each "
-               "move is on the button where the game draws it. The rest of the game keeps your bindings.");
+    opt_toggle(TR("Battle moves by position", "Golpes por posição"), &g_settings.battle_abxy_position, false,
+               TR("While ZL is held, the controller's A / B / X / Y go by position (the Switch's A on the right), so each "
+                  "move is on the button where the game draws it. The rest of the game keeps your bindings.",
+                  "Com ZL segurado, o A / B / X / Y do controle valem pela posição (o A do Switch fica à direita), então cada "
+                  "golpe fica no botão onde o jogo desenha ele. O resto do jogo mantém os seus comandos."));
     {
-        static const char *const names[] = {"Game layout", "Controller convention"};
-        opt_choice("Confirm button", &g_settings.menu_confirm, names, 2, MENU_CONFIRM_CONTROLLER,
-                   "Which button confirms in ZA Recomp's menus.");
+        const char *const names[] = {TR("Game layout", "Layout do jogo"), TR("Controller convention", "Padrão do controle")};
+        opt_choice(TR("Confirm button", "Botão de confirmar"), &g_settings.menu_confirm, names, 2, MENU_CONFIRM_CONTROLLER,
+                   TR("Which button confirms in ZA Recomp's menus.", "Qual botão confirma nos menus do ZA Recomp."));
     }
 
     opt_end();

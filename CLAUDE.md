@@ -45,6 +45,12 @@ Machine-specific paths (game files, install folder) are in `CLAUDE.local.md` whe
   off by `g_game_is_la`. Any new per-frame or per-draw code that reads or writes `GA()` must check it.
 - Merged from upstream LAS Recomp (`peiikai` remote) on 2026-10-26: Z-A-specific decisions are marked "Pokémon Z-A"
   in comments (saves written in place, no heap chunks, pacer off, `tools/za_patches.py`).
+- Issue numbers in comments that came from upstream (`issue #205`, `#19`, ...) are LAS Recomp's
+  (github.com/peiikai/LASRecomp/issues), not this repository's: kept as they are so upstream merges stay clean.
+  Link's Awakening-only code (randomizer, cosmetics, hint sheet, LiveSplit, `runtime/nvn/shader_variants.txt`...) is
+  kept for the same reason; it is gated off for Pokémon Z-A (`g_game_is_la`, and the menus' `menu_la_rows()`).
+- `runtime/ui/launcher.mm` is ZA Recomp's own start screen (not upstream's): upstream launcher changes are ported by
+  hand. Never delete `romfs.bin` there - for Pokémon Z-A it is the game's only data (zaimport writes no romfs/).
 - `tools/za/`: Z-A scripts (perf runs, log watcher, stack symbolizer, texture and font tools).
 
 ## Building (Windows, Git Bash)

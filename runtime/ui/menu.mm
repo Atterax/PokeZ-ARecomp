@@ -422,6 +422,7 @@ static void drain_events(ImGuiIO &io) {
 }
 
 static bool menu_la_tabs = true;  // tabs_body: Link's Awakening's tabs and rows are shown (false: ZA Recomp's own set)
+extern "C" bool menu_la_rows(void) { return menu_la_tabs; }  // (runtime/ui/controls_ui.mm)
 extern "C" void renderer_get_scale(float *sx, float *sy);
 extern "C" int input_pad_family(void);  // runtime/hle/input.c
 extern "C" double output_scale_dynamic_factor(void);
@@ -703,21 +704,10 @@ static void tab_quit(float scale, bool in_game) {
     opt_end();
 }
 
-// Pokémon Z-A's Game page: the button icons the game shows, its text language, and how to reach this menu
+// Pokémon Z-A's Game page: its text language, and how to reach this menu
 static void tab_game(void) {
     opt_begin("##game", ImGui::GetFontSize() / 34);
-    opt_section(TR("Game", "Jogo"));
-    {
-        static const char *const fam[] = {"Nintendo", "Xbox", "PlayStation"};
-        char autol[64];
-        snprintf(autol, sizeof autol, "Auto (%s)", input_pad_family() == 1 && settings_on_steam_deck() ? "Steam Deck" : fam[input_pad_family() % 3]);
-        const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation", TR("Keyboard", "Teclado"), "Steam Deck"};
-        opt_choice(TR("Button icons", "Ícones dos botões"), &g_settings.prompts, names, 6, PROMPTS_AUTO,
-                   TR("The buttons the game shows in its prompts. Auto: the controller you use (the keyboard's keys "
-                      "without one). Applies from the next start.",
-                      "Os botões que o jogo mostra nas dicas. Auto: o controle que você usa (as teclas do teclado se "
-                      "não houver controle). Vale a partir do próximo início."));
-    }
+    opt_section(TR("Game", "Jogo"));  // (its button icons: the Controls tab, with the rest of the controller)
     {   // what the game is told the console's language is: its text follows this (runtime/settings.c)
         char autol[64];
         snprintf(autol, sizeof autol, "Auto (%s)", settings_language_name());
