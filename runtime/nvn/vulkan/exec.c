@@ -2219,8 +2219,37 @@ static uint64_t prog_content_key(uint64_t vh, uint64_t fh, const ShaderKey *vkey
     return h;
 }
 
-#define PROG_TAB 4096
-static struct { uint64_t key; Prog *prog; } prog_tab[PROG_TAB];
+// The caches of programs and pipelines by key (get_program_, draw_): open addressing, doubled at half full. They were
+// fixed at 4096 / 8192 entries and never emptied: a long session filled them (Pokémon Z-A, ~29 minutes in, a new
+// area's shaders) and the next new key probed forever - the render thread spun, the game froze. (Render thread only.)
+typedef struct { uint64_t key; void *val; } KvEnt;
+typedef struct { KvEnt *t; uint32_t cap, n; } KvTab;
+static KvEnt *kv_find(KvTab *k, uint64_t key) {  // key's entry, or the empty one it would take (key != 0)
+    if (!k->cap) {  // (LARECOMP_VK_KV_START=<power of 2> (test): a small start, the growth exercised in any run)
+        static uint32_t start;
+        if (!start) start = ENV("LARECOMP_VK_KV_START") ? (uint32_t)atoi(ENV("LARECOMP_VK_KV_START")) : 4096;
+        k->cap = start, k->t = calloc(k->cap, sizeof *k->t);
+    }
+    uint32_t i = (uint32_t)(key ^ (key >> 31)) & (k->cap - 1);
+    while (k->t[i].key && k->t[i].key != key) i = (i + 1) & (k->cap - 1);
+    return &k->t[i];
+}
+static void kv_set(KvTab *k, KvEnt *e, uint64_t key, void *val) {  // e: kv_find's for key, no kv_find of k since
+    if (!e->key) {
+        if ((k->n + 1) * 2 > k->cap) {
+            KvEnt *old = k->t;
+            uint32_t oc = k->cap;
+            k->cap *= 2, k->t = calloc(k->cap, sizeof *k->t);
+            for (uint32_t i = 0; i < oc; i++) if (old[i].key) *kv_find(k, old[i].key) = old[i];
+            free(old);
+            e = kv_find(k, key);
+        }
+        k->n++;
+    }
+    e->key = key, e->val = val;
+}
+static void kv_clear(KvTab *k) { if (k->t) memset(k->t, 0, k->cap * sizeof *k->t); k->n = 0; }
+static KvTab prog_kv;
 
 static void prog_fp_check(Prog *p, NvnProgram *np) {  // (the lookups below are by code address: shader_prep.h)
     shader_fp_check(&p->fp[0], &np->stages[0], "vs");
@@ -2274,19 +2303,17 @@ static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     for (int k = 0; k < 4; k++) { h ^= (fkey->stencil_slots >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; }
     for (int k = 0; k < 4; k++) { h ^= (fkey->sint_slots >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; }
     if (!h) h = 1;
-    uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
-    while (prog_tab[slot].key && prog_tab[slot].key != h) slot = (slot + 1) & (PROG_TAB - 1);
-    if (prog_tab[slot].key) {
-        prog_fp_check(prog_tab[slot].prog, np);
-        return prog_tab[slot].prog;
+    KvEnt *slot = kv_find(&prog_kv, h);
+    if (slot->key) {
+        prog_fp_check(slot->val, np);
+        return slot->val;
     }
     {   // prepared before the game (the same code and keys)
         uint64_t vh = shader_stage_hash(&np->stages[0]), fh = shader_stage_hash(&np->stages[1]);
         uint64_t ck = prog_content_key(vh, fh, vkey, fkey);
         Prog *pp = vh && fh && prep_progs_n ? PREP_GET(prep_progs, ck) : NULL;
         if (pp) {
-            prog_tab[slot].key = h;
-            prog_tab[slot].prog = pp;
+            kv_set(&prog_kv, slot, h, pp);
             prog_fp_check(pp, np);
             return pp;
         }
@@ -2294,8 +2321,7 @@ static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     }
     Prog *p = calloc(1, sizeof *p);
     prog_fp_check(p, np);  // (takes the fingerprint)
-    prog_tab[slot].key = h;
-    prog_tab[slot].prog = p;
+    kv_set(&prog_kv, slot, h, p);
     note_code(&np->stages[0], fp[0], "vs");
     note_code(&np->stages[1], fp[1], "fs");
     for (int i = 0; i < 2; i++) {
@@ -2529,8 +2555,7 @@ struct PipeMemo {
     Pipe *pp;
     VtxLayout vl;  // the layout pipe_key_fill made from these inputs (dynamic vertex input leaves it out of pp's key)
 };
-#define PIPE_TAB 8192
-static struct { uint64_t key; Pipe *pipe; } pipe_tab[PIPE_TAB];
+static KvTab pipe_kv;  // (pipelines by key hash: kv_find above)
 
 // 8 bytes a step (PipeKey is ~700 bytes, hashed per draw); in-memory tables only - hmix values are compared with
 // stored constants (fragment-shader hashes) and must not change.
@@ -5164,8 +5189,8 @@ static int g_cs_n;  // (compute program table below)
 // address (the old Prog / Pipe objects are leaked, so pipeline keys holding their pointers can't collide), compute
 // programs, shared copies - and the heap import: its pages are replaced (re-imported on first use).
 void vk_exec_reset(void) {
-    memset(prog_tab, 0, sizeof prog_tab);
-    memset(pipe_tab, 0, sizeof pipe_tab);
+    kv_clear(&prog_kv);
+    kv_clear(&pipe_kv);
     key_gen++;  // (the key memo: the tables' answers are gone)
     ds_gen++;   // (set reuse: the heap import below is destroyed at once)
     g_cs_n = 0;
@@ -6405,9 +6430,8 @@ static void draw_(CmdRec *r, bool indexed) {
         if (g_vkc.no_eds1) k.fx = fx;
         uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
         if (!ph) ph = 1;
-        uint32_t pslot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1);
-        while (pipe_tab[pslot].key && pipe_tab[pslot].key != ph) pslot = (pslot + 1) & (PIPE_TAB - 1);
-        pp = pipe_tab[pslot].pipe;
+        KvEnt *pslot = kv_find(&pipe_kv, ph);
+        pp = pslot->val;
         if (!pp) {
             if (shader_rec_recording()) {
                 ShaderRec rec;
@@ -6430,8 +6454,7 @@ static void draw_(CmdRec *r, bool indexed) {
                 pp->k = k;
                 run_job(build_pipeline, pp, &pp->state);
             }
-            pipe_tab[pslot].key = ph;
-            pipe_tab[pslot].pipe = pp;
+            kv_set(&pipe_kv, pslot, ph, pp);
         }
         if (pm) {
             pm->gen = key_gen; pm->ncolor = pass_ncolor; pm->samples = pass_samples; pm->depth = pass_depth; pm->stencil = pass_stencil;
