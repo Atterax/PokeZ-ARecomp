@@ -126,6 +126,10 @@ typedef struct {
     bool glsl;               // emit Vulkan GLSL: dialect-specific constructs here, the rest via glsl_rewrite()
     bool uses_gmem_store;    // STG present: the gmem buffer is not readonly
     uint32_t cbuf_need[18];  // highest constant vec4 index + 1 per cbuf (array size of the GLSL block)
+    // each BRX's jump table targets (glsl_flatten); brx_unknown: one whose table wasn't found (any instruction)
+    uint32_t brx_pc[32], brx_tgt[32][64];
+    int brx_ntgt[32], nbrx;
+    bool brx_unknown;
 } Ctx;
 
 static uint64_t bits(uint64_t w, int lo, int n) { return (w >> lo) & ((n == 64) ? ~0ull : ((1ull << n) - 1)); }
@@ -2288,6 +2292,217 @@ static bool glsl_early_tests(const Ctx *c) {
 }
 
 // Declarations + entry point around the (rewritten) body; mirrors the MSL assembly in maxwell_translate.
+// ---- straight-line form (Vulkan / GLSL). A shader with branches is translated as a `switch (pc)` state machine in a
+// loop, with the SSY / PBK reconvergence stacks as 16 shifted variables each: drivers compile that poorly (Pokémon Z-A's
+// deferred lighting pass took 5.2 ms of an RTX 4060 at 2x; written as plain code, 1.7 ms). When every branch goes
+// forward, the stacks are resolved here, at translation time (each SYNC / BRK gets the one target every path to it
+// agrees on), and the dispatcher becomes straight-line code: one variable, tgt, holds the address being skipped to
+// (0: running); each run of code is guarded by tgt == 0, each branch target clears it on arrival. An EXIT, or a computed
+// branch to an address that isn't a target, leaves it set to the end. Anything else (loops: a backward branch, PCNT /
+// CONT, stacks that differ between paths, an unknown jump table) keeps the state machine. LARECOMP_SHADER_FLAT=0: off.
+// The input is the body after glsl_rewrite(); the patterns are the ones emit_insn() writes.
+typedef struct { int kind; uint32_t arg; int guard; size_t line; } FlatTok;  // guard: line index of its `if (..) {`, or -1
+enum { FT_LINE, FT_LABEL, FT_PUSH_SSY, FT_PUSH_PBK, FT_POP_SSY, FT_POP_PBK, FT_BRA, FT_BRX, FT_EXIT };
+
+static const char *skip_sp(const char *s) { while (*s == ' ') s++; return s; }
+static bool starts(const char *s, const char *p) { return !strncmp(s, p, strlen(p)); }
+
+// a control line's kind (FT_LINE: not one; -1: a form this pass doesn't know)
+static int flat_kind(const char *l, uint32_t *arg) {
+    const char *s = skip_sp(l);
+    const char *q;
+    if (starts(s, "ssy_15 = ssy_14;") && (q = strstr(s, " ssy_0 = "))) { *arg = (uint32_t)strtoul(q + 9, NULL, 10); return FT_PUSH_SSY; }
+    if (starts(s, "pbk_15 = pbk_14;") && (q = strstr(s, " pbk_0 = "))) { *arg = (uint32_t)strtoul(q + 9, NULL, 10); return FT_PUSH_PBK; }
+    if (starts(s, "pc = ssy_0;")) return FT_POP_SSY;
+    if (starts(s, "pc = pbk_0;")) return FT_POP_PBK;
+    if (starts(s, "{ uint t = ") && strstr(s, "; pc = t; continue; }")) return FT_BRX;
+    if (starts(s, "exit_now = true; break;")) return FT_EXIT;
+    if (starts(s, "pc = ") && s[5] >= '0' && s[5] <= '9') {
+        char *e;
+        *arg = (uint32_t)strtoul(s + 5, &e, 10);
+        if (!strcmp(e, "u; continue;")) return FT_BRA;
+    }
+    if (strstr(s, "pc = ") || strstr(s, "continue;") || strstr(s, "pcnt_") || strstr(s, "exit_now") || strstr(s, "ssy_") ||
+        strstr(s, "pbk_"))
+        return -1;
+    return FT_LINE;
+}
+
+static bool flat_fail(const char *why) {
+    static int log = -1;
+    if (log < 0) log = getenv("LARECOMP_SHADER_FLAT_LOG") != NULL;
+    if (log) fprintf(stderr, "[flat] kept the state machine: %s\n", why);
+    return false;
+}
+
+// body -> *out (the straight-line form, without the tgt declaration); false: keep the state machine
+static bool glsl_flatten(Ctx *c, const char *body, Str *out) {
+    if (c->brx_unknown) return flat_fail("a computed branch without a known table");
+    // lines
+    size_t nl = 0, cap = 256;
+    char **L = malloc(cap * sizeof *L);
+    for (const char *p = body; *p;) {
+        const char *e = strchr(p, '\n');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (nl == cap) L = realloc(L, (cap *= 2) * sizeof *L);
+        L[nl] = malloc(n + 1);
+        memcpy(L[nl], p, n);
+        L[nl++][n] = 0;
+        p += n + (e ? 1 : 0);
+    }
+    FlatTok *T = malloc((nl + 1) * sizeof *T);
+    size_t nt = 0;
+    bool ok = true;
+    const char *why = "";
+    int depth = 0;  // brace depth of plain lines (control lines must be at the top level of the body)
+    for (size_t i = 0; i < nl && ok; i++) {
+        const char *l = L[i];
+        uint32_t arg = 0;
+        if (starts(l, "  case ")) {
+            char *e;
+            uint32_t a = (uint32_t)strtoul(l + 7, &e, 10);
+            if (strcmp(e, "u:") || depth) { ok = false, why = "a label"; break; }
+            T[nt++] = (FlatTok){FT_LABEL, a, -1, i};
+            continue;
+        }
+        int k = flat_kind(l, &arg);
+        if (k < 0) { ok = false, why = l; break; }
+        // a guarded control line: `  if (cond) {`, the line, `  }`
+        if (k == FT_LINE && depth == 0 && starts(l, "  if (") && l[strlen(l) - 1] == '{' && i + 2 < nl && !strcmp(L[i + 2], "  }")) {
+            uint32_t a2 = 0;
+            int k2 = flat_kind(L[i + 1], &a2);
+            if (k2 < 0) { ok = false, why = L[i + 1]; break; }
+            if (k2 == FT_PUSH_SSY || k2 == FT_PUSH_PBK) { ok = false, why = "a guarded push"; break; }
+            if (k2 != FT_LINE) {
+                T[nt++] = (FlatTok){k2, a2, (int)i, i + 1};
+                i += 2;
+                continue;
+            }
+        }
+        if (k != FT_LINE && depth) { ok = false, why = "a control line inside a block"; break; }
+        T[nt++] = (FlatTok){k, arg, -1, i};
+        if (k == FT_LINE)
+            for (const char *q = l; *q; q++) depth += *q == '{' ? 1 : *q == '}' ? -1 : 0;
+        if (depth < 0) { ok = false, why = "unbalanced braces"; }
+    }
+    if (ok && depth) ok = false, why = "unbalanced braces";
+    // the stacks along every path (forward branches only: each token is reached with one stack state)
+    enum { DMAX = 16 };
+    typedef struct { uint8_t seen, nssy, npbk; uint32_t ssy[DMAX], pbk[DMAX]; } St;
+    St *S = ok ? calloc(nt + 1, sizeof *S) : NULL;
+    uint32_t *res = ok ? calloc(nt + 1, sizeof *res) : NULL;  // a pop's resolved target (0: never reached)
+    size_t *lab = NULL;  // token index of each label, by search
+    typedef struct { size_t k; St st; } Work;
+    size_t nw = 0, wcap = 64;
+    Work *W = ok ? malloc(wcap * sizeof *W) : NULL;
+#define LABEL_TOK(addr, outk) do { outk = (size_t)-1; for (size_t q_ = 0; q_ < nt; q_++) if (T[q_].kind == FT_LABEL && T[q_].arg == (addr)) { outk = q_; break; } } while (0)
+#define PUSH_WORK(kk, ss) do { if (nw == wcap) W = realloc(W, (wcap *= 2) * sizeof *W); W[nw].k = (kk); W[nw].st = (ss); nw++; } while (0)
+    if (ok) { St s0 = {0}; PUSH_WORK(0, s0); }
+    while (ok && nw) {
+        Work w = W[--nw];
+        size_t k = w.k;
+        St st = w.st;
+        for (; k < nt && ok; k++) {
+            if (S[k].seen) {
+                if (S[k].nssy != st.nssy || S[k].npbk != st.npbk || memcmp(S[k].ssy, st.ssy, sizeof st.ssy[0] * st.nssy) ||
+                    memcmp(S[k].pbk, st.pbk, sizeof st.pbk[0] * st.npbk))
+                    ok = false, why = "the stacks differ between paths";
+                break;
+            }
+            S[k] = st;
+            S[k].seen = 1;
+            FlatTok *t = &T[k];
+            bool cond = t->guard >= 0;
+            if (t->kind == FT_PUSH_SSY || t->kind == FT_PUSH_PBK) {
+                uint32_t *a = t->kind == FT_PUSH_SSY ? st.ssy : st.pbk;
+                uint8_t *n = t->kind == FT_PUSH_SSY ? &st.nssy : &st.npbk;
+                if (*n == DMAX) { ok = false, why = "stack depth"; break; }
+                memmove(a + 1, a, *n * sizeof *a);
+                a[0] = t->arg;
+                (*n)++;
+            } else if (t->kind == FT_POP_SSY || t->kind == FT_POP_PBK || t->kind == FT_BRA) {
+                St nx = st;
+                uint32_t to;
+                if (t->kind == FT_BRA) to = t->arg;
+                else {
+                    uint32_t *a = t->kind == FT_POP_SSY ? nx.ssy : nx.pbk;
+                    uint8_t *n = t->kind == FT_POP_SSY ? &nx.nssy : &nx.npbk;
+                    if (!*n) { ok = false, why = "a pop of an empty stack"; break; }
+                    to = a[0];
+                    memmove(a, a + 1, (*n - 1) * sizeof *a);
+                    (*n)--;
+                    if (res[k] && res[k] != to) { ok = false, why = "a pop with two targets"; break; }
+                    res[k] = to;
+                }
+                size_t tk;
+                LABEL_TOK(to, tk);
+                if (tk == (size_t)-1 || tk <= k) { ok = false, why = "a backward branch (a loop)"; break; }
+                PUSH_WORK(tk, nx);
+                if (!cond) break;
+            } else if (t->kind == FT_BRX) {
+                int b = -1;
+                for (int q = 0; q < c->nbrx; q++) if (strstr(L[t->line], "uint t = ") && b < 0) {
+                    // (the BRX's own pc: its line reads `uint t = <pc + 8>u + ...`)
+                    uint32_t at = (uint32_t)strtoul(strstr(L[t->line], "uint t = ") + 9, NULL, 10) - 8;
+                    if (c->brx_pc[q] == at) b = q;
+                }
+                if (b < 0) { ok = false, why = "a computed branch without its table"; break; }
+                for (int q = 0; q < c->brx_ntgt[b] && ok; q++) {
+                    // (inside a PBK region the table's targets are its cases, before the break target: an entry past
+                    // that is the word after the table, read as one more - brx_table_labels)
+                    if (st.npbk && c->brx_tgt[b][q] >= st.pbk[0]) continue;
+                    size_t tk;
+                    LABEL_TOK(c->brx_tgt[b][q], tk);
+                    if (tk == (size_t)-1 || tk <= k) { ok = false, why = "a computed branch backward"; break; }
+                    PUSH_WORK(tk, st);
+                }
+                if (!cond) break;
+            } else if (t->kind == FT_EXIT) {
+                if (!cond) break;
+            }
+        }
+    }
+    // emit: runs of code under `if (tgt == 0u)`, each label clearing tgt
+    if (ok) {
+        bool open = false;
+#define CLOSE() do { if (open) { sp(out, "  }\n"); open = false; } } while (0)
+#define OPEN() do { if (!open) { sp(out, "  if (tgt == 0u) {\n"); open = true; } } while (0)
+        for (size_t k = 0; k < nt; k++) {
+            FlatTok *t = &T[k];
+            switch (t->kind) {
+            case FT_LABEL: CLOSE(); sp(out, "  if (tgt == %uu) tgt = 0u;\n", t->arg); break;
+            case FT_PUSH_SSY: case FT_PUSH_PBK: break;
+            case FT_LINE: OPEN(); sp(out, "%s\n", L[t->line]); break;
+            default: {
+                OPEN();
+                if (t->guard >= 0) sp(out, "%s\n", L[t->guard]);
+                if (t->kind == FT_BRA) sp(out, "    tgt = %uu;\n", t->arg);
+                else if (t->kind == FT_POP_SSY || t->kind == FT_POP_PBK) {
+                    if (res[k]) sp(out, "    tgt = %uu;\n", res[k]);
+                    else sp(out, "    tgt = 0xFFFFFFFFu;\n");  // (never reached)
+                } else if (t->kind == FT_BRX) {
+                    const char *a = strstr(L[t->line], "{ uint t = ");
+                    const char *e = strstr(a, "; pc = t; continue; }");
+                    sp(out, "    %.*s; tgt = t; }\n", (int)(e - a), a);
+                } else sp(out, "    tgt = 0xFFFFFFFFu;\n");  // EXIT
+                if (t->guard >= 0) sp(out, "  }\n");
+                CLOSE();
+            }
+            }
+        }
+        CLOSE();
+#undef CLOSE
+#undef OPEN
+    } else {
+        flat_fail(why);
+    }
+#undef LABEL_TOK
+#undef PUSH_WORK
+    for (size_t i = 0; i < nl; i++) free(L[i]);
+    free(L), free(T), free(S), free(res), free(W), free(lab);
+    return ok;
+}
+
 static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     ShaderInfo *info = c->info;
     const ShaderKey *key = c->key;
@@ -2489,7 +2704,15 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (c->uses_cc) sp(&s, "  uint cc = 0u; bool ccz = false, ccs = false;\n");
     if (c->uses_local) sp(&s, "  uint lmem[%d]; for (int li_ = 0; li_ < %d; li_++) lmem[li_] = 0u;\n", LMEM_WORDS, LMEM_WORDS);
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
-    if (any_branch) {
+    static int flat_on = -1;
+    if (flat_on < 0) { const char *e = getenv("LARECOMP_SHADER_FLAT"); flat_on = !e || atoi(e) != 0; }
+    Str flat = {0};
+    if (any_branch && flat_on && !dbg && glsl_flatten(c, body.buf ? body.buf : "", &flat)) {
+        sp(&s, "  uint tgt = 0u;  // (straight-line form: the address being skipped to, 0 running - glsl_flatten)\n");
+        sp(&s, "%s", flat.buf ? flat.buf : "");
+        free(flat.buf);
+    } else if (any_branch) {
+        free(flat.buf);
         sp(&s, "  uint pc = 8u; uint ssy_0 = 0u; uint ssy_1 = 0u; uint ssy_2 = 0u; uint ssy_3 = 0u; uint ssy_4 = 0u; uint ssy_5 = 0u; uint ssy_6 = 0u; uint ssy_7 = 0u; uint ssy_8 = 0u; uint ssy_9 = 0u; uint ssy_10 = 0u; uint ssy_11 = 0u; uint ssy_12 = 0u; uint ssy_13 = 0u; uint ssy_14 = 0u; uint ssy_15 = 0u; uint pbk_0 = 0u; uint pbk_1 = 0u; uint pbk_2 = 0u; uint pbk_3 = 0u; uint pbk_4 = 0u; uint pbk_5 = 0u; uint pbk_6 = 0u; uint pbk_7 = 0u; uint pbk_8 = 0u; uint pbk_9 = 0u; uint pbk_10 = 0u; uint pbk_11 = 0u; uint pbk_12 = 0u; uint pbk_13 = 0u; uint pbk_14 = 0u; uint pbk_15 = 0u; uint pcnt_0 = 0u;\n");
         sp(&s, "  bool exit_now = false;\n");
         sp(&s, "  for (uint guard = 0u; guard < 100000u; guard++) {\n  switch (pc) {\n");
@@ -2566,7 +2789,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
 // are read until one isn't an instruction of this shader (the end of the table; a word past it that still looks like
 // one only adds a harmless case). False: not that shape (the register set some other way, no constants, nothing
 // valid) - the caller labels every instruction as before. LARECOMP_BRX_ALL_LABELS=1: always every instruction.
-static bool brx_table_labels(const uint8_t *code, size_t i, size_t end, const uint8_t *blob, size_t const_offset, uint8_t *label) {
+static bool brx_table_labels(const uint8_t *code, size_t i, size_t end, const uint8_t *blob, size_t const_offset, uint8_t *label,
+                             uint32_t *tgts, int *ntgts) {
     static int all = -1;
     if (all < 0) { const char *e = getenv("LARECOMP_BRX_ALL_LABELS"); all = e && atoi(e) != 0; }
     if (all || const_offset >= 0x10000 || const_offset < 0x80) return false;  // (0x10000: no constants known)
@@ -2601,6 +2825,7 @@ static bool brx_table_labels(const uint8_t *code, size_t i, size_t end, const ui
         t = norm_target(t);  // (as the BRX itself does at run time)
         if ((size_t)(t / 8) >= end) break;
         mark[t / 8] = 1;
+        if (*ntgts < 64) tgts[(*ntgts)++] = (uint32_t)t;
         n++;
     }
     if (n) for (size_t k = 0; k < end; k++) label[k] |= mark[k];
@@ -2665,7 +2890,15 @@ static ShaderInfo *translate(const uint8_t *blob, size_t max_size, int stage, co
         }
         if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) {  // BRX: its jump table's targets, else any instruction
             any_branch = true;
-            if (!c->glsl || !brx_table_labels(code, i, end, blob, max_size, label)) memset(label, 1, end);
+            bool known = false;
+            if (c->glsl && c->nbrx < 32) {
+                int k = c->nbrx;
+                c->brx_pc[k] = (uint32_t)(i * 8), c->brx_ntgt[k] = 0;
+                known = brx_table_labels(code, i, end, blob, max_size, label, c->brx_tgt[k], &c->brx_ntgt[k]);
+                if (known && c->brx_ntgt[k] < 64) c->nbrx++;
+                else known = false;
+            }
+            if (!known) { c->brx_unknown = true; memset(label, 1, end); }
         }
         if ((w & 0xfff8000000000000ull) == 0xf0f8000000000000ull || (w & 0xfff0000000000000ull) == 0xe340000000000000ull ||
             (w & 0xfff0000000000000ull) == 0xe350000000000000ull)
