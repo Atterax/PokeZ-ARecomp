@@ -1,8 +1,8 @@
 #!/bin/bash
 # Windows (Git Bash): a scripted play for performance. IN="frame:BUTTON:frames,..." (LARECOMP_INPUT), T=timeout s,
 # on a scratch data root, build/perf/: the install's game files and game code linked in, its own copies of the
-# settings, the save (the game autosaves) and the shader cache - the player's are never touched. Then the [hitch] lines
-# (frames over 100 ms, runtime/nvn/vulkan/exec.c vk_hitch_frame) summed up.
+# settings, the save (the game autosaves) and the shader cache - the player's are never touched. Then the [slow] lines
+# (frames over 50 ms, runtime/nvn/slowframe.c) summed up.
 #   GAME=<install folder> (with extracted/, save/save_0, larecomp.ini: the game code built and a save to start from)
 #   EXE=<lasrecomp.exe> (default: build/dist-za/ZA Recomp/lasrecomp.exe, with its DLLs next to it)
 #   CACHE=cold (empty shader caches: every shader is new, as the first time a move is seen; default) | warm (the
@@ -52,13 +52,14 @@ for p in $(powershell -NoProfile -Command "Get-Process lasrecomp -EA 0 | ? Path 
 done
 grep -a -m3 "FATAL\|EXCEPTION\|access violation" "$R/perf.log"
 grep -a "^\[vk\] t=" "$R/perf.log" | tail -1 | cut -c1-60
-awk '/^\[hitch\]/ {
+# the [slow] lines (runtime/nvn/slowframe.c: a frame over LARECOMP_SLOW_FRAME_MS, 50 by default, and what it did)
+awk '/^\[slow\] frame/ {
         n++; ms = $4 + 0; tot += ms; if (ms > mx) mx = ms
-        for (i = 1; i <= NF; i++) {
-            if ($i == "render") r += $(i+1); if ($i == "present") p += $(i+1); if ($i == "game") g += $(i+1)
-            if ($i == "(GPU" ) gw += $(i+2); if ($i == "shader") sw += $(i+2); if ($i == "(blocked") { v = $(i+1); sub(/\);?/, "", v); b += v }
-        }
+        if (match($0, /render cpu [0-9]+/)) r += substr($0, RSTART + 11, RLENGTH - 11)
+        if (match($0, /game cpu [0-9]+/)) g += substr($0, RSTART + 9, RLENGTH - 9)
+        if (match($0, /gpu wait [0-9]+/)) gw += substr($0, RSTART + 9, RLENGTH - 9)
+        if (match($0, /queue wait [0-9]+/)) q += substr($0, RSTART + 11, RLENGTH - 11)
      }
-     END { if (!n) { print "no frames over 100 ms"; exit }
-           printf "%d frames over 100 ms, %.0f ms in all (longest %.0f): render %.0f (GPU waits %.0f, shader waits %.0f), " \
-                  "present %.0f, game %.0f (blocked %.0f)\n", n, tot, mx, r, gw, sw, p, g, b }' "$R/perf.log"
+     END { if (!n) { print "no frames over 50 ms"; exit }
+           printf "%d frames over 50 ms, %.0f ms in all (longest %.0f): render cpu %.0f, game cpu %.0f, gpu waits %.0f, " \
+                  "queue waits %.0f\n", n, tot, mx, r, g, gw, q }' "$R/perf.log"

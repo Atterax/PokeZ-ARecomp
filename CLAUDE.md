@@ -13,16 +13,32 @@ Machine-specific paths (game files, install folder) are in `CLAUDE.local.md` whe
 - `runtime/kernel.c`: threads, mutexes and condvars, the address arbiter, the memory map, SVCs.
 - `runtime/services/fs.c`: the RomFS, the mod layers (`mods/<name>/romfs`, with `arc/data.trpfd` unlisting) and the
   save files (`save/save_0/`).
-- `runtime/nvn/vulkan/exec.c`: command-list translation, per draw: pipeline key, descriptor sets, uniforms. This is
-  the hot path, and Z-A runs it on the game's presenting thread. Also has GMEM_FAST (compute-buffer copies with a
-  merge copy-back, `gfast_merge.comp`), the vertex cache and page-write tracking.
-- `runtime/nvn/vulkan/textures.c`: texture upload and change checks.
+- `runtime/nvn/rqueue.c`: the render thread. `nvnQueueSubmitCommands` queues the call's lists (one item:
+  `rq_submit_lists`) and returns; the render thread translates them. Fences are item numbers.
+- `runtime/nvn/vulkan/exec.c`: command-list translation, per draw: pipeline key (with a memo), descriptor sets (reused
+  while their contents repeat), uniforms. Also GMEM_FAST (compute-buffer copies with a merge copy-back,
+  `gfast_merge.comp`), the vertex cache, page-write tracking, and Z-A's guest window (`gwin`: Z-A has no heap).
+- `runtime/nvn/vulkan/record.c`: the recorder thread. Every `vkCmd*` / descriptor / queue call goes through a `rec_*`
+  wrapper - never call `vkCmd*` directly from translation code (a race with the recorder).
+- `runtime/nvn/vulkan/textures.c`: texture upload and change checks. Unpacking (deswizzle) is queued and done on a
+  few threads just before the submission (`vk_tex_unpack_finish`, `LARECOMP_TEX_UNPACK_THREADS`). Textures are
+  uploaded when the game registers them (`backend_prefetch_texture`, a render-queue item from
+  `nvnTexturePoolRegisterTexture`; `LARECOMP_TEX_PREFETCH=0` off): a battle's textures load during its loading
+  freeze, not on its first frame. Costs ~350 MB more GPU memory.
+- `runtime/nvn/shader_prep.c` / `shader_seen.c`: shader preparation. Z-A records every variant it builds
+  (`cache/shader_seen.txt`) and its shader code (`cache/shader_code.bin`, the player's own data, never shipped), and
+  prepares them at its GPU device setup (`shader_prep_boot`, ~0.2 s warm; `LARECOMP_SHADER_PREP=0` off). Not from the
+  start screen: before boot the guest memory window is Zelda's and the translations would bake the wrong one in.
+- `runtime/crash_explain.c`: the crash dialog's plain-language explanation.
 - `runtime/nvn/vulkan/device.c`: present, `[mem]` and `[scale]` log lines, screenshots.
 - `runtime/nvn/maxwell/translate.c`: Maxwell shader -> GLSL/MSL.
 - `runtime/ui/launcher.mm`: the start screen (game-file setup, save import, update check).
 - `runtime/ui/menu.mm`: the F1 settings menu.
-- `runtime/hle/*`: host-side function hooks. The Zelda-only ones (warp, souls, digs, rando, cheats...) are gated off
-  for Z-A by `g_game_is_la`. Keep them while upstream LAS Recomp is still merged.
+- `runtime/hle/*`: host-side function hooks. The Zelda-only ones (warp, souls, digs, rando, cheats...) read Zelda
+  addresses through `GA()` (`runtime/game_addresses.h`); for Z-A that table is Zelda 1.0.0's and the hooks are gated
+  off by `g_game_is_la`. Any new per-frame or per-draw code that reads or writes `GA()` must check it.
+- Merged from upstream LAS Recomp (`peiikai` remote) on 2026-10-26: Z-A-specific decisions are marked "Pokémon Z-A"
+  in comments (saves written in place, no heap chunks, pacer off, `tools/za_patches.py`).
 - `tools/za/`: Z-A scripts (perf runs, log watcher, stack symbolizer, texture and font tools).
 
 ## Building (Windows, Git Bash)
@@ -51,15 +67,24 @@ One-time setup: `tools/setup_windows.ps1` (MSYS2 UCRT64 toolchain). Fast exe reb
 - Record input: `LARECOMP_RECORD_INPUT=<file>`. Replay: `LARECOMP_INPUT=@<file>`.
 - `GAME=<install> tools/za/watch-log.sh`: follows `logs/play.log` live (hitches, errors, crashes, `[shot]`).
 - Profiling:
-  - `LARECOMP_VK_PROF=1`: ms per second by category in the fps line.
-  - `LARECOMP_HITCH_MS=18`: per-frame breakdown of slow frames.
+  - `LARECOMP_VK_PROF=1`: ms per second by category in the fps line (recorder, set reuse, key memo stats too).
+  - `[slow]` lines: every frame over `LARECOMP_SLOW_FRAME_MS` (default 50) with what it did.
   - `LARECOMP_SAMPLE=<delay>,<dur>` with `LARECOMP_SAMPLE_EXEC=1`: stack sampling of the command-list thread into
-    `build/stacks.txt`; symbolize it with `tools/za/stacks.py`.
+    `build/stacks.txt`; symbolize it with `tools/za/stacks.py`. Without `_EXEC`: every thread's instruction pointer
+    (~30 Hz each) into `<data root>/build/samples.txt`, for `tools/za/samples.py`. Run with `LARECOMP_RENDER_THREAD=0`
+    to stack-sample the game thread.
+  - `LARECOMP_PROF_SVC=1`: kernel calls over 10 ms, and per-thread call counts (`[svcprof]`).
+  - `LARECOMP_LOG_READS=<file>`: every RomFS read with its time and duration.
+- Windows: never `VirtualQuery` inside the guest window on a hot path. It measures the run of like pages, GBs here,
+  ~15 ms a call (it made every file read 3 ms and every first touch of guest memory slow until 2026-10-27).
+- Test runs read an ini with `fps60 = 0`: pass `LARECOMP_FPS=60`, or the fps line shows 30.
 - In game: F1 opens the menu, F9 dumps the next frame's passes, F10 saves a screenshot to `screenshots/`.
 - Kill switches for recent changes, to bisect visual bugs:
   - `LARECOMP_VK_GMEM_FAST=0`, `LARECOMP_VK_GFAST_MERGE=0`, `LARECOMP_IB_GUARD=0`, `LARECOMP_VK_CLAMP_COLOR=1`,
     `LARECOMP_WARP_EMU=0`
   - `LARECOMP_VK_SUBMIT_EACH=1`, `LARECOMP_VK_BATCH_DRAWS=<n>`
+  - `LARECOMP_RENDER_THREAD=0` (translate on the game thread), `LARECOMP_VK_RECORDER=0`, `LARECOMP_VK_NO_SET_REUSE=1`,
+    `LARECOMP_VK_NO_KEY_MEMO=1`, `LARECOMP_VK_NO_CBUF_LEAN=1`
   - `LARECOMP_VK_PAGES_OUTSIDE=0`, `LARECOMP_VK_NO_SLOT_MEMO=1`
 - Unit and fuzz tests exist (`tools/test_translate.sh`, `test_vk_pipelines.sh`, `test_lift.py`, `test_simd.py`) but
   there is no CI. Most checks are real game runs.

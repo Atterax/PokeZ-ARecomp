@@ -1,6 +1,6 @@
 #!/bin/bash
 # Windows (Git Bash): follows a player's logs/play.log while they play and prints only what needs a look - for a
-# monitor (each line an event): the [hitch] lines (slow frames, runtime/nvn/vulkan/exec.c vk_hitch_frame), fps drops,
+# monitor (each line an event): the [slow] lines (slow frames, runtime/nvn/slowframe.c), fps drops,
 # errors and crashes, and when the game starts and exits. Each line has its line number in play.log (L<n>) to read
 # around it. Polled, the log never held open: the game renames it to play-anterior.log at each start (runtime/main.c).
 #   GAME=<install folder> (needed: the ZA Recomp folder with lasrecomp.exe and logs/)
@@ -45,7 +45,7 @@ run=$(running)
                     else print "[watcher] lasrecomp.exe exited" (closed ? " (window closed)" : " WITHOUT \"window closed\": a crash? the log ends at L" NR - skip - 1 + base)
                     fflush(); skip++; next }
     /^window closed/ { closed = 1; out($0); next }
-    /^\[hitch\]|^\[vtxstate\]|^\[black\]|^\[shader\]|full-screen draw waited/ || /^FATAL|^\*\*\* |EXCEPTION|access violation|[Aa]ssert|VK_ERROR|device lost|out of memory|gave up|unimplemented/ { out($0); next }
+    /^\[slow\]|^\[hitch\]|^\[vtxstate\]|^\[black\]|^\[shader\]|full-screen draw waited/ || /^FATAL|^\*\*\* |EXCEPTION|access violation|[Aa]ssert|VK_ERROR|device lost|out of memory|gave up|unimplemented/ { out($0); next }
     /^\[launcher\]|^\[gamelib\]|^\[shot\]/ { out($0); next }
     # fps: below 85 % of the best so far (30 or 60 fps, the settings), at most once per 10 s of the log
     /^\[vk\] t=[0-9.]+ frame [0-9]+ [0-9.]+ fps/ {

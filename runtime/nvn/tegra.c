@@ -103,6 +103,29 @@ static void copy_surface(const uint8_t *src, uint8_t *dst, uint32_t wb, uint32_t
     uint32_t width_gobs = (row_bytes + 63) / 64;
     uint32_t gob_rows = 8u << bh_log2;
     uint64_t blocks_rows = (hb + gob_rows - 1) / gob_rows;
+    if (to_linear) {  // (the uploads: gob_offset's parts once a row and once a GOB, a whole GOB row as its 4 fixed
+        // 16-byte sectors (x 0, 16, 32, 48 -> +0, +32, +256, +288) - the per-16-byte gob_offset ran at ~1 GB/s)
+        uint64_t block_size = 512ull << (bh_log2 + bd_log2);
+        for (uint32_t z = 0; z < d; z++)
+            for (uint32_t y = 0; y < hb; y++) {
+                uint8_t *lin = dst + ((uint64_t)z * hb + y) * row_bytes;
+                uint32_t gob_y = y >> 3, yi = y & 7;
+                uint64_t row = ((uint64_t)(z >> bd_log2) * blocks_rows + (gob_y >> bh_log2)) * width_gobs * block_size +
+                               ((uint64_t)(z & ((1u << bd_log2) - 1)) << bh_log2 | (gob_y & ((1u << bh_log2) - 1))) * 512 +
+                               ((yi >> 1) << 6 | (yi & 1) << 4);
+                uint32_t full = row_bytes / 64;
+                for (uint32_t g = 0; g < full; g++) {
+                    const uint8_t *s = src + row + (uint64_t)g * block_size;
+                    uint8_t *o = lin + g * 64;
+                    memcpy(o, s, 16), memcpy(o + 16, s + 32, 16), memcpy(o + 32, s + 256, 16), memcpy(o + 48, s + 288, 16);
+                }
+                for (uint32_t x = full * 64; x < row_bytes; x += 16) {  // (a last part GOB)
+                    uint32_t n = row_bytes - x < 16 ? row_bytes - x : 16, xi = x & 63;
+                    memcpy(lin + x, src + row + (uint64_t)(x >> 6) * block_size + ((xi >> 5) << 8 | ((xi >> 4) & 1) << 5 | (xi & 15)), n);
+                }
+            }
+        return;
+    }
     for (uint32_t z = 0; z < d; z++) {
         for (uint32_t y = 0; y < hb; y++) {
             uint8_t *lin = dst + ((uint64_t)z * hb + y) * row_bytes;

@@ -37,6 +37,9 @@ void rt_dispatch(Cpu *c);                 // call function at c->pc
 // setjmp too; the guest longjmp's final `br x30` to that return address (with that sp) lands back there.
 typedef struct RtJmp { jmp_buf host; uint64_t buf, ret, sp; } RtJmp;
 RtJmp *rt_setjmp_site(Cpu *c, uint64_t ret);
+// hook site (tools/patches.py HOOKS, runtime/hle/hooks.c): 0 = run the instruction, 1 = the hook did it all,
+// 2.. = jump to the site's first.. target
+int rt_hook(Cpu *c, uint64_t site);
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc);
 void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) __attribute__((noreturn));
 void rt_udf(Cpu *c, uint64_t pc) __attribute__((noreturn));
