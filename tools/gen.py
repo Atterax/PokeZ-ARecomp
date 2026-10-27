@@ -18,6 +18,7 @@ import unicorn as uc
 from unicorn import arm64_const as A
 
 import flagfuse
+import regpromote
 from analyze import eh_frame_functions
 from lifter import Insn, Lifter, Unsupported, bits, emit_asm_batch, hx, sext
 from nso import Nso, R_AARCH64_RELATIVE
@@ -551,6 +552,11 @@ class Module:
             out.append('    __attribute__((musttail)) return rt_dispatch(c);')
         out.append('}')
         self._refs = refs
+        # x19..x28 as C locals (tools/regpromote.py): not where runtime code or a longjmp reaches the struct directly
+        setjmp_site = any(self.lift(a).kind == 'bl' and self.lift(a).target in self.setjmp_stubs for a in range(entry, end, 4))
+        if not (all_labels or rando_here or hooks_here or setjmp_site or any(a in PATCHES for a in range(entry, end, 4))):
+            out = regpromote.promote(out)
+            self.stats['reg_promoted'] += 1
         return out
 
 

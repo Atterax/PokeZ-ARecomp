@@ -11,7 +11,8 @@ Machine-specific paths (game files, install folder) are in `CLAUDE.local.md` whe
 - `tools/gen.py`, `lifter.py`, `analyze.py`, `patches.py`, `simd_c.py`, `flagfuse.py`, `za_patches.py`: the generator,
   which turns ARM64 into C. Players' machines run it from the start screen (`runtime/gamebuild.c`). `flagfuse.py`
   fuses a compare with its branch when nothing else reads the flags (a flag-liveness pass; Z-A's battle-loading freeze
-  1.36 s -> 0.6 s). (`tools/passes.py` is a log summarizer, not part of the generator.)
+  1.36 s -> 0.6 s); `regpromote.py` keeps x19..x28 in C locals (callee-saved: written back only at exits). (`tools/passes.py`
+  is a log summarizer, not part of the generator.)
 - Dev rebuild of the game code: `cd tools && PYTHONUTF8=1 ../build/gen-venv/Scripts/python.exe gen.py main
   ../testroot/extracted/exefs/main 0x7000000000 ../generated/main --simd c` (and `sdk ... 0x7008000000 ../generated/sdk
   --hle ../runtime/hle/hle_symbols.txt`), then `make ... build/za-dist/lasgame.dll` (~20 min).
@@ -92,7 +93,7 @@ One-time setup: `tools/setup_windows.ps1` (MSYS2 UCRT64 toolchain). Fast exe reb
     `LARECOMP_VK_NO_KEY_MEMO=1`, `LARECOMP_VK_NO_CBUF_LEAN=1`
   - `LARECOMP_VK_PAGES_OUTSIDE=0`, `LARECOMP_VK_NO_SLOT_MEMO=1`
 - Unit and fuzz tests exist (`tools/test_translate.sh`, `test_vk_pipelines.sh`, `test_lift.py`, `test_simd.py`,
-  `test_flagfuse.py`) but there is no CI. Most checks are real game runs.
+  `test_flagfuse.py`, `test_regpromote.py`) but there is no CI. Most checks are real game runs.
 
 ## Rules
 
