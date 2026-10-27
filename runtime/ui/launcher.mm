@@ -209,7 +209,9 @@ static std::string check_copied_files(const std::string &root) {
     uint8_t id[8];
     if (!read_build_id(root + "/exefs/main", id)) return "No game files";
     if (!build_version(id)) return "Wrong game version";
-    if (!file_exists(root + "/romfs.bin") || (!build_is_za(id) && !file_exists(root + "/romfs/region_common")))
+    // (the game data: romfs.bin - Pokémon Z-A's packages, read by zaimport - or the copied romfs/ folder, which
+    // runtime/services/fs.c serves itself)
+    if (!file_exists(root + "/romfs.bin") && !file_exists(root + (build_is_za(id) ? "/romfs" : "/romfs/region_common")))
         return "Game data missing";
     return "";
 }

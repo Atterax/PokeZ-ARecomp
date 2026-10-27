@@ -295,9 +295,9 @@ int main(int argc, char **argv) {
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
-    {   // Pokémon Legends Z-A (exefs/main build 7222e13ecf6adb32: 1.0.0, 8a1c86c437394b69: 2.0.0, b1f12fd919eae86a: 2.0.2): the start screen knows only Link's Awakening's files
-        // (it would ask for them again) - straight into the game, as with --play. Started without a log redirect (a
-        // double click): the log goes to logs/play.log (the previous one: logs/play-anterior.log).
+    {   // Pokémon Legends Z-A (exefs/main build 7222e13ecf6adb32: 1.0.0, 8a1c86c437394b69: 2.0.0,
+        // b1f12fd919eae86a: 2.0.2): the start screen sets its files up from the player's packages (zaimport). Started
+        // without a log redirect (a double click): the log goes to logs/play.log (the previous one: logs/play-anterior.log).
         static const uint8_t za_build[][8] = {{0x72, 0x22, 0xe1, 0x3e, 0xcf, 0x6a, 0xdb, 0x32},
                                               {0x8a, 0x1c, 0x86, 0xc4, 0x37, 0x39, 0x4b, 0x69},
                                               {0xb1, 0xf1, 0x2f, 0xd9, 0x19, 0xea, 0xe8, 0x6a}};
@@ -307,8 +307,8 @@ int main(int argc, char **argv) {
         FILE *f = fopen(mp, "rb");
         if (f) { fseek(f, 0x40, SEEK_SET); if (fread(id, 1, 8, f) != 8) memset(id, 0, 8); fclose(f); }
         if (!memcmp(id, za_build[0], 8) || !memcmp(id, za_build[1], 8) || !memcmp(id, za_build[2], 8)) {
-            // (no game code built for it yet - a release set up from the player's packages: the start screen builds it)
-            if (gamelib_present(root)) skip_launcher = true;
+            // (the start screen is ZA Recomp's own since v0.1.9: shown on every start, set up or not - Play,
+            // Mods, Saves; --play still goes straight into the game)
 #ifdef _WIN32
             extern int rt_stderr_is_console(void);
             if (rt_stderr_is_console()) {
