@@ -42,7 +42,11 @@ void vk_collect_dead(void);
 
 // ================================================================== submissions
 // A submission = optional upload command buffer + the main one, signalling the timeline with its number.
-#define SUBS 8
+// SUBS: submissions in flight before the CPU waits for the oldest. Pokémon Z-A submits ~75-80 times a frame and the GPU
+// works in bursts: with 8, the CPU could only run 8 ahead of the GPU and the two took turns (an RTX 4060 at 2x: ~8 ms a
+// frame waiting on "ring slot"). Walking a busy street at 2x: 8 slots 52.9 fps, 32: 56.6, 64: 57.6 (ring slot waits
+// ~0.35 ms a frame). Each slot: two command buffers and their descriptor pools (made when first used).
+#define SUBS 64
 typedef struct {
     VkCommandBuffer main, upload;
     bool main_begun, upload_begun, ts;  // ts: GPU timestamps written (profiling)
