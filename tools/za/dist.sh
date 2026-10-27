@@ -68,7 +68,8 @@ cp third_party/fonts/Baloo2/OFL.txt "$D/Baloo2-OFL.txt"
 cp README.md LICENSE "$D/"
 [ -f README.pt-BR.md ] && cp README.pt-BR.md "$D/"
 cp tools/za/za-default.ini "$D/larecomp.ini"
-PATH="$PWD/build/deps-win/bin:$PATH" ldd $B/lasrecomp.exe | awk '(/ucrt64/ || /deps-win/) && !/vulkan-1/ {print $3}' | sort -u |
+# (every DLL but Windows' own and the Vulkan loader: also when copies sit next to the exe in $B, a dev setup)
+PATH="$PWD/build/deps-win/bin:$PATH" ldd $B/lasrecomp.exe | awk 'tolower($3) !~ /^\/c\/windows\// && !/vulkan-1/ {print $3}' | sort -u |
     while read -r f; do cp "$f" "$D/"; done
 ! ls "$D" | grep -iE 'x264|x265|xvid|postproc'  # (no GPL codec libraries in the release)
 du -sh "$D"
