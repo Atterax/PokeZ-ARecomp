@@ -3028,6 +3028,21 @@ static bool alias_make(NvnTexture *src, NvnTexture *dst, TexBackend *s, TexBacke
 void vk_alias_texture_destroyed(NvnTexture *t) {
     if (naliases) alias_before_write(t, 0, "freed");
 }
+
+// textures.c: t is being freed - the executor's state stops naming it. The render targets stay bound across command
+// lists, and a freed one was still in st.rt: a later list's pass began on it, which made it a new backend and put the
+// freed texture back on the live list (textures.c g_live); the next texture freed then read that entry's garbage -
+// a crash in live_remove when the game freed textures walking into a new area of the city.
+void vk_exec_texture_destroyed(NvnTexture *t) {
+    bool rt = false;
+    for (int i = 0; i < 8; i++) if (st.rt.color[i] == t) st.rt.color[i] = NULL, rt = true;
+    if (st.rt.depth == t) st.rt.depth = NULL, rt = true;
+    if (rt) st.rt_dirty = true;  // (an open pass keeps its views: they are destroyed once the GPU is done)
+    for (int i = 0; i < 4; i++) if (feedback_tex[i] == t) feedback_tex[i] = NULL;
+    snapshots_invalidate(t);
+    for (int i = 0; i < 8; i++) if (snap_tex[i] == t) snap_tex[i] = NULL;
+    for (int i = 0; i < nsnaps; i++) if (snaps[i].key == t) snaps[i].key = NULL;
+}
 void vk_alias_reset(void) { naliases = 0; }  // (reboot: every texture goes)
 
 // (renderer_stats, once per stats interval) copies made aliases / renamed / partly or fully copied later
