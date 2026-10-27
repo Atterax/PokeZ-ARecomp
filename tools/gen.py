@@ -458,13 +458,13 @@ class Module:
             if a in labels:
                 flush()
                 out.append(f'L_{a:x}:;')
-            if a - 4 in fuse:  # (the branch: in its compare's statement)
-                last = 'bcond'
-                continue
-            if a in fuse:
+            if a in fuse:  # (a compare: its statement - with its branch's jump when next to it; a branch: its `if`,
+                # or nothing when inside its compare's)
                 flush()
-                out.append('    ' + fuse[a].replace('{JUMP}', jump(self.lift(a + 4).target)))
-                last = 'bcond'
+                if fuse[a]:
+                    t = ins.target if ins.kind == 'bcond' else self.lift(a + 4).target
+                    out.append('    ' + fuse[a].replace('{JUMP}', jump(t) if '{JUMP}' in fuse[a] else ''))
+                last = 'bcond' if ins.kind == 'bcond' or '{JUMP}' in fuse[a] else 'op'
                 continue
             if a - self.base in RANDO_CODE:  # randomizer patch site: the active seed picks the instruction
                 flush()

@@ -22,6 +22,8 @@ for fn, conds in flagfuse._CONDS.items():
                 st = flagfuse.fused_stmt(code, f'COND_{cond}(c)')
                 assert st, (fn, n, cond, dst)
                 cases.append((code, cond, st.replace('{JUMP}', 'taken = 1;')))
+                sv = flagfuse.fused_stmt(code, f'COND_{cond}(c)', 'fz_t')  # (the kept-condition form)
+                cases.append((code, cond, sv + ' if (fz_t) taken = 1;'))
 src = ['#include <stdio.h>', '#include <stdint.h>', '#include "cpu.h"']
 for i, (code, cond, st) in enumerate(cases):
     src.append(f'static int ref{i}(Cpu *c) {{ {code} return COND_{cond}(c); }}')
@@ -48,14 +50,18 @@ def prog(*ins):  # (kind, code / cond, target) from 0x1000
 def fused(ins, labels=()):
     p, e, n = prog(*ins)
     return set(flagfuse.plan(p, e, n, set(labels) | {e}, {}))
-assert fused([('op', CMP, 0), ('bcond', BEQ, 0x100c), ('op', 'c->x[3] = 1;', 0), ('ret', None, 0)]) == {0x1000}
+assert fused([('op', CMP, 0), ('bcond', BEQ, 0x100c), ('op', 'c->x[3] = 1;', 0), ('ret', None, 0)]) == {0x1000, 0x1004}
 assert fused([('op', CMP, 0), ('bcond', BEQ, 0x100c), ('op', 'c->x[3] = (COND_NE(c)) ? 1 : 0;', 0),
               ('ret', None, 0)]) == set()  # (a cset after the branch reads them)
 assert fused([('op', CMP, 0), ('bcond', BEQ, 0x1010), ('op', 'rt_svc(c, 0x1, 0x1008);', 0),
               ('bcond', 'COND_NE(c)', 0x1010), ('ret', None, 0)]) == set()  # (read after an svc: kept)
 assert fused([('op', CMP, 0), ('bcond', BEQ, 0x1010), ('bl', None, 0x2000), ('bcond', 'COND_NE(c)', 0x1000),
-              ('ret', None, 0)]) == {0x1000}  # (a call ends them)
+              ('ret', None, 0)]) == {0x1000, 0x1004}  # (a call ends them)
 assert fused([('op', CMP, 0), ('bcond', BEQ, 0x100c), ('ret', None, 0)], labels={0x1004}) == set()  # (an entry between)
+assert fused([('op', CMP, 0), ('op', 'ST64(c->x[1], 0);', 0), ('bcond', BEQ, 0x1010), ('op', 'c->x[3] = 1;', 0),
+              ('ret', None, 0)]) == {0x1000, 0x1008}  # (a store between: the condition kept)
+assert fused([('op', CMP, 0), ('op', 'c->x[4] = (COND_NE(c)) ? 1 : 0;', 0), ('bcond', BEQ, 0x1010),
+              ('op', 'c->x[3] = 1;', 0), ('ret', None, 0)]) == set()  # (a flag reader between)
 print('liveness checks ok')
 d = tempfile.mkdtemp()
 c_path, exe = os.path.join(d, 't.c'), os.path.join(d, 't.exe')

@@ -50,8 +50,9 @@ def split_args(s):
     return out
 
 
-def fused_stmt(code, cond):
-    """The flag op `code` and a branch on `cond` as one statement with the jump as {JUMP}; None: not fusable."""
+def fused_stmt(code, cond, var=None):
+    """The flag op `code` and a branch on `cond` as one statement with the jump as {JUMP}; None: not fusable. With
+    var: the op alone, keeping the branch's condition in uint8_t `var` (declared here) for a branch further on."""
     m, mc = _FUSE.match(code), _COND.match(cond)
     if not m or not mc:
         return None
@@ -69,11 +70,14 @@ def fused_stmt(code, cond):
         op = '-' if fn == 'subs' else '+'
         decl = f'{t} a_ = ({t})({args[0]}), b_ = ({t})({args[1]}), r_ = ({t})(a_ {op} b_); (void)b_;'
     dst = f' {m.group("dst")} = ({m.group("dt")})(r_);' if m.group('dst') else ''
+    if var:  # (a declaration at statement level: C lets gotos pass it; the block's own temporaries stay inside)
+        return f'uint8_t {var}; {{ ' + decl + dst + f' {var} = {expr.format(s=s)}; }}'
     return '{ ' + decl + dst + f' if ({expr.format(s=s)}) {{ {{JUMP}} }} }}'
 
 
 def plan(insns, entry, end, labels, tables):
-    """{address of a flag op: its fused statement} for this function's instructions (a -> Insn)."""
+    """{address: replacement} for this function's instructions (a -> Insn): a flag op's fused statement ({JUMP}: its
+    branch's jump), '' for a branch fused into it, or a branch's `if` on the op's kept condition."""
     addrs = list(range(entry, end, 4))
     use, kill, succ = {}, {}, {}
     for a in addrs:
@@ -116,12 +120,23 @@ def plan(insns, entry, end, labels, tables):
                 changed = True
     res = {}
     for a in addrs:
+        if insns[a].kind != 'op' or not kill[a] or a in res:
+            continue
+        # its branch: the next flag reader, in the same block (no entry, nothing else touching the flags between)
         b = a + 4
-        if b >= end or b in labels or insns[a].kind != 'op' or insns[b].kind != 'bcond':
+        while b < end and b not in labels and insns[b].kind == 'op' and not use[b] and not kill[b]:
+            b += 4
+        if b >= end or b in labels or insns[b].kind != 'bcond':
             continue
         if any(live.get(s, True) for s in succ[b]):
             continue
-        st = fused_stmt(insns[a].code, insns[b].cond)
-        if st:
-            res[a] = st
+        if b == a + 4:
+            st = fused_stmt(insns[a].code, insns[b].cond)
+            if st:
+                res[a], res[b] = st, ''
+        else:
+            var = f'fz_{a:x}'
+            st = fused_stmt(insns[a].code, insns[b].cond, var)
+            if st:
+                res[a], res[b] = st, f'if ({var}) {{ {{JUMP}} }}'
     return res
