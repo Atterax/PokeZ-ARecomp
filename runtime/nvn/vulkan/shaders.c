@@ -424,6 +424,31 @@ static const char *builtin_src(const char *name, int *stage) {
     }
     // FSR 1 RCAS: contrast-adaptive sharpening of the EASU output (same size). a.x = sharpness (exp2(-stops)),
     // b.xy = image size. The lobe is limited so the result stays inside the neighbours' range; noise is damped.
+    // Box downscale (exec.c post_process): the image is larger than its place in the window (internal resolution
+    // above the window's). a = source texels per output pixel (x, y), source size. Every source texel under the
+    // output pixel counts, weighted by how much of it is covered (non-integer scales); at most 9 x 9 of them.
+    if (!strcmp(name, "boxdown.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "void main() {\n"
+               "  vec2 lo = floor(gl_FragCoord.xy) * pc.a.xy, hi = lo + pc.a.xy;\n"
+               "  ivec2 i0 = ivec2(floor(lo)), i1 = min(ivec2(ceil(hi)) - 1, i0 + 8), sz = ivec2(pc.a.zw) - 1;\n"
+               "  vec3 s = vec3(0.0);\n"
+               "  float n = 0.0;\n"
+               "  for (int y = i0.y; y <= i1.y; y++) {\n"
+               "    float wy = min(hi.y, float(y + 1)) - max(lo.y, float(y));\n"
+               "    for (int x = i0.x; x <= i1.x; x++) {\n"
+               "      float w = wy * (min(hi.x, float(x + 1)) - max(lo.x, float(x)));\n"
+               "      s += texelFetch(t, clamp(ivec2(x, y), ivec2(0), sz), 0).rgb * w;\n"
+               "      n += w;\n"
+               "    }\n"
+               "  }\n"
+               "  o = vec4(s / max(n, 1e-6), 1.0);\n"
+               "}\n";
+    }
     if (!strcmp(name, "rcas.frag")) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"

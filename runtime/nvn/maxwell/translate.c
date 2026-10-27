@@ -606,6 +606,11 @@ static const char *RSC2(Ctx *c, int slot, const char *fmt, ...) {
     va_end(ap);
     if (c->stage == STAGE_VERTEX) { snprintf(o, 1024, "%s", inner); return o; }
     c->uses_rscale = true;
+    if (c->stage == STAGE_FRAGMENT) {  // (rscf: this pixel's place inside its guest texel, see the helper)
+        c->uses_frag_coord = true;
+        snprintf(o, 1024, "rscf(%s, rscale[%d], rscale[0], float2(in.pos[0], in.pos[1]))", inner, slot + 1);
+        return o;
+    }
     snprintf(o, 1024, "rsc(%s, rscale[%d])", inner, slot + 1);
     return o;
 }
@@ -2225,7 +2230,14 @@ static const char glsl_prelude[] =
     "float fswzadd(float a, float b, uint swz, uint lane) { uint m = (swz >> ((lane & 3u) * 2u)) & 3u; float ma = m == 1u ? -1.0f : (m == 3u ? 0.0f : 1.0f); float mb = m == 2u ? -1.0f : 1.0f; return a * ma + b * mb; }\n"
     "uvec2 rsc(uvec2 c, vec4 s) { return (s.x == 1.0f && s.y == 1.0f) ? c : uvec2(floor((vec2(c) + 0.5f) * s.xy)); }\n"
     // a scaled texture whose contents occupy its top-left part (Dynamic resolution): sample that part
-    "vec2 uvs(vec2 uv, vec4 s) { return (s.z == 1.0f && s.w == 1.0f) ? uv : min(uv, 1.0f) * s.zw; }\n";
+    "vec2 uvs(vec2 uv, vec4 s) { return (s.z == 1.0f && s.w == 1.0f) ? uv : min(uv, 1.0f) * s.zw; }\n"
+    // A fragment shader's texel fetch from a texture at its render target's scale (r = rscale[0]: the target's scale,
+    // offset; p = the pixel's host position): the s x s host pixels of one guest pixel each read their own texel of
+    // the guest texel, not all the same one. Deferred lighting reads its G-buffer at the pixel's own guest coordinate,
+    // so with rsc() every 2 x 2 block at 2x came out one colour (the scene at 1x, pixel-doubled).
+    "uvec2 rscf(uvec2 c, vec4 s, vec4 r, vec2 p) { if (s.x == 1.0f && s.y == 1.0f) return c;"
+    " if (any(notEqual(s.xy, r.xy))) return uvec2(floor((vec2(c) + 0.5f) * s.xy));"
+    " return uvec2(floor(vec2(c) * s.xy) + floor(fract((p - r.zw) / r.xy) * s.xy)); }\n";
 // The half <-> float helpers (glsl_finish: glsl_h2f_exact or glsl_h2f_native, then glsl_prelude_half).
 // Half -> float in vertex (and other pre-raster) shaders: by bits, not unpackHalf2x16. NVIDIA's driver recognises
 // unpacked halves and runs some of the fp32 math after them in native fp16, differently per shader, so a depth
@@ -2697,6 +2709,9 @@ static ShaderInfo *translate(const uint8_t *blob, size_t max_size, int stage, co
     sp(&s, "static inline float fswzadd(float a, float b, uint swz, uint lane) { uint m = (swz >> ((lane & 3u) * 2u)) & 3u; float ma = m == 1u ? -1.0f : (m == 3u ? 0.0f : 1.0f); float mb = m == 2u ? -1.0f : 1.0f; return a * ma + b * mb; }\n");
     sp(&s, "static inline uint2 rsc(uint2 c, float4 s) { return (s.x == 1.0f && s.y == 1.0f) ? c : uint2(floor((float2(c) + 0.5f) * s.xy)); }\n");
     sp(&s, "static inline float2 uvs(float2 uv, float4 s) { return (s.z == 1.0f && s.w == 1.0f) ? uv : min(uv, 1.0f) * s.zw; }\n");
+    sp(&s, "static inline uint2 rscf(uint2 c, float4 s, float4 r, float2 p) { if (s.x == 1.0f && s.y == 1.0f) return c;"
+           " if (any(s.xy != r.xy)) return uint2(floor((float2(c) + 0.5f) * s.xy));"
+           " return uint2(floor(float2(c) * s.xy) + floor(fract((p - r.zw) / r.xy) * s.xy)); }\n");
     sp(&s, "static inline float2 hx(uint v, uint swz) { if (swz == 1u) return float2(as_type<float>(v)); float2 h = float2(as_type<half2>(v)); return swz == 2u ? h.xx : swz == 3u ? h.yy : h; }\n");
     // merges on half2 lanes rather than with integer masks: on an M1 (macOS 15.0.1) the Metal compiler miscompiled
     // (old & 0xFFFF0000u) | lo in Link's body shader - the merged low half read back as a constant 512.0 and Link

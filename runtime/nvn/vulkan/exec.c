@@ -7505,8 +7505,8 @@ static VkImageView raw_view(TexBackend *b) {
 
 // ---- post passes (Video tab "Anti-aliasing" / "Upscaler"): SMAA 1x at the game image's size, then AMD FSR 1 (EASU
 // upscale to the image's size in the window, RCAS sharpen) when it is smaller than its place in the window, as
-// metal.m does with MetalFX. Each pass: a fullscreen triangle into an RGBA8 image (gamma-encoded, like the input);
-// up to three inputs (bindings 0-2), sampled linear / clamp.
+// metal.m does with MetalFX, or a box downscale when it is larger. Each pass: a fullscreen triangle into an RGBA8
+// image (gamma-encoded, like the input); up to three inputs (bindings 0-2), sampled linear / clamp.
 static VkPipelineLayout post_layout;
 static VkDescriptorSetLayout post_set_layout;
 
@@ -7569,9 +7569,9 @@ static VkPipeline post_pipeline_kind(const char *fs, int kind, VkFormat dsfmt) {
 }
 
 // Post image `i` at w x h (RGBA8, kept until the size changes). 0, 1: SMAA edges / weights, 2: SMAA output,
-// 3, 4: FSR EASU / RCAS.
+// 3, 4: FSR EASU / RCAS, 5: box downscale.
 static TexBackend *post_image(int i, uint32_t w, uint32_t h) {
-    static TexBackend img[5];
+    static TexBackend img[6];
     TexBackend *d = &img[i];
     if (d->image && (d->width != w || d->height != h)) {
         vk_views_forget(d);
@@ -7726,7 +7726,12 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, float fx, flo
     uint32_t cw = (uint32_t)lroundf(b->width * fx), ch = (uint32_t)lroundf(b->height * fy);  // (the contents' size)
     bool fsr = g_settings.upscaler == UPSCALE_FSR1 && (ow > cw + 1 || oh > ch + 1);  // (an upscale only)
     *upscaled = fsr;
-    if (!smaa && !fsr) return v;
+    // Internal resolution above the window's: the present's one bilinear tap reads at most 2 x 2 source texels per
+    // window pixel - all of them at 2x, 1 in 9 at 3x (its centre: no anti-aliasing at all), 4 in 16 at 4x - so the
+    // higher resolutions looked worse than 2x. A box filter over each window pixel's whole footprint instead.
+    bool down = !fsr && ow && oh && (ow + 1 < cw || oh + 1 < ch);
+    *upscaled = fsr || down;  // (the result fills the window: no contents' scale left for the present)
+    if (!smaa && !fsr && !down) return v;
     extern void vk_frame_suspend(void);
     extern void vk_frame_resume(void);
     vk_frame_suspend();
@@ -7761,14 +7766,22 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, float fx, flo
         post_pass(cb, "rcas.frag", ri_, 1, r, pr, false);
         v = post_view(r);
     }
+    if (down) {
+        float pd[8] = {(float)cw / ow, (float)ch / oh, (float)cw, (float)ch};  // (the contents: Dynamic resolution)
+        TexBackend *d = post_image(5, ow, oh);
+        VkImageView di[3] = {v};
+        post_pass(cb, "boxdown.frag", di, 1, d, pd, false);
+        v = post_view(d);
+    }
     vk_full_barrier(cb);
     vk_frame_resume();
     {
         static uint32_t piw, pih, pow_, poh;
-        static int psm = -1, pfs = -1;
-        if (b->width != piw || b->height != pih || ow != pow_ || oh != poh || smaa != psm || fsr != pfs)
-            LOG("[post] %ux%u%s%s -> %ux%u\n", b->width, b->height, smaa ? " smaa" : "", fsr ? " fsr1" : "", ow, oh);
-        piw = b->width; pih = b->height; pow_ = ow; poh = oh; psm = smaa; pfs = fsr;
+        static int psm = -1, pfs = -1, pdn = -1;
+        if (b->width != piw || b->height != pih || ow != pow_ || oh != poh || smaa != psm || fsr != pfs || down != pdn)
+            LOG("[post] %ux%u%s%s%s -> %ux%u\n", b->width, b->height, smaa ? " smaa" : "", fsr ? " fsr1" : "",
+                down ? " box" : "", ow, oh);
+        piw = b->width; pih = b->height; pow_ = ow; poh = oh; psm = smaa; pfs = fsr; pdn = down;
     }
     return v;
 }

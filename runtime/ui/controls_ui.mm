@@ -56,6 +56,20 @@ static int slot_cat(int slot) {
 }
 
 // The mouse: how it turns the camera, how fast, and the Switch button each of its buttons presses (runtime/hle/input.c)
+static void stick_draw() {
+    ImGui::SeparatorText("Right stick");
+    static const int deg[] = {0, 10, 15, 20, 25};
+    static const char *const names[] = {"Off", "10 degrees", "15 degrees", "20 degrees", "25 degrees"};
+    int cur = 0;
+    for (int i = 0; i < 5; i++) if (g_settings.rstick_snap == deg[i]) cur = i;
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
+    if (ImGui::Combo("Snap to axis", &cur, names, 5)) { g_settings.rstick_snap = deg[cur]; settings_save(); }
+    ImGui::PushTextWrapPos(0);
+    ImGui::TextDisabled("Turning the camera sideways with the stick tilts it a little up or down when the stick isn't "
+                        "pushed exactly sideways. Within this angle of an axis the stick counts as on it.");
+    ImGui::PopTextWrapPos();
+}
+
 static void mouse_draw() {
     ImGui::SeparatorText("Mouse");
     static const char *const modes[] = {"Off", "Hold the right button", "Always (the window holds the cursor)"};
@@ -337,6 +351,9 @@ extern "C" void controls_tab_draw(float scale) {
         opt_choice("Button icons", &g_settings.prompts, names, 6, PROMPTS_AUTO,
                    "The button icons the game shows. Auto: the connected controller's (the keyboard's with none).");
     }
+    opt_toggle("Battle moves by position", &g_settings.battle_abxy_position, false,
+               "While ZL is held, the controller's A / B / X / Y go by position (the Switch's A on the right), so each "
+               "move is on the button where the game draws it. The rest of the game keeps your bindings.");
     {
         static const char *const names[] = {"Game layout", "Controller convention"};
         opt_choice("Confirm button", &g_settings.menu_confirm, names, 2, MENU_CONFIRM_CONTROLLER,
@@ -344,6 +361,8 @@ extern "C" void controls_tab_draw(float scale) {
     }
 
     opt_end();
+    ImGui::Spacing();
+    stick_draw();
     ImGui::Spacing();
     mouse_draw();  // (Pokémon Z-A's mouse camera)
 }

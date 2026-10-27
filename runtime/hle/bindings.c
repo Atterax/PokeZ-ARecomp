@@ -131,6 +131,7 @@ bool bind_is_default_slot(int dev, int slot) {
 }
 
 int bind_prompt_host(int slot) { return slot >= 0 && slot < BIND_PAD_COUNT ? g_bind_pad[slot] : -1; }
+int bind_pad_default(int slot) { return slot >= 0 && slot < BIND_PAD_COUNT ? k_def_pad[slot] : -1; }
 
 // ------------------------------------------------------------------ capture
 static _Atomic int cap_dev = -1, cap_slot = -1;
