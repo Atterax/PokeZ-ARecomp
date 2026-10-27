@@ -41,6 +41,7 @@ const char *bind_input_name(int slot);         // "A", "D-pad Up", "Left stick U
 const char *bind_pad_label(int host, int fam); // controller button in the pad family's own words (fam: input_pad_family)
 const char *bind_key_label(int scancode);
 int bind_label_family(void);                   // the connected controller's family (also on the start screen)
+int bind_prompts_auto(void);                   // what "Auto" button icons are now (PROMPTS_*)
 void bind_reset(int dev);
 bool bind_is_default(int dev);
 bool bind_is_default_slot(int dev, int slot);

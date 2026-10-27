@@ -2522,8 +2522,19 @@ extern "C" void launcher_run(const char *root) {
 #else
             ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)vk_frame_cmd());
             bool shot = shot_at && ++frame == shot_at;
-            vk_frame_end(shot ? getenv("LARECOMP_SHOT_PATH") ? getenv("LARECOMP_SHOT_PATH") : "build/launcher.png" : NULL);
-            if (shot) exit(0);
+            const char *shot_path = getenv("LARECOMP_SHOT_PATH") ? getenv("LARECOMP_SHOT_PATH") : "build/launcher.png";
+            if (shot) remove(shot_path);  // (an old one mustn't pass for this one below)
+            vk_frame_end(shot ? shot_path : NULL);
+            if (shot) {  // (the PNG is written on a thread of its own: wait for it, or exit could cut it off)
+                for (long last = -1, i = 0; i < 100; i++) {
+                    SDL_Delay(50);
+                    struct stat st;
+                    long size = stat(shot_path, &st) == 0 ? (long)st.st_size : -1;
+                    if (size > 0 && size == last) break;
+                    last = size;
+                }
+                exit(0);
+            }
 #endif
         }
     }

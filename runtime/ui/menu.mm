@@ -693,11 +693,9 @@ static void tab_about(void) {
     ImGui::Spacing();
     header("Button prompts");
     {
-        static const char *const fam[] = {"Nintendo", "Xbox", "PlayStation"};
-        char autol[64];
-        int pf = bind_label_family();  // (the start screen too: no pad opened by the game yet - input_pad_family said Nintendo)
-        snprintf(autol, sizeof autol, "Auto (%s)", pf == 1 && settings_on_steam_deck() ? "Steam Deck" : fam[pf % 3]);
-        const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation", "Keyboard", "Steam Deck"};  // (Keyboard, Steam Deck: Z-A, from the next boot)
+        char autol[64];  // (what Auto stands for now: bind_prompts_auto, the same rule as runtime/hle/pl.c)
+        const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation", "Keyboard", "Steam Deck"};
+        snprintf(autol, sizeof autol, "Auto (%s)", names[bind_prompts_auto()]);
         choice("Button icons", &g_settings.prompts, names, 6);
     }
     ImGui::Spacing();
@@ -728,11 +726,9 @@ static void tab_game(void) {
     opt_begin("##game", ImGui::GetFontSize() / 34);
     opt_section(TR("Game", "Jogo"));
     {
-        static const char *const fam[] = {"Nintendo", "Xbox", "PlayStation"};
-        char autol[64];
-        int pf = bind_label_family();  // (the start screen too: no pad opened by the game yet - input_pad_family said Nintendo)
-        snprintf(autol, sizeof autol, "Auto (%s)", pf == 1 && settings_on_steam_deck() ? "Steam Deck" : fam[pf % 3]);
+        char autol[64];  // (what Auto stands for now: bind_prompts_auto, the same rule as runtime/hle/pl.c)
         const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation", TR("Keyboard", "Teclado"), "Steam Deck"};
+        snprintf(autol, sizeof autol, "Auto (%s)", names[bind_prompts_auto()]);
         opt_choice(TR("Button icons", "Ícones dos botões"), &g_settings.prompts, names, 6, PROMPTS_AUTO,
                    TR("The buttons the game shows in its prompts. Auto: the controller you use (the keyboard's keys "
                       "without one). Applies from the next start.",
