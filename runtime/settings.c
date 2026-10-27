@@ -118,6 +118,7 @@ void settings_load(void) {
         else if (!strcmp(key, "move_360")) g_settings.move_360 = atoi(val) != 0;
         else if (!strcmp(key, "mouse_camera")) g_settings.mouse_camera = !strcmp(val, "off") ? MOUSE_CAM_OFF : !strcmp(val, "hold") ? MOUSE_CAM_HOLD : MOUSE_CAM_CAPTURED;
         else if (!strcmp(key, "mouse_sens")) g_settings.mouse_sens = (float)atof(val);
+        else if (!strcmp(key, "rstick_snap")) { int d = atoi(val); g_settings.rstick_snap = d < 0 ? 0 : d > 30 ? 30 : d; }
         else if (!strcmp(key, "blur_removal")) g_settings.blur_removal = atoi(val) != 0;
         else if (!strcmp(key, "hide_hero_icon")) g_settings.hide_hero_icon = atoi(val) != 0;
         else if (!strcmp(key, "mirror_mode")) g_settings.mirror_mode = atoi(val) != 0;
@@ -185,6 +186,7 @@ void settings_save(void) {
     static const char *const mouse_cam[] = {"off", "hold", "captured"};
     fprintf(f, "mouse_camera = %s\nmouse_sens = %.2f\n", mouse_cam[g_settings.mouse_camera <= 2 ? g_settings.mouse_camera : 2],
             g_settings.mouse_sens);
+    fprintf(f, "rstick_snap = %d\n", g_settings.rstick_snap);
     fprintf(f, "move_360 = %d\nblur_removal = %d\nhide_hero_icon = %d\n", g_settings.move_360, g_settings.blur_removal,
             g_settings.hide_hero_icon);
     static const char *const prompts[] = {"auto", "nintendo", "xbox", "playstation", "keyboard", "steamdeck"};

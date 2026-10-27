@@ -41,6 +41,7 @@ typedef struct {
     bool move_360;       // analog movement in any direction (the game snaps the stick to 8): runtime/hle/qol.c
     int mouse_camera;    // MOUSE_CAM_*: how the mouse turns the camera (runtime/hle/input.c)
     float mouse_sens;    // mouse camera speed, 1 = default
+    int rstick_snap;     // degrees: a right stick this close to an axis is put on it (0 = off): runtime/hle/input.c
     bool blur_removal;   // no tilt-shift blur at the top / bottom of the screen
     bool hide_hero_icon; // no Hero Mode icon on the HUD
     bool mirror_mode;    // the world mirrored left to right (Gameplay tab): renderers + runtime/hle/input.c

@@ -33,6 +33,7 @@ static _Atomic int64_t sampling;
 static uint8_t test_keys[SDL_SCANCODE_COUNT];
 static _Atomic uint32_t test_pad;
 static _Atomic int32_t test_lx, test_ly;  // (a resting stick's drift: "lstick" in LARECOMP_HOST_INPUT)
+static _Atomic int32_t test_rx, test_ry;  // ("rstick": a stick pushed sideways that also reads a little up)
 static bool host_test;  // (then a real controller is left out: the player's own pad must not spoil the test)
 
 static int held_key(int sc) { return sc > 0 && sc < SDL_SCANCODE_COUNT && (keys_down[sc] || test_keys[sc]); }
@@ -62,11 +63,25 @@ static void recompute_pad(void) {
     for (int i = 0; i < BIND_PAD_COUNT; i++)
         if (g_bind_pad[i] >= 0 && g_bind_pad[i] < PADB_HOST_COUNT && (host >> g_bind_pad[i] & 1)) b |= 1ull << i;
     pad_buttons = b;
-    if (!pad || host_test) { pad_lx = test_lx, pad_ly = test_ly, pad_rx = pad_ry = 0; return; }
-    pad_lx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
-    pad_ly = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
-    pad_rx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX);
-    pad_ry = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY);
+    int32_t rx, ry;
+    if (!pad || host_test) pad_lx = test_lx, pad_ly = test_ly, rx = test_rx, ry = test_ry;
+    else {
+        pad_lx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
+        pad_ly = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
+        rx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX);
+        ry = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY);
+    }
+    // rstick_snap: a stick pushed sideways also reads a little up or down (an Xbox One pad: 4 degrees on average, up
+    // to 12), and the camera tilts with it. That close to an axis the stick is put on the axis; the angles in between
+    // are spread over the rest, so nothing jumps at the edge. The length is kept.
+    int snap = g_settings.rstick_snap;
+    if (snap > 0 && snap < 45 && (rx || ry)) {
+        double m = sqrt((double)rx * rx + (double)ry * ry), a = atan2(fabs((double)ry), fabs((double)rx)) * 180 / M_PI;
+        a = a <= snap ? 0 : a >= 90 - snap ? 90 : (a - snap) * 90 / (90 - 2 * snap);
+        rx = (int32_t)copysign(m * cos(a * M_PI / 180), rx);
+        ry = (int32_t)copysign(m * sin(a * M_PI / 180), ry);
+    }
+    pad_rx = rx, pad_ry = ry;
 }
 
 // Forget held keys (the menu took focus); the gamepad is re-read on its next event.
@@ -247,7 +262,8 @@ static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
 // Tests of the bindings, through them like a real player:
 // LARECOMP_HOST_INPUT="frame:key:<SDL key name>:frames,frame:pad:<button>:frames,..." holds a host key / controller
 //   button (names as in larecomp.ini's bind_* lines: "Z", "Keypad 0", "south", "ltrigger"...);
-//   "frame:lstick:<x>/<y>:frames" holds the controller's left stick there (raw SDL units, y up: a drifting stick).
+//   "frame:lstick:<x>/<y>:frames" holds the controller's left stick there (raw SDL units, y up: a drifting stick),
+//   "frame:rstick:<x>/<y>:frames" the right one.
 // "frame:type:<text>" types <text> as real key events (down, text, up per character), through the overlay menu / name
 //   entry first like a player's typing; "{Escape}" (any SDL key name) presses that key. No ',' or ':' in <text>.
 // "frame:sdlpad:<button>:frames" / "frame:sdlkey:<key>:frames" hold a controller button / key as real events (down
@@ -318,7 +334,7 @@ static void host_test_frame(uint64_t frame) {
     if (hspec) {
         uint8_t keys[SDL_SCANCODE_COUNT] = {0};
         uint32_t padm = 0;
-        int32_t sx = 0, sy = 0;
+        int32_t sx = 0, sy = 0, srx = 0, sry = 0;
         snprintf(buf, sizeof buf, "%s", hspec);
         char *save = NULL;
         for (char *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
@@ -332,12 +348,14 @@ static void host_test_frame(uint64_t frame) {
             if (frame < start || frame >= start + len) continue;
             if (!strcmp(dev, "key")) { SDL_Scancode sc = SDL_GetScancodeFromName(name); if (sc) keys[sc] = 1; }
             else if (!strcmp(dev, "lstick")) sscanf(name, "%d/%d", &sx, &sy);
+            else if (!strcmp(dev, "rstick")) sscanf(name, "%d/%d", &srx, &sry);
             else { int h = bind_pad_from_name(name); if (h >= 0) padm |= 1u << h; }
         }
-        bool kch = memcmp(keys, test_keys, sizeof keys) != 0, pch = padm != test_pad || sx != test_lx || sy != test_ly;
+        bool kch = memcmp(keys, test_keys, sizeof keys) != 0,
+             pch = padm != test_pad || sx != test_lx || sy != test_ly || srx != test_rx || sry != test_ry;
         memcpy(test_keys, keys, sizeof keys);
         test_pad = padm;
-        test_lx = sx, test_ly = sy;
+        test_lx = sx, test_ly = sy, test_rx = srx, test_ry = sry;
         if (kch) recompute_keyboard();
         if (pch) recompute_pad();
     }
@@ -536,6 +554,9 @@ static void fill_state(Cpu *c) {
     static uint64_t last_b;
     if (b != last_b && getenv("LARECOMP_INPUT")) LOG("[input] id %#x buttons %#llx (sampling %lld, lr %llx)\n", id, (unsigned long long)b, (long long)sampling, c->x[30]);
     last_b = b;
+    static int32_t last_rx, last_ry;
+    if ((rx != last_rx || ry != last_ry) && getenv("LARECOMP_INPUT")) LOG("[input] id %#x right stick %d %d\n", id, rx, ry);
+    last_rx = rx, last_ry = ry;
     *(int32_t *)(s + 16) = lx;
     *(int32_t *)(s + 20) = ly;
     { extern void input_note_rstick(int32_t ry); input_note_rstick(ry); }
