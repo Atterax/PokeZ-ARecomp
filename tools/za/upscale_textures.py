@@ -27,6 +27,8 @@ def kind(im):
     """'colour', 'normal' or 'mask' (by content)."""
     small = im.convert('RGBA').resize((64, 64))
     r, g, b, a = (ImageStat.Stat(small.getchannel(c)) for c in 'RGBA')
+    if a.mean[0] < 8:
+        return 'mask'  # all but invisible: data in the colour channels (Z-A: a hat's tint mask, red 255 / green mask, alpha 0)
     if b.mean[0] < 24 and 70 < r.mean[0] < 190 and 70 < g.mean[0] < 190:
         return 'normal'  # BC5 XY normals: blue empty, red / green around the middle
     if abs(r.mean[0] - 128) < 30 and abs(g.mean[0] - 128) < 30 and b.mean[0] > 200:
@@ -71,8 +73,10 @@ esr = find_esrgan()
 if esr:
     print('Real-ESRGAN:', esr, args.model)
     with tempfile.TemporaryDirectory() as tin, tempfile.TemporaryDirectory() as tout:
-        for f in todo:
-            shutil.copy(f, tin)
+        for f in todo:  # the colour alone: the RGBA resize below (Pillow weights by alpha) blanked the colour of
+            # transparent texels (black edges on icons; a texture whose data sits under alpha 0 lost it); the alpha is
+            # put back from the original below
+            Image.open(f).convert('RGB').save(os.path.join(tin, os.path.basename(f)))
         cmd = [esr, '-i', tin, '-o', tout, '-n', args.model, '-s', '4' if 'x4' in args.model else str(args.scale), '-f', 'png']
         print(' '.join(cmd))
         subprocess.run(cmd, check=True)
