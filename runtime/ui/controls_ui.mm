@@ -382,7 +382,10 @@ extern "C" void controls_tab_draw(float scale) {
     {
         static const char *const fam[] = {"Nintendo", "Xbox", "PlayStation"};
         char autol[64];
-        snprintf(autol, sizeof autol, "Auto (%s)", input_pad_family() == 1 && settings_on_steam_deck() ? "Steam Deck" : fam[input_pad_family() % 3]);
+        // (bind_label_family: the game's open pad, or on the start screen - no pad opened by the game yet - the
+        // connected one; input_pad_family alone said Nintendo there with an Xbox pad plugged in)
+        int pf = bind_label_family();
+        snprintf(autol, sizeof autol, "Auto (%s)", pf == 1 && settings_on_steam_deck() ? "Steam Deck" : fam[pf % 3]);
         const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation", TR("Keyboard", "Teclado"), "Steam Deck"};  // (Keyboard, Steam Deck: Z-A, from the next boot)
         opt_choice(TR("Button icons", "Ícones dos botões"), &g_settings.prompts, names, 6, PROMPTS_AUTO,
                    TR("The button icons the game shows. Auto: the connected controller's (the keyboard's with none). "
