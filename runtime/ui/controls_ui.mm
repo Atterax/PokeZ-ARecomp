@@ -12,11 +12,13 @@ extern "C" {
 #include "../settings.h"
 void launcher_prompts_refresh(void);  // runtime/ui/launcher.mm
 }
+#define TR(en, pt) UI_TR(en, pt)  // (runtime/settings.h: the start screen's PT | EN)
 
 static void cell(int dev, int slot, int fam, int cap_dev, int cap_slot, int ms_left) {
     char lbl[96];
     bool waiting = cap_dev == dev && cap_slot == slot;
-    if (waiting) snprintf(lbl, sizeof lbl, "Press %s...  %d##%d_%d", dev == BIND_DEV_PAD ? "a button" : "a key",
+    if (waiting) snprintf(lbl, sizeof lbl, "%s...  %d##%d_%d",
+                          dev == BIND_DEV_PAD ? TR("Press a button", "Aperte um botão") : TR("Press a key", "Aperte uma tecla"),
                           (ms_left + 999) / 1000, dev, slot);
     else snprintf(lbl, sizeof lbl, "%s##%d_%d", dev == BIND_DEV_PAD ? bind_pad_label(g_bind_pad[slot], fam) :
                                                  bind_key_label(g_bind_key[slot]), dev, slot);
@@ -38,17 +40,21 @@ static void cell(int dev, int slot, int fam, int cap_dev, int cap_slot, int ms_l
 
 // The mouse: how it turns the camera, how fast, and the Switch button each of its buttons presses (runtime/hle/input.c)
 static void mouse_draw() {
-    ImGui::SeparatorText("Mouse");
-    static const char *const modes[] = {"Off", "Hold the right button", "Always (the window holds the cursor)"};
+    ImGui::SeparatorText(TR("Mouse", "Mouse"));
+    const char *const modes[] = {TR("Off", "Desligado"), TR("Hold the right button", "Segurando o botão direito"),
+                                 TR("Always (the window holds the cursor)", "Sempre (a janela prende o cursor)")};
     bool changed = false;
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
-    changed |= ImGui::Combo("Camera", &g_settings.mouse_camera, modes, 3);
+    changed |= ImGui::Combo(TR("Camera###cam", "Câmera###cam"), &g_settings.mouse_camera, modes, 3);
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
-    ImGui::SliderFloat("Camera speed", &g_settings.mouse_sens, 0.1f, 5.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+    ImGui::SliderFloat(TR("Camera speed###camspeed", "Velocidade da câmera###camspeed"), &g_settings.mouse_sens, 0.1f, 5.0f,
+                       "%.2f", ImGuiSliderFlags_Logarithmic);
     if (ImGui::IsItemDeactivatedAfterEdit()) changed = true;  // (saved once let go, not on every step of a drag)
     ImGui::PushTextWrapPos(0);
-    ImGui::TextDisabled("Always: while you play, the cursor is hidden and moving the mouse turns the camera; F1 or Esc "
-                        "(the menu) or switching windows gives the cursor back. The buttons below work only then.");
+    ImGui::TextDisabled("%s", TR("Always: while you play, the cursor is hidden and moving the mouse turns the camera; F1 or Esc "
+                                 "(the menu) or switching windows gives the cursor back. The buttons below work only then.",
+                                 "Sempre: enquanto você joga, o cursor some e mexer o mouse gira a câmera; F1 ou Esc (o menu) "
+                                 "ou trocar de janela devolve o cursor. Os botões abaixo só valem nesse modo."));
     ImGui::PopTextWrapPos();
     // the Switch buttons a mouse button can press: names and order as the table above
     static const int opts[] = {-1, BIND_A, BIND_B, BIND_X, BIND_Y, BIND_L, BIND_R, BIND_ZL, BIND_ZR, BIND_PLUS, BIND_MINUS,
@@ -63,9 +69,10 @@ static void mouse_draw() {
             ImGui::SetNextItemWidth(-FLT_MIN);
             char id[16];
             snprintf(id, sizeof id, "##mb%d", m);
-            if (ImGui::BeginCombo(id, g_bind_mouse[m] >= 0 ? bind_input_name(g_bind_mouse[m]) : "(none)")) {
+            const char *none = TR("(none)", "(nenhum)");
+            if (ImGui::BeginCombo(id, g_bind_mouse[m] >= 0 ? bind_input_name(g_bind_mouse[m]) : none)) {
                 for (int o : opts)
-                    if (ImGui::Selectable(o >= 0 ? bind_input_name(o) : "(none)", g_bind_mouse[m] == o)) {
+                    if (ImGui::Selectable(o >= 0 ? bind_input_name(o) : none, g_bind_mouse[m] == o)) {
                         g_bind_mouse[m] = (int16_t)o;
                         changed = true;
                     }
@@ -75,7 +82,10 @@ static void mouse_draw() {
         ImGui::EndTable();
     }
     ImGui::BeginDisabled(bind_mouse_is_default());
-    if (ImGui::Button("Reset mouse buttons to defaults")) { bind_mouse_reset(); changed = true; }
+    if (ImGui::Button(TR("Reset mouse buttons to defaults###mreset", "Voltar os botões do mouse ao padrão###mreset"))) {
+        bind_mouse_reset();
+        changed = true;
+    }
     ImGui::EndDisabled();
     if (changed) settings_save();
 }
@@ -88,13 +98,17 @@ extern "C" void controls_bindings_draw(float scale) {
     SDL_JoystickID *ids = SDL_GetGamepads(&n);
     const char *pad_name = ids && n > 0 ? SDL_GetGamepadNameForID(ids[0]) : NULL;
     char line[200];
-    if (n > 0) snprintf(line, sizeof line, "Controller: %s  (%s button names)", pad_name ? pad_name : "connected", fam_name[fam % 3]);
-    else snprintf(line, sizeof line, "No controller connected  (%s button names shown)", fam_name[fam % 3]);
+    if (n > 0) snprintf(line, sizeof line, TR("Controller: %s  (%s button names)", "Controle: %s  (nomes de botões %s)"),
+                        pad_name ? pad_name : TR("connected", "conectado"), fam_name[fam % 3]);
+    else snprintf(line, sizeof line, TR("No controller connected  (%s button names shown)", "Nenhum controle conectado  (nomes de botões %s)"),
+                  fam_name[fam % 3]);
     SDL_free(ids);
     ImGui::TextUnformatted(line);
     ImGui::PushTextWrapPos(0);
-    ImGui::TextDisabled("Select a binding, then press the new button or key. Esc (or 5 seconds) cancels. A button "
-                        "that's already in use swaps with the old one.");
+    ImGui::TextDisabled("%s", TR("Select a binding, then press the new button or key. Esc (or 5 seconds) cancels. A button "
+                                 "that's already in use swaps with the old one.",
+                                 "Escolha um comando e aperte o novo botão ou tecla. Esc (ou 5 segundos) cancela. Um botão "
+                                 "que já está em uso troca de lugar com o antigo."));
     ImGui::PopTextWrapPos();
 
     int cd, cs, ms;
@@ -108,24 +122,27 @@ extern "C" void controls_bindings_draw(float scale) {
     if (serial != seen_serial) {
         seen_serial = serial;
         const char *now = rslot < 0 ? "" : rdev == BIND_DEV_PAD ? bind_pad_label(g_bind_pad[rslot], fam) : bind_key_label(g_bind_key[rslot]);
-        if (kind == 5) snprintf(msg, sizeof msg, "%s bindings reset to the defaults.", rdev == BIND_DEV_PAD ? "Controller" : "Keyboard");
-        else if (kind == 1) snprintf(msg, sizeof msg, "%s is now %s.", bind_input_name(rslot), now);
+        if (kind == 5)
+            snprintf(msg, sizeof msg, "%s", rdev == BIND_DEV_PAD ? TR("Controller bindings reset to the defaults.", "Comandos do controle de volta ao padrão.")
+                                                                 : TR("Keyboard bindings reset to the defaults.", "Comandos do teclado de volta ao padrão."));
+        else if (kind == 1) snprintf(msg, sizeof msg, TR("%s is now %s.", "%s agora é %s."), bind_input_name(rslot), now);
         else if (kind == 2)
-            snprintf(msg, sizeof msg, "%s is now %s; %s moved to %s (swapped).", bind_input_name(rslot), now,
-                     bind_input_name(rother), rdev == BIND_DEV_PAD ? bind_pad_label(g_bind_pad[rother], fam) : bind_key_label(g_bind_key[rother]));
-        else if (kind == 3) snprintf(msg, sizeof msg, "Cancelled: %s unchanged.", bind_input_name(rslot));
-        else if (kind == 4) snprintf(msg, sizeof msg, "Nothing pressed: %s unchanged.", bind_input_name(rslot));
+            snprintf(msg, sizeof msg, TR("%s is now %s; %s moved to %s (swapped).", "%s agora é %s; %s foi para %s (trocados)."),
+                     bind_input_name(rslot), now, bind_input_name(rother),
+                     rdev == BIND_DEV_PAD ? bind_pad_label(g_bind_pad[rother], fam) : bind_key_label(g_bind_key[rother]));
+        else if (kind == 3) snprintf(msg, sizeof msg, TR("Cancelled: %s unchanged.", "Cancelado: %s não mudou."), bind_input_name(rslot));
+        else if (kind == 4) snprintf(msg, sizeof msg, TR("Nothing pressed: %s unchanged.", "Nada apertado: %s não mudou."), bind_input_name(rslot));
         if (kind == 1 || kind == 2 || kind == 5) {
             settings_save();
             launcher_prompts_refresh();  // (the game's button icons drawn again for the new bindings: runtime/ui/launcher.mm)
         }
     }
-    if (msg[0]) ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", msg);
+    if (msg[0]) ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s", msg);
 
     if (ImGui::BeginTable("##binds", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX)) {
         ImGui::TableSetupColumn("Switch", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-        ImGui::TableSetupColumn("Controller", ImGuiTableColumnFlags_WidthStretch, 1.3f);
-        ImGui::TableSetupColumn("Keyboard", ImGuiTableColumnFlags_WidthStretch, 1.3f);
+        ImGui::TableSetupColumn(TR("Controller", "Controle"), ImGuiTableColumnFlags_WidthStretch, 1.3f);
+        ImGui::TableSetupColumn(TR("Keyboard", "Teclado"), ImGuiTableColumnFlags_WidthStretch, 1.3f);
         ImGui::TableHeadersRow();
         // in the order a player thinks of them: face buttons, shoulders, Plus / Minus, d-pad, sticks
         static const int order[] = {BIND_A, BIND_B, BIND_X, BIND_Y, BIND_L, BIND_R, BIND_ZL, BIND_ZR, BIND_PLUS,
@@ -139,7 +156,7 @@ extern "C" void controls_bindings_draw(float scale) {
             ImGui::TextUnformatted(bind_input_name(slot));
             ImGui::TableNextColumn();
             if (slot < BIND_PAD_COUNT) cell(BIND_DEV_PAD, slot, fam, cd, cs, ms);
-            else ImGui::TextDisabled(slot < BIND_RS_UP ? "Left stick" : "Right stick");
+            else ImGui::TextDisabled("%s", slot < BIND_RS_UP ? TR("Left stick", "Analógico esquerdo") : TR("Right stick", "Analógico direito"));
             ImGui::TableNextColumn();
             cell(BIND_DEV_KEY, slot, fam, cd, cs, ms);
         }
@@ -149,17 +166,28 @@ extern "C" void controls_bindings_draw(float scale) {
     mouse_draw();
     ImGui::Spacing();
     ImGui::BeginDisabled(bind_is_default(BIND_DEV_PAD));
-    if (ImGui::Button("Reset controller to defaults")) { bind_capture_cancel(); bind_reset(BIND_DEV_PAD); }
+    if (ImGui::Button(TR("Reset controller to defaults###preset", "Voltar o controle ao padrão###preset"))) {
+        bind_capture_cancel();
+        bind_reset(BIND_DEV_PAD);
+    }
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::BeginDisabled(bind_is_default(BIND_DEV_KEY));
-    if (ImGui::Button("Reset keyboard to defaults")) { bind_capture_cancel(); bind_reset(BIND_DEV_KEY); }
+    if (ImGui::Button(TR("Reset keyboard to defaults###kreset", "Voltar o teclado ao padrão###kreset"))) {
+        bind_capture_cancel();
+        bind_reset(BIND_DEV_KEY);
+    }
     ImGui::EndDisabled();
     ImGui::PushTextWrapPos(0);
-    ImGui::TextDisabled("Bindings apply to the game only. Menus keep the fixed layout (right face button / Enter "
-                        "select, bottom face button / Esc back), and the in-game menu always opens with F1 or Esc, or "
-                        "the controller's Back + Start held together, or its Home / Guide button - so this page can't be "
-                        "locked out. The game's button icons follow these bindings: after a change they are drawn "
-                        "again in the background and show from the next start.");
+    ImGui::TextDisabled("%s", TR("Bindings apply to the game only. Menus keep the fixed layout (right face button / Enter "
+                                 "select, bottom face button / Esc back), and the in-game menu always opens with F1 or Esc, or "
+                                 "the controller's Back + Start held together, or its Home / Guide button - so this page can't be "
+                                 "locked out. The game's button icons follow these bindings: after a change they are drawn "
+                                 "again in the background and show from the next start.",
+                                 "Os comandos valem só para o jogo. Os menus mantêm o layout fixo (botão da direita / Enter "
+                                 "escolhe, botão de baixo / Esc volta), e o menu do jogo sempre abre com F1 ou Esc, com Back + "
+                                 "Start do controle juntos, ou com o botão Home / Guide - então esta página nunca fica "
+                                 "inacessível. Os ícones de botões do jogo seguem estes comandos: depois de uma mudança eles "
+                                 "são desenhados de novo em segundo plano e aparecem a partir do próximo início."));
     ImGui::PopTextWrapPos();
 }
