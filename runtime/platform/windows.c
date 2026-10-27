@@ -394,10 +394,24 @@ static void commit_guest_range(uint64_t a, uint64_t n) {
         a = rend;
     }
 }
+// Reads into guest memory go through a host buffer (bounce, per thread): the kernel never writes the guest window,
+// so the range needn't be committed first - the copy commits what it touches like any guest access. That check
+// (commit_guest_range's VirtualQuery) took ~18 ms per read in the write-watched window, even for a few KB, and held
+// the address space lock meanwhile: the render thread's write tracking queries (GetWriteWatch, exec.c) waited it out.
+// The game streams data as the player moves - 8% of frames came a refresh late or more. LARECOMP_DIRECT_READ=1: read
+// straight in as before.
+static __thread char *bounce;
+enum { BOUNCE = 1 << 20 };
+static bool read_bounced(const void *buf, size_t n) {
+    static int direct = -1;
+    if (direct < 0) { const char *e = getenv("LARECOMP_DIRECT_READ"); direct = e && atoi(e) != 0; }
+    uint64_t a = (uint64_t)(uintptr_t)buf;
+    return !direct && a < g_hi && a + n > g_lo && (bounce || (bounce = malloc(BOUNCE)));
+}
 static ssize_t prw(int fd, void *buf, size_t n, off_t off, bool write) {
     HANDLE h = (HANDLE)_get_osfhandle(fd);
     if (h == INVALID_HANDLE_VALUE) return -1;
-    commit_guest_range((uint64_t)(uintptr_t)buf, n);
+    if (write || !read_bounced(buf, n)) commit_guest_range((uint64_t)(uintptr_t)buf, n);
     size_t done = 0;
     while (done < n) {
         OVERLAPPED ov = {0};
@@ -405,8 +419,12 @@ static ssize_t prw(int fd, void *buf, size_t n, off_t off, bool write) {
         ov.Offset = (DWORD)o;
         ov.OffsetHigh = (DWORD)(o >> 32);
         DWORD chunk = n - done > 0x40000000 ? 0x40000000 : (DWORD)(n - done), got = 0;
+        char *dst = (char *)buf + done;
+        bool via = !write && read_bounced(dst, chunk);
+        if (via && chunk > BOUNCE) chunk = BOUNCE;
         BOOL ok = write ? WriteFile(h, (const char *)buf + done, chunk, &got, &ov)
-                        : ReadFile(h, (char *)buf + done, chunk, &got, &ov);
+                        : ReadFile(h, via ? bounce : dst, chunk, &got, &ov);
+        if (ok && via) memcpy(dst, bounce, got);
         if (!ok) {
             DWORD err = GetLastError();
             if (err == ERROR_HANDLE_EOF) break;
