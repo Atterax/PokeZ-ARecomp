@@ -66,7 +66,20 @@ typedef struct {
     int hearts;          // index into g_heart_colours (0 = Default red)
     char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
     bool fps60_lock;  // with fps60: stays at 60 even when this PC can't hold it (slow motion below; runtime/hle/framepace.c)
+    int ui_lang;      // UI_LANG_*: the start screen's language (runtime/ui/launcher.mm); auto = the system's
+    // mods/ folders (runtime/services/fs.c layers them): '|' between names. order: first wins where two replace the
+    // same file (folders not listed come after, by name); off: not loaded. Edited on the start screen's Mods page.
+    char mods_order[1024];
+    char mods_off[1024];
 } Settings;
+
+enum { UI_LANG_AUTO = 0, UI_LANG_EN = 1, UI_LANG_PT = 2 };
+// Our own screens (the start screen, the F1 menu) in Portuguese: ui_lang, or for auto the system's language.
+// UI_TR("English", "Português") picks the line.
+bool settings_ui_portuguese(void);
+#define UI_TR(en, pt) (settings_ui_portuguese() ? (pt) : (en))
+// name is one of list's '|'-separated entries
+bool settings_list_has(const char *list, const char *name);
 
 enum { N_TUNIC_COLOURS = 13, N_HEART_COLOURS = 9 };
 extern const char *const g_tunic_colours[N_TUNIC_COLOURS];

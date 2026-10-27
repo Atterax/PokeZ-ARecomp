@@ -10,6 +10,7 @@
 #include "../hle.h"
 #include "../platform.h"
 #include "../rando.h"
+#include "../settings.h"
 #include "../ipc.h"
 
 #ifndef O_BINARY
@@ -79,10 +80,10 @@ static void rom_dir_path(const uint8_t *dmeta, uint32_t dsize, uint32_t dir, cha
     for (int i = n - 1; i >= 0; i--) { strlcat(out, parts[i], cap); strlcat(out, "/", cap); }
 }
 
-// ---- layered files: a randomizer seed's romfs/ folder, then each mods/<name>/romfs folder in name order (a folder
-// whose name starts with '_' or '.' is off); the first layer with a file wins. A file the game's RomFS has is
-// replaced (rom_index: its file-meta entry pointed at data past the image's end); a new one is added
-// (add_new_files), with any directories it needs.
+// ---- layered files: a randomizer seed's romfs/ folder, then each mods/<name>/romfs folder in the start screen's order
+// (settings mods_order; the rest by name; a folder in mods_off, or whose name starts with '_' or '.', is off); the
+// first layer with a file wins. A file the game's RomFS has is replaced (rom_index: its file-meta entry pointed at data
+// past the image's end); a new one is added (add_new_files), with any directories it needs.
 // Pokémon Z-A keeps its files in packs (arc/data.trpfs) listed by arc/data.trpfd, and reads a file from the RomFS
 // only when the list doesn't have it: so the game's data.trpfd is served without the layered files' entries
 // (trpfd_unlist). A mod's own data.trpfd is never used (it's made for the mod's game version).
@@ -92,6 +93,22 @@ static bool trinity;  // the RomFS has arc/data.trpfd
 RT_ON_RESET(layer_reset) { nlayers = -1; trinity = false; }
 
 static int name_cmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
+// mods_order's place (unlisted: after every listed one), then the name
+static int mod_rank(const char *name) {
+    int i = 0;
+    for (const char *p = g_settings.mods_order; *p; i++) {
+        const char *bar = strchr(p, '|');
+        size_t k = bar ? (size_t)(bar - p) : strlen(p);
+        if (k == strlen(name) && !strncmp(p, name, k)) return i;
+        if (!bar) break;
+        p = bar + 1;
+    }
+    return 1 << 20;
+}
+static int mod_cmp(const void *a, const void *b) {
+    int ra = mod_rank((const char *)a), rb = mod_rank((const char *)b);
+    return ra != rb ? (ra < rb ? -1 : 1) : name_cmp(a, b);
+}
 
 static void layer_init(void) {
     if (nlayers >= 0) return;
@@ -102,15 +119,17 @@ static void layer_init(void) {
     if (!d) return;
     char names[15][256];
     int n = 0;
+    settings_load();  // (the start screen's Mods page: mods_off, mods_order)
     for (struct dirent *e; (e = readdir(d)) && n < 15;) {
         if (e->d_name[0] == '.' || e->d_name[0] == '_') continue;
+        if (settings_list_has(g_settings.mods_off, e->d_name)) { LOG("[fs] mod %s: off\n", e->d_name); continue; }
         char p[1100];
         struct stat sb;
         snprintf(p, sizeof p, "mods/%s/romfs", e->d_name);
         if (!stat(p, &sb) && S_ISDIR(sb.st_mode)) strlcpy(names[n++], e->d_name, sizeof *names);
     }
     closedir(d);
-    qsort(names, n, sizeof *names, name_cmp);
+    qsort(names, n, sizeof *names, mod_cmp);
     for (int i = 0; i < n; i++) {
         snprintf(layer_root[nlayers++], sizeof *layer_root, "mods/%s/romfs", names[i]);
         LOG("[fs] mod: %s\n", names[i]);
