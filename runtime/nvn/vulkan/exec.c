@@ -2228,6 +2228,7 @@ static KvEnt *kv_find(KvTab *k, uint64_t key) {  // key's entry, or the empty on
     if (!k->cap) {  // (LARECOMP_VK_KV_START=<power of 2> (test): a small start, the growth exercised in any run)
         static uint32_t start;
         if (!start) start = ENV("LARECOMP_VK_KV_START") ? (uint32_t)atoi(ENV("LARECOMP_VK_KV_START")) : 4096;
+        if (start < 16 || (start & (start - 1))) start = 4096;  // (the probe masks with cap - 1)
         k->cap = start, k->t = calloc(k->cap, sizeof *k->t);
     }
     uint32_t i = (uint32_t)(key ^ (key >> 31)) & (k->cap - 1);

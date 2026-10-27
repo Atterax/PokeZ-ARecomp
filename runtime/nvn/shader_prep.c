@@ -440,7 +440,8 @@ static void idx_store(const char *path) {
     bool any = false;
     ShaderCodeHdr h;
     while (off < end && !fseek(f, off, SEEK_SET) && fread(&h, sizeof h, 1, f) == 1 && h.size &&
-           h.size <= (uint64_t)(end - off - (long)sizeof h)) {
+           h.size <= (uint64_t)(end - off - (long)sizeof h) &&
+           (uint64_t)h.const_offset + h.const_size <= h.size) {  // (the constants inside the code)
         idx_add(h.hash, file, (uint32_t)(off + (long)sizeof h), h.size, h.const_offset, h.const_size);
         any = true;
         off += (long)sizeof h + h.size;

@@ -128,14 +128,11 @@ static void copy_surface(const uint8_t *src, uint8_t *dst, uint32_t wb, uint32_t
     }
     for (uint32_t z = 0; z < d; z++) {
         for (uint32_t y = 0; y < hb; y++) {
-            uint8_t *lin = dst + ((uint64_t)z * hb + y) * row_bytes;
             const uint8_t *lin_src = src + ((uint64_t)z * hb + y) * row_bytes;
             // 16-byte runs are contiguous in both layouts
             for (uint32_t x = 0; x < row_bytes; x += 16) {
                 uint32_t n = row_bytes - x < 16 ? row_bytes - x : 16;
-                uint64_t o = gob_offset(x, y, z, width_gobs, bh_log2, bd_log2, blocks_rows);
-                if (to_linear) memcpy(lin + x, src + o, n);
-                else memcpy(dst + o, lin_src + x, n);
+                memcpy(dst + gob_offset(x, y, z, width_gobs, bh_log2, bd_log2, blocks_rows), lin_src + x, n);
             }
         }
     }
