@@ -34,7 +34,7 @@ uint64_t prof_views_created;  // textures.c vk_image_view cache misses
 uint64_t prof_up_ns = ~0ull;  // textures.c upload checks (~0: profiling off)
 #define PROF_T0() uint64_t prof_t0_ = prof ? SDL_GetTicksNS() : 0
 #define PROF_ADD(v) do { if (prof) v += SDL_GetTicksNS() - prof_t0_; } while (0)
-static _Atomic int stat_compiles;
+static _Atomic int stat_compiles, stat_inline_builds;  // (inline: run_queued_now)
 static uint64_t op_counts[CMD_COUNT];
 bool g_debug_frame;
 static char stats_text[2048];
@@ -614,7 +614,7 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size) {
 // ================================================================== worker threads (shader / pipeline builds)
 // First-use compiles run off the render thread; draws needing them are skipped until ready (as on Metal).
 // LARECOMP_SYNC_SHADERS=1 builds on first use, blocking (deterministic tests).
-typedef struct Job { void (*fn)(void *); void *arg; struct Job *next; } Job;
+typedef struct Job { void (*fn)(void *); void *arg; _Atomic int *state; struct Job *next; } Job;
 static Job *jobs_head, *jobs_tail;
 static pthread_mutex_t jobs_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t jobs_cond = PTHREAD_COND_INITIALIZER;
@@ -678,12 +678,12 @@ static void *translator(void *a) {
     return NULL;
 }
 static bool sync_shaders(void);
-static void run_translate(void (*fn)(void *), void *arg) {
+static void run_translate(void (*fn)(void *), void *arg, _Atomic int *state) {
     if (sync_shaders()) { fn(arg); return; }
     static bool started;
     if (!started) { started = true; pthread_t t; pthread_create(&t, NULL, translator, NULL); }
     Job *j = malloc(sizeof *j);
-    j->fn = fn; j->arg = arg; j->next = NULL;
+    j->fn = fn; j->arg = arg; j->state = state; j->next = NULL;
     pthread_mutex_lock(&tjobs_lock);
     if (tjobs_tail) tjobs_tail->next = j; else tjobs_head = j;
     tjobs_tail = j;
@@ -691,7 +691,7 @@ static void run_translate(void (*fn)(void *), void *arg) {
     pthread_mutex_unlock(&tjobs_lock);
 }
 
-static void run_job(void (*fn)(void *), void *arg) {
+static void run_job(void (*fn)(void *), void *arg, _Atomic int *state) {
     if (sync_shaders()) { fn(arg); return; }
     static bool started;
     if (!started) {
@@ -704,12 +704,39 @@ static void run_job(void (*fn)(void *), void *arg) {
         for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, (void *)(intptr_t)i); }
     }
     Job *j = malloc(sizeof *j);
-    j->fn = fn; j->arg = arg; j->next = NULL;
+    j->fn = fn; j->arg = arg; j->state = state; j->next = NULL;
     pthread_mutex_lock(&jobs_lock);
     if (jobs_tail) jobs_tail->next = j; else jobs_head = j;
     jobs_tail = j;
     pthread_cond_signal(&jobs_cond);
     pthread_mutex_unlock(&jobs_lock);
+}
+
+// The job that will set `state`, if it is still queued (not started): taken out of its queue.
+static Job *take_job(Job **head, Job **tail, pthread_mutex_t *lock, _Atomic int *state) {
+    pthread_mutex_lock(lock);
+    Job *prev = NULL, *j = *head;
+    while (j && j->state != state) prev = j, j = j->next;
+    if (j) {
+        if (prev) prev->next = j->next; else *head = j->next;
+        if (*tail == j) *tail = prev;
+    }
+    pthread_mutex_unlock(lock);
+    return j;
+}
+
+// A draw that waits for its shader / pipeline runs that build itself when it hasn't started yet, instead of waiting
+// for its turn: builds are queued in the order draws first need them, so a full-screen pass that a frame can't skip
+// waited behind every scene pipeline asked for before it in that frame - and the next such pass then did the same
+// (Pokemon Z-A: 4-6 of them in a row as a battle move or a new area first showed, 60-130 ms frames at 30 fps).
+static bool run_queued_now(_Atomic int *state) {
+    Job *j = take_job(&tjobs_head, &tjobs_tail, &tjobs_lock, state);
+    if (!j) j = take_job(&jobs_head, &jobs_tail, &jobs_lock, state);
+    if (!j) return false;
+    j->fn(j->arg);
+    free(j);
+    atomic_fetch_add(&stat_inline_builds, 1);
+    return true;
 }
 
 // ================================================================== state
@@ -781,12 +808,12 @@ const char *renderer_stats(void) {
     }
     snprintf(stats_text, sizeof stats_text,
              "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, wait %.0fms, compile %d, fbcopy %llu, upload %.1fMB, "
-             "vertices %.0fMB cached %.0fMB host, xfb sessions %llu, scene waits %.0fms",
+             "vertices %.0fMB cached %.0fMB host, xfb sessions %llu, scene waits %.0fms, inline builds %d",
              (unsigned long long)stat_draws, (unsigned long long)stat_skipped, (unsigned long long)stat_passes,
              (unsigned long long)stat_dispatches, (unsigned long long)stat_flushes, (double)stat_wait_ns / 1e6,
              atomic_exchange(&stat_compiles, 0), (unsigned long long)stat_feedback_copies, (double)stat_upload_bytes / 1048576.0,
              (double)stat_vtx_cached / 1048576.0, (double)stat_vtx_host / 1048576.0, (unsigned long long)stat_xfb_sessions,
-             (double)stat_scene_wait_ns / 1e6);
+             (double)stat_scene_wait_ns / 1e6, atomic_exchange(&stat_inline_builds, 0));
     stat_scene_wait_ns = 0;
     stat_feedback_copies = stat_upload_bytes = stat_vtx_cached = stat_vtx_host = stat_xfb_sessions = 0;
     if (ENV("LARECOMP_SKIP_WHY")) {
@@ -1418,7 +1445,7 @@ static void translate_program(void *arg) {
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
     save_glsl(p->vi->msl, p->code[0], "vs");
     save_glsl(p->fi->msl, p->code[1], "fs");
-    run_job(compile_program, p);
+    run_job(compile_program, p, &p->state);
 }
 
 #define PROG_TAB 4096
@@ -1446,7 +1473,7 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     }
     p->vkey = *vkey;
     p->fkey = *fkey;
-    run_translate(translate_program, p);
+    run_translate(translate_program, p, &p->state);
     return p;
 }
 
@@ -3033,7 +3060,7 @@ static CsProg *compute_program(NvnProgram *np) {
         if (!cp->local[i]) cp->local[i] = 1;
     }
     save_glsl(cp->si->msl, ss->code_addr, "cs");
-    run_job(build_compute, cp);
+    run_job(build_compute, cp, &cp->p.state);
     return cp;
 }
 
@@ -3254,7 +3281,8 @@ static bool wait_built(_Atomic int *state, const CmdRec *r) {
     static int ngave_up;
     for (int i = 0; i < ngave_up; i++) if (gave_up[i] == state) return false;
     uint64_t t0 = SDL_GetTicksNS();
-    while (atomic_load(state) == 0 && SDL_GetTicksNS() - t0 < 2000000000ull) SDL_Delay(1);
+    while (atomic_load(state) == 0 && SDL_GetTicksNS() - t0 < 2000000000ull)
+        if (!run_queued_now(state)) SDL_Delay(1);
     uint64_t now = SDL_GetTicksNS();
     static int n;
     if (n++ < 20) LOG("[vk] full-screen draw waited %.1f ms for its shader / pipeline\n", (now - t0) / 1e6);
@@ -3470,7 +3498,7 @@ static void draw_(CmdRec *r, bool indexed) {
         pp->k = k;
         pipe_tab[pslot].key = ph;
         pipe_tab[pslot].pipe = pp;
-        run_job(build_pipeline, pp);
+        run_job(build_pipeline, pp, &pp->state);
     }
     if (!wait_built(&pp->state, r)) { stat_skipped_here(); return; }
     ss_enabled();
