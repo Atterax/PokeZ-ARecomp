@@ -31,11 +31,11 @@ build/gen-venv/Scripts/python.exe tools/pe_no_cfg.py build/helper/lasgen/lasgen.
 mkdir -p build/ooz
 (cd third_party/ooz && g++ -O2 -shared -static -include sys/stat.h -Dmain=ooz_main kraken.cpp bitknit.cpp lzna.cpp \
     ooz_lib.cpp -o ../../build/ooz/ooz.dll)
-if [ ! -f build/prompts-venv/.ok ]; then
+if [ ! -f build/prompts-venv/.ok2 ]; then  # (.ok2: texture2ddecoder, the team icons' BC7)
     py -3.12 -m venv build/prompts-venv
-    build/prompts-venv/Scripts/python.exe -m pip install -q pillow==13.0.0 numpy==2.5.4 fonttools==4.67.0 cffsubr==0.4.0 \
+    build/prompts-venv/Scripts/python.exe -m pip install -q pillow==13.0.0 numpy==2.5.4 fonttools==4.67.0 cffsubr==0.4.0 texture2ddecoder==1.0.6 \
         pyinstaller==6.22.3
-    touch build/prompts-venv/.ok
+    touch build/prompts-venv/.ok2
 fi
 USERPROFILE="$(cygpath -w ~)" build/prompts-venv/Scripts/python.exe -m PyInstaller --noconfirm --clean --log-level WARN \
     --distpath build/helper --workpath build/pyinstaller-prompts tools/zaprompts.spec

@@ -1696,6 +1696,261 @@ static int mods_on_count(void) {
     return n;
 }
 
+// ------------------------------------------------------------------ "Your team" (the Play page, from the player's save)
+// The party read straight out of save/save_0/main (read only), re-implemented from the format as PKHeX documents it:
+// the file XORed with a 0x7F-byte pad (its last 32 bytes a SHA-256, not checked), then blocks of u32 key + type
+// (+ size) + data, each XORed by a xorshift32 stream seeded by its key. The party is block 0x3AA1A9AD: 6 slots of
+// 0x1E0, each a Gen 8 Pokémon (0x148 bytes LCG-encrypted from the encryption constant and shuffled in 4 blocks of
+// 0x50, then the party stats, level at 0x148).
+struct PartyMon { int species, form, level; bool egg, shiny; std::string name; };
+static std::vector<PartyMon> g_party;
+static time_t g_party_time = -1;  // (the save's time it was read for: read again when saves_scan sees a new one)
+
+struct SaveXs {  // the blocks' xorshift32 stream: bytes LSB first, the state advanced popcount(key) times first
+    uint32_t s;
+    int c = 0;
+    static uint32_t adv(uint32_t s) { s ^= s << 2; s ^= s >> 15; s ^= s << 13; return s; }
+    explicit SaveXs(uint32_t key) : s(key) { for (int i = __builtin_popcount(key); i > 0; i--) s = adv(s); }
+    uint8_t next(void) {
+        uint8_t r = (uint8_t)(s >> (c * 8));
+        if (c == 3) s = adv(s), c = 0;
+        else c++;
+        return r;
+    }
+    uint32_t next32(void) { uint32_t v = next(); v |= next() << 8; v |= next() << 16; return v | (uint32_t)next() << 24; }
+};
+
+static uint32_t rd32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
+
+static bool party_block(std::vector<uint8_t> &p, std::vector<uint8_t> &out) {
+    static const uint8_t pad[0x7F] = {
+        0xA0, 0x92, 0xD1, 0x06, 0x07, 0xDB, 0x32, 0xA1, 0xAE, 0x01, 0xF5, 0xC5, 0x1E, 0x84, 0x4F, 0xE3, 0x53, 0xCA, 0x37,
+        0xF4, 0xA7, 0xB0, 0x4D, 0xA0, 0x18, 0xB7, 0xC2, 0x97, 0xDA, 0x5F, 0x53, 0x2B, 0x75, 0xFA, 0x48, 0x16, 0xF8, 0xD4,
+        0x8A, 0x6F, 0x61, 0x05, 0xF4, 0xE2, 0xFD, 0x04, 0xB5, 0xA3, 0x0F, 0xFC, 0x44, 0x92, 0xCB, 0x32, 0xE6, 0x1B, 0xB9,
+        0xB1, 0x2E, 0x01, 0xB0, 0x56, 0x53, 0x36, 0xD2, 0xD1, 0x50, 0x3D, 0xDE, 0x5B, 0x2E, 0x0E, 0x52, 0xFD, 0xDF, 0x2F,
+        0x7B, 0xCA, 0x63, 0x50, 0xA4, 0x67, 0x5D, 0x23, 0x17, 0xC0, 0x52, 0xE1, 0xA6, 0x30, 0x7C, 0x2B, 0xB6, 0x70, 0x36,
+        0x5B, 0x2A, 0x27, 0x69, 0x33, 0xF5, 0x63, 0x7B, 0x36, 0x3F, 0x26, 0x9B, 0xA3, 0xED, 0x7A, 0x53, 0x00, 0xA4, 0x48,
+        0xB3, 0x50, 0x9E, 0x14, 0xA0, 0x52, 0xDE, 0x7E, 0x10, 0x2B, 0x1B, 0x77, 0x6E};
+    static const int width[18] = {0, 0, 0, 1, 0, 0, 0, 0, 1, 2, 4, 8, 1, 2, 4, 8, 4, 8};  // (types 8..17: numbers)
+    if (p.size() < 64) return false;
+    size_t n = p.size() - 32;
+    for (size_t i = 0; i < n; i++) p[i] ^= pad[i % 0x7F];
+    for (size_t o = 0; o + 5 <= n;) {
+        uint32_t key = rd32(&p[o]);
+        o += 4;
+        SaveXs x(key);
+        uint8_t t = p[o++] ^ x.next();
+        uint64_t size;
+        if (t == 1 || t == 2) continue;  // (a bool: no data)
+        if (t == 4) {  // an object
+            if (o + 4 > n) return false;
+            size = rd32(&p[o]) ^ x.next32(), o += 4;
+        } else if (t == 5) {  // an array of numbers
+            if (o + 5 > n) return false;
+            uint32_t cnt = rd32(&p[o]) ^ x.next32();
+            uint8_t sub = p[o + 4] ^ x.next();
+            o += 5;
+            if (sub >= 18 || !width[sub]) return false;
+            size = (uint64_t)cnt * width[sub];
+        } else if (t < 18 && width[t]) size = width[t];
+        else return false;  // (a type this doesn't know: the rest can't be walked)
+        if (o + size > n) return false;
+        if (key == 0x3AA1A9AD) {
+            out.resize(size);
+            for (uint64_t i = 0; i < size; i++) out[i] = p[o + i] ^ x.next();
+            return true;
+        }
+        o += size;
+    }
+    return false;
+}
+
+static void party_decrypt(uint8_t *d) {  // one slot's first 0x158 bytes, in place
+    static const uint8_t pos[96] = {0, 1, 2, 3, 0, 1, 3, 2, 0, 2, 1, 3, 0, 3, 1, 2, 0, 2, 3, 1, 0, 3, 2, 1, 1, 0, 2, 3, 1, 0,
+                                    3, 2, 2, 0, 1, 3, 3, 0, 1, 2, 2, 0, 3, 1, 3, 0, 2, 1, 1, 2, 0, 3, 1, 3, 0, 2, 2, 1, 0, 3,
+                                    3, 1, 0, 2, 2, 3, 0, 1, 3, 2, 0, 1, 1, 2, 3, 0, 1, 3, 2, 0, 2, 1, 3, 0, 3, 1, 2, 0, 2, 3,
+                                    1, 0, 3, 2, 1, 0};
+    uint32_t ec = rd32(d), seed = ec;
+    for (int i = 8; i < 0x158; i += 2) {
+        if (i == 0x148) seed = ec;  // (the party stats: their own run from the same seed)
+        seed = 0x41C64E6D * seed + 0x6073;
+        uint16_t v = (uint16_t)(d[i] | d[i + 1] << 8) ^ (uint16_t)(seed >> 16);
+        d[i] = (uint8_t)v, d[i + 1] = (uint8_t)(v >> 8);
+    }
+    uint8_t src[0x140];
+    memcpy(src, d + 8, sizeof src);
+    int sv = (int)((ec >> 13) & 31) % 24;
+    for (int b = 0; b < 4; b++) memcpy(d + 8 + 0x50 * b, src + 0x50 * pos[sv * 4 + b], 0x50);
+}
+
+static void party_load(void) {
+    g_party.clear();
+    g_party_time = g_save_time;
+    FILE *f = fopen("save/save_0/main", "rb");
+    if (!f) return;
+    std::vector<uint8_t> p, blk;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size > 0 && size < (64 << 20)) {
+        p.resize(size);
+        if (fread(p.data(), 1, size, f) != (size_t)size) p.clear();
+    }
+    fclose(f);
+    if (!party_block(p, blk)) {
+        if (!p.empty()) fprintf(stderr, "[launcher] team: no party in save/save_0/main\n");
+        return;
+    }
+    for (size_t i = 0; i + 0x158 <= blk.size() && i < 6 * 0x1E0; i += 0x1E0) {
+        uint8_t d[0x158];
+        memcpy(d, &blk[i], sizeof d);
+        if (!rd32(d)) continue;  // (an empty slot)
+        party_decrypt(d);
+        PartyMon m;
+        m.species = d[8] | d[9] << 8, m.form = d[0x24], m.level = d[0x148];
+        m.egg = rd32(d + 0x8C) >> 30 & 1;
+        uint32_t pid = rd32(d + 0x1C), id = rd32(d + 0x0C);
+        m.shiny = ((pid >> 16) ^ (pid & 0xFFFF) ^ (id >> 16) ^ (id & 0xFFFF)) < 16;
+        for (int k = 0; k < 13; k++) {  // the nickname (the species' name when not nicknamed), UTF-16 -> UTF-8
+            unsigned c = d[0x58 + 2 * k] | d[0x59 + 2 * k] << 8;
+            if (!c) break;
+            if (c < 0x80) m.name += (char)c;
+            else if (c < 0x800) m.name += (char)(0xC0 | c >> 6), m.name += (char)(0x80 | (c & 63));
+            else m.name += (char)(0xE0 | c >> 12), m.name += (char)(0x80 | (c >> 6 & 63)), m.name += (char)(0x80 | (c & 63));
+        }
+        if (m.species <= 0 || m.species > 1025 || m.level > 100) continue;  // (not a Pokémon: a format this misreads)
+        g_party.push_back(m);
+    }
+    fprintf(stderr, "[launcher] team: %d in the party\n", (int)g_party.size());
+}
+
+// The icons: the game's own (pm<model>_<form>_00_00_<0|1>, 0 normal / 1 shiny), drawn from the player's romfs.bin into
+// cache/party_icons/ by zaprompts --party-icons (tools/za/prompt_textures.py: ~10 s, in the background, once; never
+// shipped). The model numbers are the National Dex ones up to Gen 5 and the game's own after that: Kalos in X / Y's
+// development order, the later ones in theirs (matched by eye to the game's icons).
+#define PARTY_ICONS "cache/party_icons"
+static int party_model(int species) {
+    static const short kalos[72] = {  // 650 Chespin ... 721 Volcanion
+        720, 721, 722, 717, 718, 719, 723, 724, 725, 711, 712, 753, 754, 755, 706, 707, 708, 704, 705, 713, 714, 715, 728, 729,
+        752, 730, 701, 733, 734, 744, 745, 746, 758, 759, 742, 743, 726, 727, 747, 748, 709, 710, 756, 757, 731, 732, 737, 738,
+        739, 740, 767, 761, 741, 766, 763, 764, 765, 760, 702, 703, 735, 736, 749, 751, 716, 762, 768, 769, 770, 772, 774, 773};
+    static const short later[][2] = {
+        {739, 859}, {740, 860}, {767, 866}, {768, 867}, {769, 822}, {770, 823}, {778, 819}, {780, 856}, {801, 882},
+        {802, 883}, {807, 888}, {808, 891}, {809, 892}, {821, 918}, {822, 919}, {823, 920}, {827, 901}, {828, 902},
+        {848, 921}, {849, 922}, {850, 923}, {851, 923}, {852, 964}, {853, 965}, {876, 942}, {877, 941}, {920, 1002},
+        {926, 1074}, {927, 1075}, {931, 1064}, {932, 1067}, {933, 1068}, {934, 1069}, {935, 1107}, {936, 1108},
+        {937, 1109}, {942, 1076}, {943, 1077}, {951, 1042}, {952, 1043}, {957, 1104}, {958, 1105}, {959, 1106},
+        {965, 1072}, {966, 1073}, {967, 1057}, {969, 1070}, {970, 1071}, {971, 1028}, {972, 1029}, {973, 1065},
+        {977, 1035}, {978, 1056}, {979, 1114}, {996, 1053}, {997, 1054}, {998, 1055}, {999, 1080}, {1000, 1081}};
+    if (species < 650) return species;
+    if (species <= 721) return kalos[species - 650];
+    for (auto &l : later)
+        if (l[0] == species) return l[1];
+    return -1;
+}
+
+static PlatProc g_party_icons_proc;
+static void party_icons_kick(void) {  // made when missing (3 tries: cache/party_icons.tried)
+    static bool asked;  // (once a start)
+    char tool[1100];
+    if (asked) return;
+    asked = true;
+    if (file_exists(PARTY_ICONS "/.made") || !file_exists(g_root + "/romfs.bin") ||
+        !rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool))
+        return;
+    int tries = 0;
+    if (FILE *f = fopen(PARTY_ICONS ".tried", "rb")) tries = fscanf(f, "%d", &tries) == 1 ? tries : 0, fclose(f);
+    if (tries >= 3) return;
+    mkdir("cache", 0755);
+    if (FILE *f = fopen(PARTY_ICONS ".tried", "wb")) fprintf(f, "%d", tries + 1), fclose(f);
+    std::string romfs = g_root + "/romfs.bin";
+    const char *argv[] = {tool, "--romfs", romfs.c_str(), "--party-icons", PARTY_ICONS, NULL};
+    g_party_icons_proc = plat_spawn(argv, PARTY_ICONS ".log", false);
+    fprintf(stderr, "[launcher] team icons: %s\n", g_party_icons_proc ? "being made (" PARTY_ICONS ".log)" : "zaprompts didn't start");
+}
+
+#ifdef __APPLE__
+static uint64_t party_texture(const void *rgba, int w, int h) {
+    id<MTLDevice> dev = (__bridge id<MTLDevice>)ui_metal_device();
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                  width:w height:h mipmapped:NO];
+    id<MTLTexture> t = [dev newTextureWithDescriptor:td];
+    [t replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0 withBytes:rgba bytesPerRow:w * 4];
+    return (uint64_t)(__bridge_retained void *)t;
+}
+#else
+static uint64_t party_texture(const void *rgba, int w, int h) { return vk_imgui_texture_rgba(rgba, w, h); }
+#endif
+
+static std::vector<std::pair<std::string, uint64_t>> g_party_icons;  // (mon -> texture, 0 = none: emptied when made)
+static uint64_t party_icon(const PartyMon &m) {  // 0: none (yet)
+    int model = m.egg ? 0 : party_model(m.species);
+    if (model < 0) return 0;
+    char name[64];
+    snprintf(name, sizeof name, "%d/%d/%d", model, m.form, m.shiny);
+    std::string key = name;
+    for (auto &l : g_party_icons)
+        if (l.first == key) return l.second;
+    std::string path;
+    // the form's own icon (a form number, or 11 + it for species whose base form is 11: Vivillon, Furfrou...), else
+    // the base form's; the shiny one, else the normal one
+    for (int sh = m.shiny && !m.egg ? 1 : 0; sh >= 0 && path.empty(); sh--)
+        for (int form : {m.egg ? 0 : m.form, m.egg ? 0 : 11 + m.form, 0, 11}) {
+            snprintf(name, sizeof name, PARTY_ICONS "/pm%04d_%02d_00_00_%d.png", model, form, sh);
+            if (file_exists(name)) { path = name; break; }
+        }
+    uint64_t tex = 0;
+    if (SDL_Surface *s0 = path.empty() ? NULL : SDL_LoadPNG(path.c_str())) {
+        if (SDL_Surface *s = SDL_ConvertSurface(s0, SDL_PIXELFORMAT_ABGR8888)) {  // (R, G, B, A bytes)
+            std::vector<uint8_t> px((size_t)s->w * s->h * 4);
+            for (int y = 0; y < s->h; y++) memcpy(&px[(size_t)y * s->w * 4], (uint8_t *)s->pixels + (size_t)y * s->pitch, (size_t)s->w * 4);
+            tex = party_texture(px.data(), s->w, s->h);
+            SDL_DestroySurface(s);
+        }
+        SDL_DestroySurface(s0);
+    }
+    g_party_icons.push_back({key, tex});
+    return tex;
+}
+
+// the panel: up to six cards (icon, name, level) - drawn only with a save that has a party
+static float party_panel(ImDrawList *dl, float x, float y, float w) {
+    if (g_party_time != g_save_time) party_load();
+    if (g_party.empty()) return 0;
+    if (g_party_icons_proc && plat_proc_wait(g_party_icons_proc, false) >= 0)
+        g_party_icons_proc = 0, g_party_icons.clear();  // (made: looked for again)
+    text(dl, F_LABEL, 13, x, y, C_GOLD_HI, TR("YOUR TEAM", "SEU TIME"));
+    y += 26;
+    float gap = 10, cw = (w - gap * 5) / 6, ch = cw + 44;
+    for (size_t i = 0; i < g_party.size(); i++) {
+        const PartyMon &m = g_party[i];
+        float cx = x + i * (cw + gap);
+        panel(dl, cx, y, cw, ch, IM_COL32(8, 19, 31, 200), m.shiny ? IM_COL32(255, 215, 122, 110) : C_LINE, 14);
+        float is = cw - 16;
+        if (uint64_t tex = party_icon(m))
+            dl->AddImage((ImTextureID)tex, P(cx + 8, y + 6), P(cx + 8 + is, y + 6 + is));
+        else {  // (no icon: a ball drawn in its place)
+            ImVec2 c = P(cx + cw / 2, y + 6 + is / 2);
+            float r = is * 0.3f * g_s;
+            dl->AddCircleFilled(c, r, IM_COL32(255, 255, 255, 30), 32);
+            dl->AddLine(ImVec2(c.x - r, c.y), ImVec2(c.x + r, c.y), IM_COL32(255, 255, 255, 60), 2 * g_s);
+            dl->AddCircle(c, r * 0.3f, IM_COL32(255, 255, 255, 60), 16, 2 * g_s);
+        }
+        if (m.shiny) text(dl, F_LABEL, 13, cx + cw - 18, y + 6, C_GOLD_HI, "\xe2\x98\x85");
+        const char *nm = m.egg ? TR("Egg", "Ovo") : m.name.c_str();
+        float nw = fminf(text_size(F_BODY, 13, nm).x, cw - 8);
+        dl->PushClipRect(P(cx + 4, y), P(cx + cw - 4, y + ch), true);
+        text(dl, F_BODY, 13, cx + (cw - nw) / 2, y + cw - 8, C_TEXT, nm);
+        dl->PopClipRect();
+        if (!m.egg) {
+            char lv[24];
+            snprintf(lv, sizeof lv, TR("Lv. %d", "Nv. %d"), m.level);
+            text(dl, F_LABEL, 13, cx + (cw - text_size(F_LABEL, 13, lv).x) / 2, y + cw + 12, C_TEAL, lv);
+        }
+    }
+    return 26 + ch;
+}
+
 extern "C" void launcher_run(const char *root) {
     g_root = root;
     g_start_screen = 1;
@@ -2166,6 +2421,8 @@ extern "C" void launcher_run(const char *root) {
                         g_src.clear();
                         pthread_mutex_unlock(&g_lock);
                     }
+                    party_icons_kick();
+                    party_panel(dl, x, ty + 68 + 34, w);
                     if (g_play_pending) pressed = true, g_play_pending = false;
                     if (pressed) {  // first PLAY ever: the aspect ratio question, then how to reach our menu
                         if (!g_settings.aspect_asked) ImGui::OpenPopup("##aspect");

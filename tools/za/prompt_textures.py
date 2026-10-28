@@ -19,7 +19,8 @@
 # The textures are read from your own game files (extracted/romfs/arc/data.trpfs: Oodle-compressed packs), which needs
 # ooz built as a library (https://github.com/powzix/ooz: g++ -O2 -shared -include sys/stat.h -Dmain=ooz_main
 # kraken.cpp bitknit.cpp lzna.cpp + a C export `int ooz_decompress(src, src_len, dst, dst_len)` calling
-# Kraken_Decompress) - pass it with --ooz. Needs Pillow, numpy and fontTools (and cffsubr, to make the fonts fit).
+# Kraken_Decompress) - pass it with --ooz. Needs Pillow, numpy and fontTools (and cffsubr, to make the fonts fit;
+# texture2ddecoder for --party-icons).
 # usage (from LASRecomp/): python tools/za/prompt_textures.py --ooz <ooz.dll> [--settings larecomp.ini]
 import argparse, ctypes, mmap, os, re, struct, sys
 import numpy as np
@@ -39,6 +40,7 @@ ap.add_argument('--out', default='textures/prompts')
 ap.add_argument('--scale', type=int, default=4)
 ap.add_argument('--font', default=None, help='bold TrueType font for the labels')
 ap.add_argument('--mods', default='mods', help="mods folder (runtime/services/fs.c): their UI archives' icons too")
+ap.add_argument('--party-icons', metavar='DIR', help="the Pokémon box icons into DIR as PNG (then make nothing else)")
 args = ap.parse_args()
 args.romfs = args.romfs or ['extracted/romfs' if os.path.isdir('extracted/romfs') else 'extracted/romfs.bin']
 FINAL = args.out
@@ -225,6 +227,60 @@ def decode_bc5(data, w, h, bh, fmt=0x1e01):  # -> float32 HxWx2 (label, shape) 0
             img[y * 4:y * 4 + 4, x * 4:x * 4 + 4, 0] = np.array(bc4(lin[o:o + 8])).reshape(4, 4)
             img[y * 4:y * 4 + 4, x * 4:x * 4 + 4, 1] = np.array(bc4(lin[o + 8:o + 16])).reshape(4, 4)
     return img[:h, :w] / 255.0
+
+
+# ------------------------------------------------------------------ party icons (--party-icons)
+# The start screen's "Your team" (runtime/ui/launcher.mm): the game's own box icons, pm<model>_<form>_00_00_<0|1>
+# (0 normal, 1 shiny; 160x160 BC7, top-level BNTX files in the packs), as small PNGs. <model> is the game's model
+# number: the National Dex one up to Gen 5, Kalos in X / Y's development order (0701...) - the start screen maps it.
+def deswizzle_np(src, wb, hb, bpb, bh_log2):  # deswizzle() with numpy: the same offsets, one gather
+    gob_h, row = 8 << bh_log2, wb * bpb
+    y, x = np.mgrid[0:hb, 0:row]
+    by, byo = divmod(y, gob_h)
+    gy, gyo = divmod(byo, 8)
+    gx, gxo = divmod(x, 64)
+    o = (by * ((row + 63) // 64) + gx) * gob_h * 64 + gy * 512 + (gxo // 32) * 256 + (gyo // 2) * 64 + \
+        ((gxo % 32) // 16) * 32 + (gyo % 2) * 16 + gxo % 16
+    a = np.frombuffer(src, np.uint8)
+    return np.where(o < len(a), a[np.minimum(o, len(a) - 1)], 0).astype(np.uint8).tobytes()
+
+
+if args.party_icons:
+    import texture2ddecoder
+    os.makedirs(args.party_icons, exist_ok=True)
+    rx, made = re.compile(r'^pm\d{4}_\d\d_00_00_[01]$'), 0
+    for romfs in args.romfs:
+        m = open_game(romfs)[0]
+        fb = FB(m)
+        root = fb.u64(8)
+        n, op = fb.vec(fb.table(root + fb.u32(root))[1])
+        for i in range(n):
+            off = fb.u64(op + 8 * i)
+            nf, fp = fb.vec(fb.table(off + fb.u32(off))[1])
+            for j in range(nf):
+                e = fp + 4 * j
+                ft = fb.table(e + fb.u32(e))
+                comp = m[ft[1]] if len(ft) > 1 and ft[1] else 0xFF
+                size = fb.u64(ft[3]) if len(ft) > 3 and ft[3] else 0
+                if size > 1 << 20: continue  # (an icon file is ~30 KB: the big ones aren't worth unpacking)
+                dn, dp = fb.vec(ft[4])
+                try:
+                    d = unpack(comp, size, m[dp:dp + dn])
+                except ValueError:
+                    continue
+                if d[:4] != b'BNTX': continue
+                for name, w, h, fmt, bh, data in bntx_textures(d):
+                    name = name.split('^')[0]
+                    if not rx.match(name) or (fmt >> 8) != 0x20: continue  # (BC7)
+                    wb, hb = (w + 3) // 4, (h + 3) // 4
+                    raw = texture2ddecoder.decode_bc7(deswizzle_np(data, wb, hb, 16, bh), wb * 4, hb * 4)
+                    im = Image.frombytes('RGBA', (wb * 4, hb * 4), raw, 'raw', 'BGRA').crop((0, 0, w, h))
+                    im.resize((96, 96), Image.LANCZOS).save(os.path.join(args.party_icons, name + '.png'))
+                    made += 1
+    print('party icons:', made, flush=True)
+    if made:
+        with open(os.path.join(args.party_icons, '.made'), 'w') as f: f.write('%d\n' % made)
+    sys.exit(0 if made else 1)
 
 
 # ------------------------------------------------------------------ labels
