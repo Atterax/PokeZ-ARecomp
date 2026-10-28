@@ -3122,7 +3122,8 @@ void maxwell_disassemble(const uint8_t *code, size_t max_size, int stage, void *
 // time it was before emptied them with every update: a session of translation hitches); builds without it (tools,
 // tests) use their build time. A program with a BRX (its
 // jump table is read from past the code) or a header past max_size, and the debug switches, go uncached. On when the
-// runtime sets maxwell_disk_cache (not in the tools and tests); LARECOMP_NO_TRANSLATE_CACHE=1: off.
+// runtime sets maxwell_disk_cache (not in the tools and tests); LARECOMP_NO_TRANSLATE_CACHE=1: off (and with
+// LARECOMP_SHADER_FLAT set, which changes the translations without changing the key).
 // (called under the runtime's translate lock, as the translator itself)
 bool maxwell_disk_cache;
 #ifdef SHADER_TRANSLATOR_ID
@@ -3161,7 +3162,8 @@ static uint64_t cache_key(const uint8_t *blob, size_t max_size, int stage, const
     static int on = -1;
     if (on < 0) {
         on = maxwell_disk_cache && !getenv("LARECOMP_NO_TRANSLATE_CACHE") && !getenv("LARECOMP_NO_DISCARD") &&
-             !getenv("LARECOMP_LANE_COMPUTE_ONLY") && !getenv("LARECOMP_BRX_ALL_LABELS") && !getenv("LARECOMP_SAVE_MSL");
+             !getenv("LARECOMP_LANE_COMPUTE_ONLY") && !getenv("LARECOMP_BRX_ALL_LABELS") && !getenv("LARECOMP_SAVE_MSL") &&
+             !getenv("LARECOMP_SHADER_FLAT");  // (its translations aren't in the key: a kill switch must translate)
         if (on) cache_open();
     }
     if (!on || !key || maxwell_dbg_code || maxwell_dbg_vs) return 0;
