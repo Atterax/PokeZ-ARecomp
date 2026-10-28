@@ -642,7 +642,10 @@ bool plat_remove_tree(const char *dir) {
 }
 
 // End the process at once, skipping DLL teardown (from an atexit handler, after flushing). Exit status 0.
-void plat_terminate(void) { TerminateProcess(GetCurrentProcess(), 0); }
+void plat_terminate(void) {  // (exit()'s last handler, runtime/nvn/vulkan/device.c: the others registered after
+    run_end();                 // ours never run - so the run's end is marked here)
+    TerminateProcess(GetCurrentProcess(), 0);
+}
 
 // stderr still the console (no redirect: started by a double click) - main.c then logs to a file
 int rt_stderr_is_console(void) {

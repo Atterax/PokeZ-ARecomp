@@ -694,7 +694,7 @@ static void ui_watch(void) {
 // A stuck game (#38: the log just stopped, the window frozen): no frame shown for 20 s while the window is up (not
 // minimized) - said in the log, with where every thread is (plat_dump_threads), once per stall; and when
 // frames come back. LARECOMP_HANG_S=<seconds> (0: off; -<seconds>: (test) the dump once, that long after the start).
-uint64_t vk_frame_counter(void);
+static _Atomic uint64_t g_window_frames;  // (every frame shown: the game's and the start screen's, vk_frame_end)
 static int hang_watch(void *arg) {
     (void)arg;
     double limit = ENV("LARECOMP_HANG_S") ? atof(ENV("LARECOMP_HANG_S")) : 20;
@@ -711,7 +711,7 @@ static int hang_watch(void *arg) {
     bool told = false;
     for (;;) {
         SDL_Delay(1000);
-        uint64_t f = vk_frame_counter(), now = SDL_GetTicksNS();
+        uint64_t f = atomic_load(&g_window_frames), now = SDL_GetTicksNS();
         bool away = window && (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED);
         if (f != last || away) {
             if (told) LOG("[hang] frames again after %.0f s\n", (now - since) / 1e9);
@@ -749,6 +749,7 @@ void vk_frame_end(const char *shot_path) {
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) recreate_swapchain();
     else if (r == VK_SUCCESS) present_watch(id);
+    atomic_fetch_add(&g_window_frames, 1);
     ui_watch();
     static bool hw_started;
     if (!hw_started) {
