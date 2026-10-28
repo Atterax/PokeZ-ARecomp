@@ -263,7 +263,8 @@ static const char *fail_head(int k, bool pt) {
 static const char *fail_hint(int k, bool pt) {
     static const char *const en[] = {
         "",
-        "Choose the folder that holds your Pok\xc3\xa9mon Legends Z-A dump (.xci / .nsp) and your prod.keys.",
+        "Choose the folder with your Pok\xc3\xa9mon Legends Z-A game extracted (exefs and romfs folders), or with your "
+        "dump (.xci / .nsp) and your prod.keys.",
         "Pok\xc3\xa9mon Legends Z-A's base game isn't among those files. Choose the folder with your own dump.",
         "Make sure there's about 12 GB free and try again.",
         "ZA Recomp runs versions 1.0.0 and 2.0.0 of the game (base game, or base game + the 2.0.0 update).",
@@ -274,7 +275,8 @@ static const char *fail_hint(int k, bool pt) {
         "The full reason is in lasrecomp.log next to the program."};
     static const char *const ptb[] = {
         "",
-        "Escolha a pasta com o seu dump de Pokémon Legends Z-A (.xci / .nsp) e o seu prod.keys.",
+        "Escolha a pasta com o seu Pokémon Legends Z-A extraído (pastas exefs e romfs), ou com o seu dump (.xci / .nsp) "
+        "e o seu prod.keys.",
         "O jogo base de Pokémon Legends Z-A não está entre esses arquivos. Escolha a pasta com o seu próprio dump.",
         "Veja se há uns 12 GB livres e tente de novo.",
         "O ZA Recomp roda as versões 1.0.0 e 2.0.0 do jogo (jogo base, ou jogo base + atualização 2.0.0).",
@@ -296,12 +298,13 @@ static bool is_dir(const std::string &p) {
     return stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 }
 
-// exefs: the folder with main and main.npdm; romfs: the folder with region_common (the game's data root). Found
-// in the picked folder or a few levels below it (some folder layouts nest them).
+// exefs: the folder with main and main.npdm; romfs: the folder with region_common (Link's Awakening's data root) or
+// arc/data.trpfs (Pokémon Z-A's: its packs). Found in the picked folder or a few levels below it (some folder layouts
+// nest them).
 static void find_game(const std::string &dir, int depth, std::string &exefs, std::string &romfs, bool &unusable) {
     if (depth > 4 || (!exefs.empty() && !romfs.empty())) return;
     if (exefs.empty() && file_exists(dir + "/main") && file_exists(dir + "/main.npdm")) exefs = dir;
-    if (romfs.empty() && is_dir(dir + "/region_common")) romfs = dir;
+    if (romfs.empty() && (is_dir(dir + "/region_common") || file_exists(dir + "/arc/data.trpfs"))) romfs = dir;
     DIR *d = opendir(dir.c_str());
     if (!d) return;
     std::vector<std::string> sub;
@@ -311,7 +314,7 @@ static void find_game(const std::string &dir, int depth, std::string &exefs, std
         std::string ext = n.size() > 4 ? n.substr(n.size() - 4) : "";
         for (auto &ch : ext) ch = (char)tolower((unsigned char)ch);
         if (ext == ".xci" || ext == ".nsp" || ext == ".nca" || ext == ".nsz" || ext == ".xcz") unusable = true;
-        if (n != "region_common" && is_dir(dir + "/" + n)) sub.push_back(dir + "/" + n);
+        if (n != "region_common" && n != "arc" && is_dir(dir + "/" + n)) sub.push_back(dir + "/" + n);
     }
     closedir(d);
     std::sort(sub.begin(), sub.end());
@@ -680,18 +683,24 @@ static void *extract_thread(void *) {
         }
         rt_remove_game_files(g_root.c_str());  // (an earlier or interrupted setup's; removes the folder too)
         mkdir(g_root.c_str(), 0755);
+        // Pokémon Z-A, extracted by the player (no keys needed here: exefs/ + romfs/ as an emulator or the Switch
+        // dumps them): the data image straight from their romfs/, no copy of it first (6 GB less; the game reads
+        // only romfs.bin)
+        uint8_t id[8];
+        bool za = read_build_id(exefs + "/main", id) && build_is_za(id);
         unsigned long long rbytes = romfs_dir_bytes(romfs.c_str());
-        g_total = 2 * rbytes;
+        g_total = za ? rbytes : 2 * rbytes;
         set_job("Copying the game files...");
         if (!romfs_copy_tree(exefs.c_str(), (g_root + "/exefs").c_str(), NULL) ||
-            !romfs_copy_tree(romfs.c_str(), (g_root + "/romfs").c_str(), setup_progress)) {
+            (!za && !romfs_copy_tree(romfs.c_str(), (g_root + "/romfs").c_str(), setup_progress))) {
             set_failure(FAIL_COPY);
             goto done;
         }
-        g_phase_base = rbytes, g_done = rbytes;
+        if (!za) g_phase_base = rbytes, g_done = rbytes;
         set_job("Building the game data image...");
         char why[256] = "";
-        if (!romfs_build((g_root + "/romfs").c_str(), (g_root + "/romfs.bin").c_str(), setup_progress, why, sizeof why)) {
+        if (!romfs_build(za ? romfs.c_str() : (g_root + "/romfs").c_str(), (g_root + "/romfs.bin").c_str(), setup_progress,
+                         why, sizeof why)) {
             fprintf(stderr, "[launcher] romfs image: %s\n", why);
             set_failure(FAIL_COPY);
             goto done;
@@ -2320,7 +2329,7 @@ extern "C" void launcher_run(const char *root) {
                     dl->AddRectFilled(P(x + 24, by), P(x + w - 24, by + 12), IM_COL32(255, 255, 255, 22), 6 * g_s);
                     if (f > 0) dl->AddRectFilledMultiColor(P(x + 24, by), P(x + 24 + (w - 48) * f, by + 12), C_TEAL, C_GOLD,
                                                            C_GOLD, C_TEAL);
-                    const char *steps[3] = {TR("Read the .nsp / .xci with your keys", "Ler o .nsp / .xci com as suas chaves"),
+                    const char *steps[3] = {TR("Read your game files", "Ler os seus arquivos do jogo"),
                                             TR("Compile the game's code (the longest part)", "Compilar o código do jogo (a parte mais demorada)"),
                                             TR("Draw the button icons", "Desenhar os ícones dos botões")};
                     for (int i = 0; i < 3; i++) {
@@ -2351,12 +2360,18 @@ extern "C" void launcher_run(const char *root) {
                              "are already here: only the code is compiled again (a few minutes).",
                              "Esta versão do ZA Recomp compila o código do jogo de um jeito um pouco diferente. Os seus "
                              "arquivos do jogo já estão aqui: só o código é compilado de novo (alguns minutos).")
-                        : TR("Choose the folder with your own dump of Pokémon Legends Z-A: the base game (.xci or .nsp), "
-                             "optionally the update and the DLC (.nsp), and the prod.keys from your Switch. You can also "
-                             "drop the folder on this window. The game isn't included with ZA Recomp.",
-                             "Escolha a pasta com o seu próprio dump de Pokémon Legends Z-A: o jogo base (.xci ou .nsp), "
-                             "se quiser a atualização e a DLC (.nsp), e o prod.keys do seu Switch. Também dá para arrastar "
-                             "a pasta para esta janela. O jogo não vem com o ZA Recomp.");
+                        : TR("Choose the folder with your own copy of Pokémon Legends Z-A, either way:\n"
+                             "· the game extracted (exefs and romfs folders, as an emulator or your Switch extracts them): "
+                             "no keys needed;\n"
+                             "· or your dump: the base game (.xci or .nsp), optionally the update and the DLC (.nsp), and "
+                             "the prod.keys from your Switch.\n"
+                             "You can also drop the folder on this window. The game isn't included with ZA Recomp.",
+                             "Escolha a pasta com a sua própria cópia de Pokémon Legends Z-A, de um destes jeitos:\n"
+                             "· o jogo extraído (pastas exefs e romfs, como um emulador ou o seu Switch extraem): sem "
+                             "precisar de keys;\n"
+                             "· ou o seu dump: o jogo base (.xci ou .nsp), se quiser a atualização e a DLC (.nsp), e o "
+                             "prod.keys do seu Switch.\n"
+                             "Também dá para arrastar a pasta para esta janela. O jogo não vem com o ZA Recomp.");
                     float ty = 196 + text(dl, F_BODY, 16, x, 196, C_SOFT, what, w).y + 22;
                     if (!rebuild) {
                         panel(dl, x, ty, w, 64, C_PANEL);
