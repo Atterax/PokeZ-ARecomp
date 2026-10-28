@@ -33,6 +33,7 @@ Settings g_settings = {
     .menu_confirm = MENU_CONFIRM_CONTROLLER,
     .show_fps = false,
     .tex_hd = true,
+    .gtao_strength = 100,
     .inv_keys = true,
     .tracker = true,
     .tracker_filters = -1,
@@ -170,6 +171,8 @@ void settings_load(void) {
         else if (!strcmp(key, "operation_mode")) g_settings.opmode = !strcmp(val, "handheld") ? 2 : !strcmp(val, "docked") ? 1 : 0;
         else if (!strcmp(key, "dynamic_res")) g_settings.game_drs = !strcmp(val, "game");
         else if (!strcmp(key, "tex_hd")) g_settings.tex_hd = atoi(val) != 0;
+        else if (!strcmp(key, "ambient_occlusion")) { int v = atoi(val); g_settings.gtao = v < 0 ? 0 : v > 3 ? 3 : v; }
+        else if (!strcmp(key, "ambient_occlusion_strength")) { int v = atoi(val); g_settings.gtao_strength = v < 25 ? 25 : v > 100 ? 100 : v; }
         else if (!strcmp(key, "tex_dump")) g_settings.tex_dump = atoi(val) != 0;
         else if (!strcmp(key, "resolution")) {  // (auto: never chosen, the GPU's default)
             int n = atoi(val);
@@ -275,6 +278,8 @@ void settings_save(void) {
     fprintf(f, "operation_mode = %s\n", g_settings.opmode == 2 ? "handheld" : g_settings.opmode == 1 ? "docked" : "auto");
     fprintf(f, "dynamic_res = %s\n", g_settings.game_drs ? "game" : "off");
     fprintf(f, "tex_hd = %d\n", g_settings.tex_hd);
+    fprintf(f, "ambient_occlusion = %d\n", g_settings.gtao);
+    fprintf(f, "ambient_occlusion_strength = %d\n", g_settings.gtao_strength);
     fprintf(f, "tex_dump = %d\n", g_settings.tex_dump);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler_auto ? "auto" : g_settings.upscaler == UPSCALE_METALFX ? "metalfx" :
                                    g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");
