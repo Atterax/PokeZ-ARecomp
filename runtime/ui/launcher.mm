@@ -1855,7 +1855,9 @@ static void party_icons_kick(void) {  // made when missing (3 tries: cache/party
     char tool[1100];
     if (asked) return;
     asked = true;
-    if (file_exists(PARTY_ICONS "/.made") || !file_exists(g_root + "/romfs.bin") ||
+    // (the game's data: the RomFS image the setup makes, else a romfs/ folder extracted by the player)
+    std::string romfs = file_exists(g_root + "/romfs.bin") ? g_root + "/romfs.bin" : g_root + "/romfs";
+    if (file_exists(PARTY_ICONS "/.made") || !file_exists(romfs + (is_dir(romfs) ? "/arc/data.trpfs" : "")) ||
         !rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool))
         return;
     int tries = 0;
@@ -1863,7 +1865,6 @@ static void party_icons_kick(void) {  // made when missing (3 tries: cache/party
     if (tries >= 3) return;
     mkdir("cache", 0755);
     if (FILE *f = fopen(PARTY_ICONS ".tried", "wb")) fprintf(f, "%d", tries + 1), fclose(f);
-    std::string romfs = g_root + "/romfs.bin";
     const char *argv[] = {tool, "--romfs", romfs.c_str(), "--party-icons", PARTY_ICONS, NULL};
     g_party_icons_proc = plat_spawn(argv, PARTY_ICONS ".log", false);
     fprintf(stderr, "[launcher] team icons: %s\n", g_party_icons_proc ? "being made (" PARTY_ICONS ".log)" : "zaprompts didn't start");
