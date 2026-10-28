@@ -41,6 +41,7 @@ typedef struct Co {
     void *stack;
 #endif
     Cpu *cpu;
+    Cpu *own_cpu;  // the Cpu made for this fiber (cpu may be a thread's own instead: never freed here)
     int started;
     atomic_int busy;  // a host thread runs on this fiber (or is still leaving it)
 } Co;
@@ -81,8 +82,8 @@ RT_ON_RESET(fiber_reset) {
 #else
         if (fibers[i]->stack) munmap(fibers[i]->stack, CO_STACK);
 #endif
-        free(fibers[i]->cpu);
-        free(fibers[i]);
+        free(fibers[i]->own_cpu);  // (not cpu: a thread's own Cpu, from its first switch - freeing it corrupted the
+        free(fibers[i]);           // heap, and going back to the start screen ended the game without a word)
     }
     ncos = 0;
 }
@@ -156,7 +157,7 @@ HLE_FUNC("_ZN2nn2os6detail20DispatchFiberContextEPPNS1_22FiberContextForHorizonE
     me->started = 1;
     atomic_store(&me->busy, 1);  // (running on it: already so when we got here through a trampoline)
     if (!dst->cpu) {
-        dst->cpu = calloc(1, sizeof(Cpu));  // (16-byte aligned on the 64-bit hosts)
+        dst->cpu = dst->own_cpu = calloc(1, sizeof(Cpu));  // (16-byte aligned on the 64-bit hosts)
     }
     identity(dst->cpu, c);
     bool fresh = !dst->started;

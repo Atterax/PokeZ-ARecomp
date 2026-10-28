@@ -1149,6 +1149,43 @@ static void ui_watch(void) {
 #endif
 }
 
+// A stuck game (#38: the log just stopped, the window frozen): no frame shown for 20 s while the window is up (not
+// minimized) - said in the log, with where every thread is (plat_dump_threads), once per stall; and when
+// frames come back. LARECOMP_HANG_S=<seconds> (0: off; -<seconds>: (test) the dump once, that long after the start).
+static _Atomic uint64_t g_window_frames;  // (every frame shown: the game's and the start screen's, vk_frame_end)
+static int hang_watch(void *arg) {
+    (void)arg;
+    double limit = ENV("LARECOMP_HANG_S") ? atof(ENV("LARECOMP_HANG_S")) : 20;
+    if (limit < 0) {
+        SDL_Delay((uint32_t)(-limit * 1000));
+        LOG("[hang] (test) where each thread is:\n");
+#ifdef _WIN32
+        plat_dump_threads();
+#endif
+        return 0;
+    }
+    if (limit == 0) return 0;
+    uint64_t last = 0, since = SDL_GetTicksNS();
+    bool told = false;
+    for (;;) {
+        SDL_Delay(1000);
+        uint64_t f = atomic_load(&g_window_frames), now = SDL_GetTicksNS();
+        bool away = window && (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED);
+        if (f != last || away) {
+            if (told) LOG("[hang] frames again after %.0f s\n", (now - since) / 1e9);
+            last = f, since = now, told = false;
+            continue;
+        }
+        if (told || now - since < (uint64_t)(limit * 1e9)) continue;
+        told = true;
+        LOG("[hang] no new frame for %.0f s (frame %llu): the game looks stuck - where each thread is:\n", limit,
+            (unsigned long long)f);
+#ifdef _WIN32
+        plat_dump_threads();
+#endif
+    }
+}
+
 // End rendering into the window image and present it. shot_path: also save the window image as PNG.
 void vk_frame_end(const char *shot_path) {
     if (!cur_frame.ok) return;
@@ -1166,7 +1203,14 @@ void vk_frame_end(const char *shot_path) {
     // watch runs there too, after it (vk_present_watch); what it finds is acted on here.
     static uint64_t present_id;  // (VK_KHR_present_id: increasing over all swapchains)
     rec_QueuePresentKHR(done_sem[img], g_vk.swapchain, img, g_present_wait ? ++present_id : 0);
+    atomic_fetch_add(&g_window_frames, 1);
     ui_watch();
+    static bool hw_started;
+    if (!hw_started) {
+        hw_started = true;
+        SDL_Thread *t = SDL_CreateThread(hang_watch, "hangwatch", NULL);
+        if (t) SDL_DetachThread(t);
+    }
     static bool sw_started;
     if (!sw_started) {
         sw_started = true;

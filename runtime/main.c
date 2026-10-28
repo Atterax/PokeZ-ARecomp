@@ -65,6 +65,9 @@ static void log_system(void) {
 #endif
     LOG("[system] ZA Recomp %s | %s | CPU: %s (%d threads%s) | RAM %d GB\n", rt_version(), os, cpu,
         SDL_GetNumLogicalCPUCores(), feat, (SDL_GetSystemRAM() + 512) / 1024);
+#ifdef _WIN32
+    plat_run_begin();
+#endif
 }
 
 // rtld normally passes these to nn::init::Start: run every module's init/fini arrays.
@@ -262,7 +265,7 @@ static void log_startup_info(void) {
     char ram[32] = "RAM unknown";
     if (si.ram && tenths % 10) snprintf(ram, sizeof ram, "%llu.%llu GB RAM", tenths / 10, tenths % 10);
     else if (si.ram) snprintf(ram, sizeof ram, "%llu GB RAM", tenths / 10);
-    fprintf(stderr, "[info] LAS Recomp %s, %s, %s%s, %s%s%s\n", larecomp_version(), si.os[0] ? si.os : "unknown OS",
+    fprintf(stderr, "[info] ZA Recomp %s, %s, %s%s, %s%s%s\n", larecomp_version(), si.os[0] ? si.os : "unknown OS",
             si.cpu[0] ? si.cpu : "unknown CPU", cores, ram, si.package ? ", " : "", si.package ? si.package : "");
 }
 
