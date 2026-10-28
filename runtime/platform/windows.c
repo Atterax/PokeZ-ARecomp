@@ -8,6 +8,8 @@
 #include <shellapi.h>
 #include <timeapi.h>
 #include <io.h>
+#include <direct.h>
+#include <ctype.h>
 
 #include "../platform.h"
 
@@ -151,7 +153,9 @@ static void require_cpu(void) {
 }
 
 // Fatal error (rt_fatal_trace): the last FATAL / exception line of the log in a message box, when there is no console.
+static void run_end(void);
 void plat_fatal_notice(void) {
+    run_end();
     if (!g_log_path[0]) return;
     fflush(stderr);
     char text[1024] = "ZA Recomp stopped because of an error.";
@@ -314,6 +318,7 @@ void plat_exec(char *const argv[]) {
     if (!ok) return;
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
+    run_end();  // (an end the log tells; the new process marks its own run)
     ExitProcess(0);
 }
 
@@ -361,6 +366,7 @@ static LONG WINAPI unhandled_filter(EXCEPTION_POINTERS *ep) {
     MEMORY_BASIC_INFORMATION mi;
     if (VirtualQuery((void *)(uintptr_t)ep->ContextRecord->Rsp, &mi, sizeof mi) && mi.State == MEM_COMMIT)
         lr = *(uint64_t *)(uintptr_t)ep->ContextRecord->Rsp;
+    run_end();  // (the log has the report: not an end without a word)
     rt_fault_report(what, fa, ep->ContextRecord->Rip, lr);
 }
 
@@ -370,6 +376,151 @@ void plat_crash_handler_install(void) {
     if (g_report_crashes) return;
     g_report_crashes = true;
     SetUnhandledExceptionFilter(unhandled_filter);
+}
+
+// ---- a stuck game, a silent end (#38: play.log just stopped - frozen and closed from the Task Manager, or ended by
+// Windows without our crash report: heap corruption, a fail-fast)
+// plat_dump_threads (runtime/nvn/vulkan/device.c hang_watch: no frame for a while): every other thread's place, into
+// the log - its instruction and the code addresses on its stack (a scan, not an unwind: the stack is read with
+// ReadProcessMemory, which can't fault, and nothing that could take a lock runs while a thread is suspended).
+// Frames in the game code are named by their guest function (rt_host_fn_name).
+void plat_dump_threads(void) {
+    HMODULE exe = GetModuleHandleA(NULL), game = GetModuleHandleA("lasgame.dll");
+    typedef HRESULT(WINAPI * GetDescFn)(HANDLE, PWSTR *);
+    GetDescFn get_desc = (GetDescFn)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetThreadDescription");
+    DWORD me = GetCurrentThreadId(), pid = GetCurrentProcessId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    THREADENTRY32 te = {.dwSize = sizeof te};
+    static uint64_t stack[4096];  // (32 KB of each stack: the frames nearest the top)
+    int threads = 0;
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != pid || te.th32ThreadID == me) continue;
+        HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION, FALSE,
+                              te.th32ThreadID);
+        if (!h) continue;
+        CONTEXT ctx = {.ContextFlags = CONTEXT_CONTROL};
+        size_t words = 0;
+        bool got = false;
+        if (SuspendThread(h) != (DWORD)-1) {
+            if ((got = GetThreadContext(h, &ctx)))  // (a page at a time, up to the first that can't be read: the top)
+                for (uint64_t a = ctx.Rsp & ~7ull; words < 4096;) {
+                    size_t chunk = (size_t)((4096 - (a & 4095)) / 8);
+                    if (chunk > 4096 - words) chunk = 4096 - words;
+                    SIZE_T n = 0;
+                    if (!ReadProcessMemory(GetCurrentProcess(), (void *)(uintptr_t)a, stack + words, chunk * 8, &n) ||
+                        n != chunk * 8)
+                        break;
+                    words += chunk, a += chunk * 8;
+                }
+            ResumeThread(h);
+        }
+        char name[64] = "";
+        PWSTR desc = NULL;
+        if (get_desc && SUCCEEDED(get_desc(h, &desc)) && desc) {
+            WideCharToMultiByte(CP_UTF8, 0, desc, -1, name, sizeof name, NULL, NULL);
+            LocalFree(desc);
+        }
+        CloseHandle(h);
+        if (!got) continue;
+        threads++;
+        char line[1024];
+        int len = snprintf(line, sizeof line, "[hang] thread %lu%s%s%s:", te.th32ThreadID, *name ? " (" : "", name,
+                           *name ? ")" : "");
+        int shown = 0;
+        for (size_t i = 0; i <= words && shown < 10 && len < (int)sizeof line - 96; i++) {
+            uint64_t pc = i == 0 ? ctx.Rip : stack[i - 1];
+            if (pc >= g_lo && pc < g_hi) continue;  // (guest memory: never code, and VirtualQuery is slow on it)
+            HMODULE m = NULL;
+            if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                    (LPCSTR)(uintptr_t)pc, &m))
+                continue;
+            MEMORY_BASIC_INFORMATION mi;
+            if (!VirtualQuery((void *)(uintptr_t)pc, &mi, sizeof mi) ||
+                !(mi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
+                continue;
+            uint64_t off = 0;
+            const char *s = m == exe || m == game ? rt_host_fn_name(pc, &off) : plat_symbol(pc, &off);
+            if (s) len += snprintf(line + len, sizeof line - len, " %s+%llx", s, (unsigned long long)off);
+            else len += snprintf(line + len, sizeof line - len, " %s+%llx", m == game ? "lasgame" : "lasrecomp",
+                                 (unsigned long long)(pc - (uint64_t)(uintptr_t)m));
+            shown++;
+        }
+        fprintf(stderr, "%s\n", line);
+    }
+    CloseHandle(snap);
+    fprintf(stderr, "[hang] %d threads\n", threads);
+    fflush(stderr);
+}
+
+// The last run's end: cache/running holds a run's process id from its start (plat_run_begin) until it ends in a way
+// the log tells (a closed window, back to the start screen, our crash report). Still there at the next start: that
+// run ended without a word, and what Windows' event log recorded about it (Application Error / Hang: the exception and
+// the module) goes into this log.
+static void run_end(void) { remove("cache/running"); }
+
+static void last_run_report(unsigned long pid) {
+    typedef HANDLE(WINAPI * QueryFn)(HANDLE, LPCWSTR, LPCWSTR, DWORD);
+    typedef BOOL(WINAPI * NextFn)(HANDLE, DWORD, HANDLE *, DWORD, DWORD, DWORD *);
+    typedef BOOL(WINAPI * RenderFn)(HANDLE, HANDLE, DWORD, DWORD, PVOID, DWORD *, DWORD *);
+    typedef BOOL(WINAPI * CloseFn)(HANDLE);
+    HMODULE w = LoadLibraryA("wevtapi.dll");
+    QueryFn query = w ? (QueryFn)(void *)GetProcAddress(w, "EvtQuery") : NULL;
+    NextFn next = w ? (NextFn)(void *)GetProcAddress(w, "EvtNext") : NULL;
+    RenderFn render = w ? (RenderFn)(void *)GetProcAddress(w, "EvtRender") : NULL;
+    CloseFn evt_close = w ? (CloseFn)(void *)GetProcAddress(w, "EvtClose") : NULL;
+    bool found = false;
+    HANDLE q = query && next && render && evt_close
+        ? query(NULL, L"Application",
+                L"*[System[(EventID=1000 or EventID=1002) and TimeCreated[timediff(@SystemTime) <= 604800000]]]",
+                0x1 | 0x200)  // (EvtQueryChannelPath | EvtQueryReverseDirection: the newest first)
+        : NULL;
+    static wchar_t xml[16384];
+    static char s[32768];
+    char want[32];
+    snprintf(want, sizeof want, ">0x%lx<", pid);  // (<Data Name='ProcessId'>0x1a2b</Data>)
+    HANDLE ev;
+    DWORD got;
+    for (int seen = 0; q && !found && seen < 200 && next(q, 1, &ev, 1000, 0, &got) && got; seen++) {
+        DWORD used = 0, props = 0;
+        if (render(NULL, ev, 1 /* EvtRenderEventXml */, sizeof xml - 2, xml, &used, &props)) {
+            WideCharToMultiByte(CP_UTF8, 0, xml, -1, s, sizeof s, NULL, NULL);
+            for (char *c = s; *c; c++) *c = (char)tolower((unsigned char)*c);
+            if (strstr(s, "lasrecomp") && strstr(s, want)) {
+                found = true;
+                char out[1024];
+                int n = snprintf(out, sizeof out, "[system] the last run (process %lu) ended without a report; Windows "
+                                 "recorded %s", pid, strstr(s, "<eventid>1002<") ? "it not responding (a hang)" : "a crash");
+                static const char *const keys[] = {"modulename", "exceptioncode", "faultingoffset"};
+                for (int k = 0; k < 3; k++) {
+                    char tag[48];
+                    snprintf(tag, sizeof tag, "name='%s'>", keys[k]);
+                    const char *v = strstr(s, tag);
+                    if (!v) continue;
+                    v += strlen(tag);
+                    n += snprintf(out + n, sizeof out - n, ", %s %.*s", keys[k], (int)strcspn(v, "<"), v);
+                }
+                fprintf(stderr, "%s\n", out);
+            }
+        }
+        evt_close(ev);
+    }
+    if (q) evt_close(q);
+    if (!found)
+        fprintf(stderr, "[system] the last run (process %lu) ended without a report: closed from the Task Manager, a "
+                        "power loss, or ended by Windows (nothing on it in Windows' event log)\n", pid);
+}
+
+void plat_run_begin(void) {
+    _mkdir("cache");
+    FILE *f = fopen("cache/running", "rb");
+    unsigned long last = 0;
+    if (f) {
+        if (fscanf(f, "%lu", &last) != 1) last = 0;
+        fclose(f);
+        if (last) last_run_report(last);
+    }
+    if ((f = fopen("cache/running", "wb"))) fprintf(f, "%lu\n", GetCurrentProcessId()), fclose(f);
+    atexit(run_end);
 }
 
 // ---- POSIX shims (win_compat.h)

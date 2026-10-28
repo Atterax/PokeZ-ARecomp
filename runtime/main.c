@@ -64,6 +64,9 @@ static void log_system(void) {
 #endif
     LOG("[system] ZA Recomp %s | %s | CPU: %s (%d threads%s) | RAM %d GB\n", rt_version(), os, cpu,
         SDL_GetNumLogicalCPUCores(), feat, (SDL_GetSystemRAM() + 512) / 1024);
+#ifdef _WIN32
+    plat_run_begin();
+#endif
 }
 
 // rtld normally passes these to nn::init::Start: run every module's init/fini arrays.

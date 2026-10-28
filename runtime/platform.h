@@ -70,6 +70,10 @@ const char *plat_symbol(uint64_t pc, uint64_t *offset);
 void plat_print_backtrace(void);
 void plat_fatal_notice(void);  // a fatal error is about to end the process: tell the user (Windows release: message box)
 void plat_crash_handler_install(void);  // per thread where the OS needs it (alternate signal stack)
+#ifdef _WIN32
+void plat_dump_threads(void);  // into the log: where every other thread is (a stuck game)
+void plat_run_begin(void);     // the last run ended without a word: what Windows recorded, into the log
+#endif
 // What the screen shows in a window (Windows: a hash of 32x18 samples of the desktop over its client area, while it
 // is the foreground window; false: can't tell)
 bool plat_window_screen_hash(void *hwnd, uint32_t *out);
